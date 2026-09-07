@@ -1,0 +1,41 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+# typed: strict
+
+# Creates the test database if it is missing, then migrates it. Idempotent, so
+# it is safe to run on every container start.
+#
+# Deliberately does not require lib/boot: boot connects eagerly, and the whole
+# point of this script is the case where there is nothing to connect to yet.
+# CREATE DATABASE also cannot run from inside the database being created, hence
+# the separate connection to the always-present `postgres` maintenance database.
+
+require 'sequel'
+require 'uri'
+require 'sequel/extensions/migration'
+
+url = ENV.fetch('TEST_DATABASE_URL', 'postgres://money_flow:money_flow@localhost:5432/money_flow_test?sslmode=disable')
+uri = URI.parse(url)
+name = uri.path.to_s.delete_prefix('/')
+
+# The name is interpolated into DDL, which cannot be parameterised, so refuse
+# anything that isn't a plain identifier rather than quoting and hoping.
+raise "TEST_DATABASE_URL names an unusable database #{name.inspect}" unless /\A[a-z_][a-z0-9_]*\z/.match?(name)
+raise "refusing to treat #{name.inspect} as a test database: the name must end in _test" unless name.end_with?('_test')
+
+maintenance = uri.dup
+maintenance.path = '/postgres'
+
+Sequel.connect(maintenance.to_s) do |db|
+  if db[:pg_database].where(datname: name).any?
+    puts "setup_test_db: #{name} already exists"
+  else
+    db.run(%(CREATE DATABASE "#{name}"))
+    puts "setup_test_db: created #{name}"
+  end
+end
+
+Sequel.connect(url) do |db|
+  Sequel::Migrator.run(db, File.expand_path('../db/migrations', __dir__), table: :ruby_schema_migrations)
+  puts "setup_test_db: migrated #{name}"
+end

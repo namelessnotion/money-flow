@@ -36,6 +36,10 @@ services:
       dockerfile: docker/ruby/Dockerfile
     environment:
       DATABASE_URL: postgres://money_flow:money_flow@postgres:5432/money_flow_dev?sslmode=disable
+      # The suite asserts on whole-table queries, so it gets its own database
+      # rather than sharing development's; the entrypoint creates and migrates
+      # it on boot. See ruby/lib/boot.rb and ruby/bin/setup_test_db.
+      TEST_DATABASE_URL: postgres://money_flow:money_flow@postgres:5432/money_flow_test?sslmode=disable
       DB_HOST: postgres
       CORS_ALLOWED_ORIGIN: https://app.local.namelessnotion.com
       HOLDER_SERVICE_URL: http://go:8080/twirp
@@ -60,6 +64,12 @@ services:
       LISTEN_ADDR: ":8080"
       TIGERBEETLE_ADDRESS: tigerbeetle:3000
       TIGERBEETLE_CLUSTER_ID: "0"
+    # tb_client talks to TigerBeetle over io_uring, so the *client* needs the
+    # same seccomp exemption the server does — Docker's default profile blocks
+    # io_uring_setup/enter/register, and tb_client_init aborts the process
+    # rather than returning an error when it is denied.
+    security_opt:
+      - "seccomp=unconfined"
     depends_on:
       postgres:
         condition: service_healthy

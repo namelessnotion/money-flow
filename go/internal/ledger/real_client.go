@@ -3,10 +3,47 @@ package ledger
 import (
 	"context"
 	"fmt"
+	"net"
 	"uuid"
 
 	tb "github.com/tigerbeetle/tigerbeetle-go"
 )
+
+// netLookupIP is net.LookupIP behind a package variable so tests can reason
+// about what the resolver actually offered.
+var netLookupIP = net.LookupIP
+
+// resolveClusterAddress converts a host:port address into ip:port.
+// tigerbeetle-go parses cluster addresses itself and accepts only numeric
+// IPs — handing it a DNS name (a Docker Compose service name such as
+// "tigerbeetle:3000", say) fails with "invalid client cluster address" rather
+// than resolving it — so resolve here, at the one place that dials. An
+// already-numeric address is passed through untouched. IPv4 is preferred when
+// a host offers both, matching how TigerBeetle is routinely deployed.
+func resolveClusterAddress(addr string) (string, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", fmt.Errorf("ledger: tigerbeetle address %q must be host:port: %w", addr, err)
+	}
+	if net.ParseIP(host) != nil {
+		return addr, nil
+	}
+	ips, err := netLookupIP(host)
+	if err != nil {
+		return "", fmt.Errorf("ledger: resolve tigerbeetle host %q: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return "", fmt.Errorf("ledger: tigerbeetle host %q resolved to no addresses", host)
+	}
+	chosen := ips[0]
+	for _, ip := range ips {
+		if ip.To4() != nil {
+			chosen = ip
+			break
+		}
+	}
+	return net.JoinHostPort(chosen.String(), port), nil
+}
 
 // RealClient wraps the tigerbeetle-go client, translating between this
 // package's domain types and TigerBeetle's wire types.
@@ -19,7 +56,15 @@ var _ Client = (*RealClient)(nil)
 // NewRealClient dials TigerBeetle at the given addresses under the given
 // cluster id.
 func NewRealClient(clusterID uint64, addresses []string) (*RealClient, error) {
-	c, err := tb.NewClient(tb.ToUint128(clusterID), addresses)
+	resolved := make([]string, len(addresses))
+	for i, addr := range addresses {
+		r, err := resolveClusterAddress(addr)
+		if err != nil {
+			return nil, err
+		}
+		resolved[i] = r
+	}
+	c, err := tb.NewClient(tb.ToUint128(clusterID), resolved)
 	if err != nil {
 		return nil, fmt.Errorf("ledger: connect to tigerbeetle: %w", err)
 	}
