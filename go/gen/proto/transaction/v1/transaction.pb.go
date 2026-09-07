@@ -1001,6 +1001,74 @@ func (x *TransactionRollbackStarted) GetReason() string {
 	return ""
 }
 
+// A committed child is undone by RequestReversal, and a Reversal is itself a
+// Transfer running its own saga — so "reversal requested" and "child rolled
+// back" are two distinct facts that can be separated in time. This records the
+// first of them, naming the Reversal the Transaction is now waiting on, so the
+// child's rollback can be resolved later from that Reversal's own outcome
+// rather than from an inline read that only holds while the saga is
+// synchronous. reversal_id is derived deterministically, so a repeated sweep
+// re-requests the same Reversal rather than starting a second one.
+type TransferReversalRequestedWithinTransaction struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	TransferId    string                 `protobuf:"bytes,2,opt,name=transfer_id,json=transferId,proto3" json:"transfer_id,omitempty"`
+	ReversalId    string                 `protobuf:"bytes,3,opt,name=reversal_id,json=reversalId,proto3" json:"reversal_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TransferReversalRequestedWithinTransaction) Reset() {
+	*x = TransferReversalRequestedWithinTransaction{}
+	mi := &file_transaction_v1_transaction_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TransferReversalRequestedWithinTransaction) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TransferReversalRequestedWithinTransaction) ProtoMessage() {}
+
+func (x *TransferReversalRequestedWithinTransaction) ProtoReflect() protoreflect.Message {
+	mi := &file_transaction_v1_transaction_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TransferReversalRequestedWithinTransaction.ProtoReflect.Descriptor instead.
+func (*TransferReversalRequestedWithinTransaction) Descriptor() ([]byte, []int) {
+	return file_transaction_v1_transaction_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *TransferReversalRequestedWithinTransaction) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *TransferReversalRequestedWithinTransaction) GetTransferId() string {
+	if x != nil {
+		return x.TransferId
+	}
+	return ""
+}
+
+func (x *TransferReversalRequestedWithinTransaction) GetReversalId() string {
+	if x != nil {
+		return x.ReversalId
+	}
+	return ""
+}
+
 type TransferRolledBackWithinTransaction struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -1013,7 +1081,7 @@ type TransferRolledBackWithinTransaction struct {
 
 func (x *TransferRolledBackWithinTransaction) Reset() {
 	*x = TransferRolledBackWithinTransaction{}
-	mi := &file_transaction_v1_transaction_proto_msgTypes[14]
+	mi := &file_transaction_v1_transaction_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1025,7 +1093,7 @@ func (x *TransferRolledBackWithinTransaction) String() string {
 func (*TransferRolledBackWithinTransaction) ProtoMessage() {}
 
 func (x *TransferRolledBackWithinTransaction) ProtoReflect() protoreflect.Message {
-	mi := &file_transaction_v1_transaction_proto_msgTypes[14]
+	mi := &file_transaction_v1_transaction_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1038,7 +1106,7 @@ func (x *TransferRolledBackWithinTransaction) ProtoReflect() protoreflect.Messag
 
 // Deprecated: Use TransferRolledBackWithinTransaction.ProtoReflect.Descriptor instead.
 func (*TransferRolledBackWithinTransaction) Descriptor() ([]byte, []int) {
-	return file_transaction_v1_transaction_proto_rawDescGZIP(), []int{14}
+	return file_transaction_v1_transaction_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *TransferRolledBackWithinTransaction) GetId() string {
@@ -1080,7 +1148,7 @@ type TransferRollbackFailedWithinTransaction struct {
 
 func (x *TransferRollbackFailedWithinTransaction) Reset() {
 	*x = TransferRollbackFailedWithinTransaction{}
-	mi := &file_transaction_v1_transaction_proto_msgTypes[15]
+	mi := &file_transaction_v1_transaction_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1092,7 +1160,7 @@ func (x *TransferRollbackFailedWithinTransaction) String() string {
 func (*TransferRollbackFailedWithinTransaction) ProtoMessage() {}
 
 func (x *TransferRollbackFailedWithinTransaction) ProtoReflect() protoreflect.Message {
-	mi := &file_transaction_v1_transaction_proto_msgTypes[15]
+	mi := &file_transaction_v1_transaction_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1105,7 +1173,7 @@ func (x *TransferRollbackFailedWithinTransaction) ProtoReflect() protoreflect.Me
 
 // Deprecated: Use TransferRollbackFailedWithinTransaction.ProtoReflect.Descriptor instead.
 func (*TransferRollbackFailedWithinTransaction) Descriptor() ([]byte, []int) {
-	return file_transaction_v1_transaction_proto_rawDescGZIP(), []int{15}
+	return file_transaction_v1_transaction_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *TransferRollbackFailedWithinTransaction) GetId() string {
@@ -1139,7 +1207,7 @@ type TransactionRolledBack struct {
 
 func (x *TransactionRolledBack) Reset() {
 	*x = TransactionRolledBack{}
-	mi := &file_transaction_v1_transaction_proto_msgTypes[16]
+	mi := &file_transaction_v1_transaction_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1151,7 +1219,7 @@ func (x *TransactionRolledBack) String() string {
 func (*TransactionRolledBack) ProtoMessage() {}
 
 func (x *TransactionRolledBack) ProtoReflect() protoreflect.Message {
-	mi := &file_transaction_v1_transaction_proto_msgTypes[16]
+	mi := &file_transaction_v1_transaction_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1164,7 +1232,7 @@ func (x *TransactionRolledBack) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransactionRolledBack.ProtoReflect.Descriptor instead.
 func (*TransactionRolledBack) Descriptor() ([]byte, []int) {
-	return file_transaction_v1_transaction_proto_rawDescGZIP(), []int{16}
+	return file_transaction_v1_transaction_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *TransactionRolledBack) GetId() string {
@@ -1197,7 +1265,7 @@ type TransactionRollbackFailed struct {
 
 func (x *TransactionRollbackFailed) Reset() {
 	*x = TransactionRollbackFailed{}
-	mi := &file_transaction_v1_transaction_proto_msgTypes[17]
+	mi := &file_transaction_v1_transaction_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1209,7 +1277,7 @@ func (x *TransactionRollbackFailed) String() string {
 func (*TransactionRollbackFailed) ProtoMessage() {}
 
 func (x *TransactionRollbackFailed) ProtoReflect() protoreflect.Message {
-	mi := &file_transaction_v1_transaction_proto_msgTypes[17]
+	mi := &file_transaction_v1_transaction_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1222,7 +1290,7 @@ func (x *TransactionRollbackFailed) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransactionRollbackFailed.ProtoReflect.Descriptor instead.
 func (*TransactionRollbackFailed) Descriptor() ([]byte, []int) {
-	return file_transaction_v1_transaction_proto_rawDescGZIP(), []int{17}
+	return file_transaction_v1_transaction_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *TransactionRollbackFailed) GetId() string {
@@ -1249,7 +1317,7 @@ type StartProcessingTransferRequest struct {
 
 func (x *StartProcessingTransferRequest) Reset() {
 	*x = StartProcessingTransferRequest{}
-	mi := &file_transaction_v1_transaction_proto_msgTypes[18]
+	mi := &file_transaction_v1_transaction_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1261,7 +1329,7 @@ func (x *StartProcessingTransferRequest) String() string {
 func (*StartProcessingTransferRequest) ProtoMessage() {}
 
 func (x *StartProcessingTransferRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_transaction_v1_transaction_proto_msgTypes[18]
+	mi := &file_transaction_v1_transaction_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1274,7 +1342,7 @@ func (x *StartProcessingTransferRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartProcessingTransferRequest.ProtoReflect.Descriptor instead.
 func (*StartProcessingTransferRequest) Descriptor() ([]byte, []int) {
-	return file_transaction_v1_transaction_proto_rawDescGZIP(), []int{18}
+	return file_transaction_v1_transaction_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *StartProcessingTransferRequest) GetId() string {
@@ -1302,7 +1370,7 @@ type StartProcessingTransferRejected struct {
 
 func (x *StartProcessingTransferRejected) Reset() {
 	*x = StartProcessingTransferRejected{}
-	mi := &file_transaction_v1_transaction_proto_msgTypes[19]
+	mi := &file_transaction_v1_transaction_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1314,7 +1382,7 @@ func (x *StartProcessingTransferRejected) String() string {
 func (*StartProcessingTransferRejected) ProtoMessage() {}
 
 func (x *StartProcessingTransferRejected) ProtoReflect() protoreflect.Message {
-	mi := &file_transaction_v1_transaction_proto_msgTypes[19]
+	mi := &file_transaction_v1_transaction_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1327,7 +1395,7 @@ func (x *StartProcessingTransferRejected) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartProcessingTransferRejected.ProtoReflect.Descriptor instead.
 func (*StartProcessingTransferRejected) Descriptor() ([]byte, []int) {
-	return file_transaction_v1_transaction_proto_rawDescGZIP(), []int{19}
+	return file_transaction_v1_transaction_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *StartProcessingTransferRejected) GetId() string {
@@ -1366,7 +1434,7 @@ type StartProcessingTransferResponse struct {
 
 func (x *StartProcessingTransferResponse) Reset() {
 	*x = StartProcessingTransferResponse{}
-	mi := &file_transaction_v1_transaction_proto_msgTypes[20]
+	mi := &file_transaction_v1_transaction_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1378,7 +1446,7 @@ func (x *StartProcessingTransferResponse) String() string {
 func (*StartProcessingTransferResponse) ProtoMessage() {}
 
 func (x *StartProcessingTransferResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_transaction_v1_transaction_proto_msgTypes[20]
+	mi := &file_transaction_v1_transaction_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1391,7 +1459,7 @@ func (x *StartProcessingTransferResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartProcessingTransferResponse.ProtoReflect.Descriptor instead.
 func (*StartProcessingTransferResponse) Descriptor() ([]byte, []int) {
-	return file_transaction_v1_transaction_proto_rawDescGZIP(), []int{20}
+	return file_transaction_v1_transaction_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *StartProcessingTransferResponse) GetId() string {
@@ -1477,7 +1545,7 @@ type ResumeTransactionRequest struct {
 
 func (x *ResumeTransactionRequest) Reset() {
 	*x = ResumeTransactionRequest{}
-	mi := &file_transaction_v1_transaction_proto_msgTypes[21]
+	mi := &file_transaction_v1_transaction_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1489,7 +1557,7 @@ func (x *ResumeTransactionRequest) String() string {
 func (*ResumeTransactionRequest) ProtoMessage() {}
 
 func (x *ResumeTransactionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_transaction_v1_transaction_proto_msgTypes[21]
+	mi := &file_transaction_v1_transaction_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1502,7 +1570,7 @@ func (x *ResumeTransactionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResumeTransactionRequest.ProtoReflect.Descriptor instead.
 func (*ResumeTransactionRequest) Descriptor() ([]byte, []int) {
-	return file_transaction_v1_transaction_proto_rawDescGZIP(), []int{21}
+	return file_transaction_v1_transaction_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *ResumeTransactionRequest) GetId() string {
@@ -1523,7 +1591,7 @@ type ResumeTransactionResponse struct {
 
 func (x *ResumeTransactionResponse) Reset() {
 	*x = ResumeTransactionResponse{}
-	mi := &file_transaction_v1_transaction_proto_msgTypes[22]
+	mi := &file_transaction_v1_transaction_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1535,7 +1603,7 @@ func (x *ResumeTransactionResponse) String() string {
 func (*ResumeTransactionResponse) ProtoMessage() {}
 
 func (x *ResumeTransactionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_transaction_v1_transaction_proto_msgTypes[22]
+	mi := &file_transaction_v1_transaction_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1548,7 +1616,7 @@ func (x *ResumeTransactionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResumeTransactionResponse.ProtoReflect.Descriptor instead.
 func (*ResumeTransactionResponse) Descriptor() ([]byte, []int) {
-	return file_transaction_v1_transaction_proto_rawDescGZIP(), []int{22}
+	return file_transaction_v1_transaction_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *ResumeTransactionResponse) GetId() string {
@@ -1582,7 +1650,7 @@ type StartTransactionRollbackResponse struct {
 
 func (x *StartTransactionRollbackResponse) Reset() {
 	*x = StartTransactionRollbackResponse{}
-	mi := &file_transaction_v1_transaction_proto_msgTypes[23]
+	mi := &file_transaction_v1_transaction_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1594,7 +1662,7 @@ func (x *StartTransactionRollbackResponse) String() string {
 func (*StartTransactionRollbackResponse) ProtoMessage() {}
 
 func (x *StartTransactionRollbackResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_transaction_v1_transaction_proto_msgTypes[23]
+	mi := &file_transaction_v1_transaction_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1607,7 +1675,7 @@ func (x *StartTransactionRollbackResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartTransactionRollbackResponse.ProtoReflect.Descriptor instead.
 func (*StartTransactionRollbackResponse) Descriptor() ([]byte, []int) {
-	return file_transaction_v1_transaction_proto_rawDescGZIP(), []int{23}
+	return file_transaction_v1_transaction_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *StartTransactionRollbackResponse) GetId() string {
@@ -1700,7 +1768,13 @@ const file_transaction_v1_transaction_proto_rawDesc = "" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\"D\n" +
 	"\x1aTransactionRollbackStarted\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
-	"\x06reason\x18\x02 \x01(\tR\x06reason\"\xab\x01\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\"~\n" +
+	"*TransferReversalRequestedWithinTransaction\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1f\n" +
+	"\vtransfer_id\x18\x02 \x01(\tR\n" +
+	"transferId\x12\x1f\n" +
+	"\vreversal_id\x18\x03 \x01(\tR\n" +
+	"reversalId\"\xab\x01\n" +
 	"#TransferRolledBackWithinTransaction\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1f\n" +
 	"\vtransfer_id\x18\x02 \x01(\tR\n" +
@@ -1775,52 +1849,53 @@ func file_transaction_v1_transaction_proto_rawDescGZIP() []byte {
 }
 
 var file_transaction_v1_transaction_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_transaction_v1_transaction_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
+var file_transaction_v1_transaction_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
 var file_transaction_v1_transaction_proto_goTypes = []any{
-	(RollbackMethod)(0),                             // 0: transaction.v1.RollbackMethod
-	(TransactionState)(0),                           // 1: transaction.v1.TransactionState
-	(*Transfer)(nil),                                // 2: transaction.v1.Transfer
-	(*TransferIdList)(nil),                          // 3: transaction.v1.TransferIdList
-	(*StartInitializingTransactionRequest)(nil),     // 4: transaction.v1.StartInitializingTransactionRequest
-	(*TransactionInitialized)(nil),                  // 5: transaction.v1.TransactionInitialized
-	(*TransactionRejected)(nil),                     // 6: transaction.v1.TransactionRejected
-	(*StartInitializingTransactionResponse)(nil),    // 7: transaction.v1.StartInitializingTransactionResponse
-	(*TransactionStarted)(nil),                      // 8: transaction.v1.TransactionStarted
-	(*TransferRequestedWithinTransaction)(nil),      // 9: transaction.v1.TransferRequestedWithinTransaction
-	(*TransferGatedWithinTransaction)(nil),          // 10: transaction.v1.TransferGatedWithinTransaction
-	(*TransferCompletedWithinTransaction)(nil),      // 11: transaction.v1.TransferCompletedWithinTransaction
-	(*TransferFailedWithinTransaction)(nil),         // 12: transaction.v1.TransferFailedWithinTransaction
-	(*TransactionCompleted)(nil),                    // 13: transaction.v1.TransactionCompleted
-	(*StartTransactionRollbackRequest)(nil),         // 14: transaction.v1.StartTransactionRollbackRequest
-	(*TransactionRollbackStarted)(nil),              // 15: transaction.v1.TransactionRollbackStarted
-	(*TransferRolledBackWithinTransaction)(nil),     // 16: transaction.v1.TransferRolledBackWithinTransaction
-	(*TransferRollbackFailedWithinTransaction)(nil), // 17: transaction.v1.TransferRollbackFailedWithinTransaction
-	(*TransactionRolledBack)(nil),                   // 18: transaction.v1.TransactionRolledBack
-	(*TransactionRollbackFailed)(nil),               // 19: transaction.v1.TransactionRollbackFailed
-	(*StartProcessingTransferRequest)(nil),          // 20: transaction.v1.StartProcessingTransferRequest
-	(*StartProcessingTransferRejected)(nil),         // 21: transaction.v1.StartProcessingTransferRejected
-	(*StartProcessingTransferResponse)(nil),         // 22: transaction.v1.StartProcessingTransferResponse
-	(*ResumeTransactionRequest)(nil),                // 23: transaction.v1.ResumeTransactionRequest
-	(*ResumeTransactionResponse)(nil),               // 24: transaction.v1.ResumeTransactionResponse
-	(*StartTransactionRollbackResponse)(nil),        // 25: transaction.v1.StartTransactionRollbackResponse
-	nil,                                             // 26: transaction.v1.StartInitializingTransactionRequest.TransfersEntry
-	nil,                                             // 27: transaction.v1.StartInitializingTransactionRequest.TransferDependencyEntry
-	nil,                                             // 28: transaction.v1.TransactionInitialized.TransfersEntry
-	nil,                                             // 29: transaction.v1.TransactionInitialized.TransferDependencyEntry
-	(*v1.Money)(nil),                                // 30: shared.v1.Money
+	(RollbackMethod)(0),                                // 0: transaction.v1.RollbackMethod
+	(TransactionState)(0),                              // 1: transaction.v1.TransactionState
+	(*Transfer)(nil),                                   // 2: transaction.v1.Transfer
+	(*TransferIdList)(nil),                             // 3: transaction.v1.TransferIdList
+	(*StartInitializingTransactionRequest)(nil),        // 4: transaction.v1.StartInitializingTransactionRequest
+	(*TransactionInitialized)(nil),                     // 5: transaction.v1.TransactionInitialized
+	(*TransactionRejected)(nil),                        // 6: transaction.v1.TransactionRejected
+	(*StartInitializingTransactionResponse)(nil),       // 7: transaction.v1.StartInitializingTransactionResponse
+	(*TransactionStarted)(nil),                         // 8: transaction.v1.TransactionStarted
+	(*TransferRequestedWithinTransaction)(nil),         // 9: transaction.v1.TransferRequestedWithinTransaction
+	(*TransferGatedWithinTransaction)(nil),             // 10: transaction.v1.TransferGatedWithinTransaction
+	(*TransferCompletedWithinTransaction)(nil),         // 11: transaction.v1.TransferCompletedWithinTransaction
+	(*TransferFailedWithinTransaction)(nil),            // 12: transaction.v1.TransferFailedWithinTransaction
+	(*TransactionCompleted)(nil),                       // 13: transaction.v1.TransactionCompleted
+	(*StartTransactionRollbackRequest)(nil),            // 14: transaction.v1.StartTransactionRollbackRequest
+	(*TransactionRollbackStarted)(nil),                 // 15: transaction.v1.TransactionRollbackStarted
+	(*TransferReversalRequestedWithinTransaction)(nil), // 16: transaction.v1.TransferReversalRequestedWithinTransaction
+	(*TransferRolledBackWithinTransaction)(nil),        // 17: transaction.v1.TransferRolledBackWithinTransaction
+	(*TransferRollbackFailedWithinTransaction)(nil),    // 18: transaction.v1.TransferRollbackFailedWithinTransaction
+	(*TransactionRolledBack)(nil),                      // 19: transaction.v1.TransactionRolledBack
+	(*TransactionRollbackFailed)(nil),                  // 20: transaction.v1.TransactionRollbackFailed
+	(*StartProcessingTransferRequest)(nil),             // 21: transaction.v1.StartProcessingTransferRequest
+	(*StartProcessingTransferRejected)(nil),            // 22: transaction.v1.StartProcessingTransferRejected
+	(*StartProcessingTransferResponse)(nil),            // 23: transaction.v1.StartProcessingTransferResponse
+	(*ResumeTransactionRequest)(nil),                   // 24: transaction.v1.ResumeTransactionRequest
+	(*ResumeTransactionResponse)(nil),                  // 25: transaction.v1.ResumeTransactionResponse
+	(*StartTransactionRollbackResponse)(nil),           // 26: transaction.v1.StartTransactionRollbackResponse
+	nil,                                                // 27: transaction.v1.StartInitializingTransactionRequest.TransfersEntry
+	nil,                                                // 28: transaction.v1.StartInitializingTransactionRequest.TransferDependencyEntry
+	nil,                                                // 29: transaction.v1.TransactionInitialized.TransfersEntry
+	nil,                                                // 30: transaction.v1.TransactionInitialized.TransferDependencyEntry
+	(*v1.Money)(nil),                                   // 31: shared.v1.Money
 }
 var file_transaction_v1_transaction_proto_depIdxs = []int32{
-	30, // 0: transaction.v1.Transfer.amount:type_name -> shared.v1.Money
-	26, // 1: transaction.v1.StartInitializingTransactionRequest.transfers:type_name -> transaction.v1.StartInitializingTransactionRequest.TransfersEntry
-	27, // 2: transaction.v1.StartInitializingTransactionRequest.transfer_dependency:type_name -> transaction.v1.StartInitializingTransactionRequest.TransferDependencyEntry
-	28, // 3: transaction.v1.TransactionInitialized.transfers:type_name -> transaction.v1.TransactionInitialized.TransfersEntry
-	29, // 4: transaction.v1.TransactionInitialized.transfer_dependency:type_name -> transaction.v1.TransactionInitialized.TransferDependencyEntry
+	31, // 0: transaction.v1.Transfer.amount:type_name -> shared.v1.Money
+	27, // 1: transaction.v1.StartInitializingTransactionRequest.transfers:type_name -> transaction.v1.StartInitializingTransactionRequest.TransfersEntry
+	28, // 2: transaction.v1.StartInitializingTransactionRequest.transfer_dependency:type_name -> transaction.v1.StartInitializingTransactionRequest.TransferDependencyEntry
+	29, // 3: transaction.v1.TransactionInitialized.transfers:type_name -> transaction.v1.TransactionInitialized.TransfersEntry
+	30, // 4: transaction.v1.TransactionInitialized.transfer_dependency:type_name -> transaction.v1.TransactionInitialized.TransferDependencyEntry
 	5,  // 5: transaction.v1.StartInitializingTransactionResponse.transaction_initialized:type_name -> transaction.v1.TransactionInitialized
 	6,  // 6: transaction.v1.StartInitializingTransactionResponse.transaction_rejected:type_name -> transaction.v1.TransactionRejected
 	0,  // 7: transaction.v1.TransferRolledBackWithinTransaction.method:type_name -> transaction.v1.RollbackMethod
 	9,  // 8: transaction.v1.StartProcessingTransferResponse.transfer_requested_within_transaction:type_name -> transaction.v1.TransferRequestedWithinTransaction
 	12, // 9: transaction.v1.StartProcessingTransferResponse.transfer_failed_within_transaction:type_name -> transaction.v1.TransferFailedWithinTransaction
-	21, // 10: transaction.v1.StartProcessingTransferResponse.start_processing_transfer_rejected:type_name -> transaction.v1.StartProcessingTransferRejected
+	22, // 10: transaction.v1.StartProcessingTransferResponse.start_processing_transfer_rejected:type_name -> transaction.v1.StartProcessingTransferRejected
 	1,  // 11: transaction.v1.ResumeTransactionResponse.state:type_name -> transaction.v1.TransactionState
 	1,  // 12: transaction.v1.StartTransactionRollbackResponse.state:type_name -> transaction.v1.TransactionState
 	2,  // 13: transaction.v1.StartInitializingTransactionRequest.TransfersEntry.value:type_name -> transaction.v1.Transfer
@@ -1828,13 +1903,13 @@ var file_transaction_v1_transaction_proto_depIdxs = []int32{
 	2,  // 15: transaction.v1.TransactionInitialized.TransfersEntry.value:type_name -> transaction.v1.Transfer
 	3,  // 16: transaction.v1.TransactionInitialized.TransferDependencyEntry.value:type_name -> transaction.v1.TransferIdList
 	4,  // 17: transaction.v1.TransactionService.StartInitializingTransaction:input_type -> transaction.v1.StartInitializingTransactionRequest
-	20, // 18: transaction.v1.TransactionService.StartProcessingTransfer:input_type -> transaction.v1.StartProcessingTransferRequest
-	23, // 19: transaction.v1.TransactionService.ResumeTransaction:input_type -> transaction.v1.ResumeTransactionRequest
+	21, // 18: transaction.v1.TransactionService.StartProcessingTransfer:input_type -> transaction.v1.StartProcessingTransferRequest
+	24, // 19: transaction.v1.TransactionService.ResumeTransaction:input_type -> transaction.v1.ResumeTransactionRequest
 	14, // 20: transaction.v1.TransactionService.StartTransactionRollback:input_type -> transaction.v1.StartTransactionRollbackRequest
 	7,  // 21: transaction.v1.TransactionService.StartInitializingTransaction:output_type -> transaction.v1.StartInitializingTransactionResponse
-	22, // 22: transaction.v1.TransactionService.StartProcessingTransfer:output_type -> transaction.v1.StartProcessingTransferResponse
-	24, // 23: transaction.v1.TransactionService.ResumeTransaction:output_type -> transaction.v1.ResumeTransactionResponse
-	25, // 24: transaction.v1.TransactionService.StartTransactionRollback:output_type -> transaction.v1.StartTransactionRollbackResponse
+	23, // 22: transaction.v1.TransactionService.StartProcessingTransfer:output_type -> transaction.v1.StartProcessingTransferResponse
+	25, // 23: transaction.v1.TransactionService.ResumeTransaction:output_type -> transaction.v1.ResumeTransactionResponse
+	26, // 24: transaction.v1.TransactionService.StartTransactionRollback:output_type -> transaction.v1.StartTransactionRollbackResponse
 	21, // [21:25] is the sub-list for method output_type
 	17, // [17:21] is the sub-list for method input_type
 	17, // [17:17] is the sub-list for extension type_name
@@ -1851,7 +1926,7 @@ func file_transaction_v1_transaction_proto_init() {
 		(*StartInitializingTransactionResponse_TransactionInitialized)(nil),
 		(*StartInitializingTransactionResponse_TransactionRejected)(nil),
 	}
-	file_transaction_v1_transaction_proto_msgTypes[20].OneofWrappers = []any{
+	file_transaction_v1_transaction_proto_msgTypes[21].OneofWrappers = []any{
 		(*StartProcessingTransferResponse_TransferRequestedWithinTransaction)(nil),
 		(*StartProcessingTransferResponse_TransferFailedWithinTransaction)(nil),
 		(*StartProcessingTransferResponse_StartProcessingTransferRejected)(nil),
@@ -1862,7 +1937,7 @@ func file_transaction_v1_transaction_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_transaction_v1_transaction_proto_rawDesc), len(file_transaction_v1_transaction_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   28,
+			NumMessages:   29,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

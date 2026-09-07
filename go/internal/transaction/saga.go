@@ -156,6 +156,12 @@ const (
 	childRequested
 	childCompleted
 	childFailed
+	// childRollbackRequested is the rollback-side twin of childRequested: a
+	// Reversal has been requested for this child but has not yet reached a
+	// terminal state of its own. A Reversal is a whole Transfer running its own
+	// saga, so "undo this child" and "this child is undone" are two facts that
+	// can be separated in time — see go/docs/adr/0002.
+	childRollbackRequested
 	childRolledBack
 	childRollbackFailed
 )
@@ -180,6 +186,8 @@ func foldChildStates(events []eventstore.Event) (map[string]childState, error) {
 			states[m.GetTransferId()] = childCompleted
 		case *pb.TransferFailedWithinTransaction:
 			states[m.GetTransferId()] = childFailed
+		case *pb.TransferReversalRequestedWithinTransaction:
+			states[m.GetTransferId()] = childRollbackRequested
 		case *pb.TransferRolledBackWithinTransaction:
 			states[m.GetTransferId()] = childRolledBack
 		case *pb.TransferRollbackFailedWithinTransaction:
@@ -267,6 +275,8 @@ func childEventTransferID(msg proto.Message) string {
 	case *pb.TransferCompletedWithinTransaction:
 		return m.GetTransferId()
 	case *pb.TransferFailedWithinTransaction:
+		return m.GetTransferId()
+	case *pb.TransferReversalRequestedWithinTransaction:
 		return m.GetTransferId()
 	case *pb.TransferRolledBackWithinTransaction:
 		return m.GetTransferId()
@@ -408,11 +418,26 @@ func (s *Server) runSaga(ctx context.Context, transactionID string) error {
 				return err
 			}
 
-			progressed, blocked, err := s.rollbackNext(ctx, transactionID, transfers, deps, children)
+			reconciled, err := s.reconcileRollbacks(ctx, transactionID, events, children)
+			if err != nil {
+				return err
+			}
+			if reconciled {
+				continue
+			}
+
+			progressed, waiting, blocked, err := s.rollbackNext(ctx, transactionID, transfers, deps, children)
 			if err != nil {
 				return err
 			}
 			switch {
+			case progressed:
+				continue
+			case waiting:
+				// At least one child is parked on a Reversal that has not
+				// resolved. Nothing to decide yet, and nothing may be claimed:
+				// stop here and resume when something asks again.
+				return nil
 			case blocked:
 				reason, err := rollbackStartedReason(events)
 				if err != nil {
@@ -424,8 +449,6 @@ func (s *Server) runSaga(ctx context.Context, transactionID string) error {
 				if err := s.appendSagaStep(ctx, transactionID, &pb.TransactionRollbackFailed{Id: transactionID, Reason: reason}); err != nil {
 					return err
 				}
-				continue
-			case progressed:
 				continue
 			default:
 				reason, err := rollbackStartedReason(events)
@@ -533,30 +556,103 @@ func (s *Server) reconcileInFlight(ctx context.Context, transactionID string, ch
 	return progressed, nil
 }
 
+// requestedReversalID recovers which Reversal a child is waiting on, from the
+// TransferReversalRequestedWithinTransaction that recorded it.
+func requestedReversalID(events []eventstore.Event, transferID string) (string, error) {
+	for _, e := range events {
+		if e.EventType != eventstore.EventType(&pb.TransferReversalRequestedWithinTransaction{}) {
+			continue
+		}
+		msg, err := e.Decode()
+		if err != nil {
+			return "", twirp.InternalErrorWith(err)
+		}
+		if requested, ok := msg.(*pb.TransferReversalRequestedWithinTransaction); ok && requested.GetTransferId() == transferID {
+			return requested.GetReversalId(), nil
+		}
+	}
+	return "", nil
+}
+
+// reconcileRollbacks checks every child waiting on a Reversal and records how
+// that Reversal resolved, if it has: Committed -> TransferRolledBackWithinTransaction
+// (REVERSED); Failed or Cancelled -> TransferRollbackFailedWithinTransaction.
+// Anything else means the Reversal is still running its own saga — including
+// sitting Staged or Pending, since a Reversal inherits the original's staging
+// requirement and so can wait on the outside world for as long as the original
+// did. Returns true if it recorded anything, so runSaga knows to loop again.
+// This is deliberately the same shape as reconcileInFlight: the forward and
+// rollback paths now resolve their in-flight children the same way.
+func (s *Server) reconcileRollbacks(
+	ctx context.Context, transactionID string, events []eventstore.Event, children map[string]childState,
+) (bool, error) {
+	progressed := false
+	for childID, state := range children {
+		if state != childRollbackRequested {
+			continue
+		}
+		reversalID, err := requestedReversalID(events, childID)
+		if err != nil {
+			return false, err
+		}
+		if reversalID == "" {
+			return false, fmt.Errorf("transaction %q: child %q is awaiting a reversal with no recorded id", transactionID, childID)
+		}
+		outcome, err := transfer.Outcome(ctx, s.store, reversalID)
+		if err != nil {
+			return false, err
+		}
+		switch outcome {
+		case transfer.OutcomeCommitted:
+			if err := s.appendSagaStep(ctx, transactionID, &pb.TransferRolledBackWithinTransaction{
+				Id: transactionID, TransferId: childID,
+				Method: pb.RollbackMethod_ROLLBACK_METHOD_REVERSED, DetailId: reversalID,
+			}); err != nil {
+				return false, err
+			}
+			progressed = true
+		case transfer.OutcomeFailed, transfer.OutcomeCancelled, transfer.OutcomeRejected:
+			if err := s.appendSagaStep(ctx, transactionID, &pb.TransferRollbackFailedWithinTransaction{
+				Id: transactionID, TransferId: childID,
+				Reason: fmt.Sprintf("reversal %q reached %s instead of committing", reversalID, outcome),
+			}); err != nil {
+				return false, err
+			}
+			progressed = true
+		}
+	}
+	return progressed, nil
+}
+
 // rollbackNext advances rollback by one sweep: every child readyToRollback
 // gets rolled back per its LIVE transfer.Outcome (not whatever Transaction
 // last recorded, since the outside world may have moved it since).
-// Returns (progressed, blocked): progressed is true if this sweep recorded
-// anything; blocked is true if the sweep recorded nothing further AND at
-// least one child has ever recorded a rollback failure — the caller's
-// signal to land on TransactionRollbackFailed instead of
+// Returns (progressed, waiting, blocked): progressed is true if this sweep
+// recorded anything; waiting is true if at least one child is parked on a
+// Reversal that has not resolved yet, which is the caller's signal to stop
+// without claiming any terminal state; blocked is true if the sweep recorded
+// nothing further AND at least one child has ever recorded a rollback failure —
+// the caller's signal to land on TransactionRollbackFailed instead of
 // TransactionRolledBack. A child already in childRollbackFailed is skipped
 // on every subsequent sweep rather than retried automatically forever.
 func (s *Server) rollbackNext(
 	ctx context.Context, transactionID string, transfers map[string]*pb.Transfer, deps map[string]*pb.TransferIdList, children map[string]childState,
-) (progressed, blocked bool, err error) {
+) (progressed, waiting, blocked bool, err error) {
 	rolledBack := make(map[string]bool, len(children))
+	inFlight := make(map[string]bool, len(children))
 	anyRollbackFailed := false
 	for id, st := range children {
-		if st == childRolledBack {
+		switch st {
+		case childRolledBack:
 			rolledBack[id] = true
-		}
-		if st == childRollbackFailed {
+		case childRollbackRequested:
+			inFlight[id] = true
+		case childRollbackFailed:
 			anyRollbackFailed = true
 		}
 	}
 
-	ready := readyToRollback(transfers, deps, touchedSet(children), rolledBack)
+	ready := readyToRollback(transfers, deps, touchedSet(children), rolledBack, inFlight)
 
 	madeProgress := false
 	for _, childID := range ready {
@@ -564,14 +660,14 @@ func (s *Server) rollbackNext(
 			continue // already recorded as stuck; not retried automatically
 		}
 		if err := s.rollbackChild(ctx, transactionID, transfers[childID], children[childID]); err != nil {
-			return false, false, err
+			return false, false, false, err
 		}
 		madeProgress = true
 	}
 	if madeProgress {
-		return true, false, nil
+		return true, false, false, nil
 	}
-	return false, anyRollbackFailed, nil
+	return false, len(inFlight) > 0, anyRollbackFailed, nil
 }
 
 // rollbackChild picks the rollback action for one ready child from its LIVE
@@ -603,29 +699,22 @@ func (s *Server) rollbackChild(ctx context.Context, transactionID string, spec *
 			return err
 		}
 		if rejected := resp.GetReversalRequestRejected(); rejected != nil {
+			// Rejected at request time: the Reversal never started, so there is
+			// nothing to wait for and this is already terminal.
 			return s.appendSagaStep(ctx, transactionID, &pb.TransferRollbackFailedWithinTransaction{
 				Id: transactionID, TransferId: spec.GetId(), Reason: rejected.GetReason(),
 			})
 		}
-		// Accepted at request time doesn't guarantee the reversal's own
-		// synchronous saga run afterward actually committed — a
-		// TigerBeetle-level rejection there routes to TransferFailed
-		// without changing this RPC's own accept/reject response (the same
-		// reason a Transfer's own post-accept saga failure is logged, never
-		// surfaced to its caller). Check the reversal's own live outcome to
-		// catch that case rather than trusting the accept alone.
-		reversalOutcome, err := transfer.Outcome(ctx, s.store, reversalID)
-		if err != nil {
-			return err
-		}
-		if reversalOutcome != transfer.OutcomeCommitted {
-			return s.appendSagaStep(ctx, transactionID, &pb.TransferRollbackFailedWithinTransaction{
-				Id: transactionID, TransferId: spec.GetId(),
-				Reason: fmt.Sprintf("reversal %q reached %s instead of committing", reversalID, reversalOutcome),
-			})
-		}
-		return s.appendSagaStep(ctx, transactionID, &pb.TransferRolledBackWithinTransaction{
-			Id: transactionID, TransferId: spec.GetId(), Method: pb.RollbackMethod_ROLLBACK_METHOD_REVERSED, DetailId: reversalID,
+		// Accepted only means the Reversal's own saga has started. Record which
+		// Reversal this child is now waiting on and stop; reconcileRollbacks
+		// resolves it from that Reversal's live outcome. Deliberately NOT an
+		// inline outcome read: that only ever worked because the Reversal's saga
+		// ran to completion inside the call above, which stops being true once
+		// Transfer's saga is driven asynchronously (go/docs/adr/0002). The
+		// reversal id is deterministic, so a repeated sweep re-requests the same
+		// Reversal rather than starting a second one.
+		return s.appendSagaStep(ctx, transactionID, &pb.TransferReversalRequestedWithinTransaction{
+			Id: transactionID, TransferId: spec.GetId(), ReversalId: reversalID,
 		})
 
 	case transfer.OutcomeStaged, transfer.OutcomePending:

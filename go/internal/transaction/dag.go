@@ -123,11 +123,14 @@ func readyToRun(transfers map[string]*pb.Transfer, deps map[string]*pb.TransferI
 // intra-transaction rollback safe with zero new locking — a downstream
 // consumer's debit against an upstream producer's Token is always undone
 // before the upstream producer's own reversal runs.
-func readyToRollback(transfers map[string]*pb.Transfer, deps map[string]*pb.TransferIdList, touched, rolledBack map[string]bool) []string {
+func readyToRollback(transfers map[string]*pb.Transfer, deps map[string]*pb.TransferIdList, touched, rolledBack, inFlight map[string]bool) []string {
 	var ready []string
 	for id := range transfers {
 		if !touched[id] || rolledBack[id] {
 			continue
+		}
+		if inFlight[id] {
+			continue // its Reversal is already running; picking it again re-requests
 		}
 		blocked := false
 		for childID, parents := range deps {

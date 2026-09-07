@@ -140,7 +140,7 @@ func TestReadyToRollback_LeafWithNoDependentsIsReadyFirst(t *testing.T) {
 	d := deps(map[string][]string{"B": {"A"}})
 	touched := map[string]bool{"A": true, "B": true}
 
-	ready := readyToRollback(xfers, d, touched, map[string]bool{})
+	ready := readyToRollback(xfers, d, touched, map[string]bool{}, nil)
 	if len(ready) != 1 || ready[0] != "B" {
 		t.Fatalf("readyToRollback() = %v, want just [B] (A is blocked by its still-active dependent B)", ready)
 	}
@@ -152,7 +152,7 @@ func TestReadyToRollback_ParentReadyOnceDependentRolledBack(t *testing.T) {
 	d := deps(map[string][]string{"B": {"A"}})
 	touched := map[string]bool{"A": true, "B": true}
 
-	ready := readyToRollback(xfers, d, touched, map[string]bool{"B": true})
+	ready := readyToRollback(xfers, d, touched, map[string]bool{"B": true}, nil)
 	if len(ready) != 1 || ready[0] != "A" {
 		t.Fatalf("readyToRollback() = %v, want just [A] (B already rolled back)", ready)
 	}
@@ -166,7 +166,7 @@ func TestReadyToRollback_UntouchedChildNeverBlocksItsParent(t *testing.T) {
 	d := deps(map[string][]string{"B": {"A"}})
 	touched := map[string]bool{"A": true}
 
-	ready := readyToRollback(xfers, d, touched, map[string]bool{})
+	ready := readyToRollback(xfers, d, touched, map[string]bool{}, nil)
 	if len(ready) != 1 || ready[0] != "A" {
 		t.Fatalf("readyToRollback() = %v, want just [A] (untouched B never blocks)", ready)
 	}
@@ -175,7 +175,7 @@ func TestReadyToRollback_UntouchedChildNeverBlocksItsParent(t *testing.T) {
 func TestReadyToRollback_AlreadyRolledBackChildIsNeverReadyAgain(t *testing.T) {
 	t.Parallel()
 	xfers := transfers("A")
-	ready := readyToRollback(xfers, deps(nil), map[string]bool{"A": true}, map[string]bool{"A": true})
+	ready := readyToRollback(xfers, deps(nil), map[string]bool{"A": true}, map[string]bool{"A": true}, nil)
 	if len(ready) != 0 {
 		t.Fatalf("readyToRollback() = %v, want empty (A already rolled back)", ready)
 	}

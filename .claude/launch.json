@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "client-dev",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["--prefix", "client", "run", "dev"],
+      "comment": "Attaches to the Vite dev server already running in the money_flow-client-1 container (docker compose up). No command on purpose: a second Vite would collide with the container's published 5173, and bare `vite` ignores PORT so autoPort cannot reassign it. Uses localhost rather than https://app.local.namelessnotion.com because the preview pane blocks that host's module scripts; note that GraphQL calls fail CORS from this origin (see README).",
+      "url": "http://localhost:5173",
       "port": 5173
     }
   ]

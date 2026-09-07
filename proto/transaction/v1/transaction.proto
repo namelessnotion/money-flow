@@ -181,6 +181,20 @@ enum RollbackMethod {
   ROLLBACK_METHOD_ABANDONED = 3;  // child was only Gated, never requested -> nothing to call
 }
 
+// A committed child is undone by RequestReversal, and a Reversal is itself a
+// Transfer running its own saga — so "reversal requested" and "child rolled
+// back" are two distinct facts that can be separated in time. This records the
+// first of them, naming the Reversal the Transaction is now waiting on, so the
+// child's rollback can be resolved later from that Reversal's own outcome
+// rather than from an inline read that only holds while the saga is
+// synchronous. reversal_id is derived deterministically, so a repeated sweep
+// re-requests the same Reversal rather than starting a second one.
+message TransferReversalRequestedWithinTransaction {
+  string id = 1;
+  string transfer_id = 2;
+  string reversal_id = 3;
+}
+
 message TransferRolledBackWithinTransaction {
   string id = 1;
   string transfer_id = 2;
