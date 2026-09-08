@@ -1,4 +1,4 @@
-.PHONY: up down restart migrate ssl proto
+.PHONY: up down restart migrate ssl proto cdc-up cdc-down
 
 up:
 	docker compose up -d
@@ -51,3 +51,14 @@ proto:
 	    --ruby_out=ruby/gen/proto \
 	    $$f || exit 1; \
 	done
+
+# CDC tracer bullet (docs/cdc-tracer-bullet.md). cdc-up creates the scratch
+# database, migrates the events schema into it and registers the Debezium
+# connector; cdc-down removes all three, including the replication slot that
+# `docker compose down` leaves behind. Run cdc-down BEFORE bringing the stack
+# down — it needs Connect and Postgres up to do its work.
+cdc-up:
+	docker/cdc/setup.sh
+
+cdc-down:
+	docker/cdc/teardown.sh

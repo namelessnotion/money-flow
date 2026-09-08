@@ -67,10 +67,16 @@ protobuf `BYTEA` and Debezium's outbox router expects JSON, so unwrapping it wou
 That argument mostly dissolves under the event-as-trigger handler adopted in `go/docs/adr/0001`, because neither
 consumer's state-tracking path reads the payload at all:
 
-- The orchestrator decodes nothing. A trigger only has to say _which aggregate moved_, and `aggregate_type` and
-  `aggregate_id` are plain `TEXT` columns.
+- The orchestrator decodes nothing. A trigger only has to say _which aggregate moved_, and `aggregate_type` is a
+  plain `TEXT` column while `aggregate_id` is `uuid`, which Debezium emits as a string.
 - Ruby's projection needs `event_type` and `aggregate_id` — also plain columns. Debezium emits row columns as
   JSON with `payload` base64-encoded, so Ruby protobuf-decodes only when it wants body _fields_.
+
+**Measured, not just reasoned.** This paragraph was the load-bearing, untested claim in this ADR, so it was
+proven end to end before anything was built on it: see [`docs/cdc-tracer-bullet.md`](../cdc-tracer-bullet.md).
+Debezium's bundled outbox `EventRouter` takes our column names as configuration — no custom transform, no extra
+jars — and `table.fields.additional.placement` keeps `aggregate_type`, `event_type` and `sequence` in the
+message body rather than burying them in headers behind an opaque payload. The cost argument below stands.
 
 **This ADR therefore depends on `go/docs/adr/0001`.** If the orchestrator ever reverts to folding message
 payloads, revisit this decision: the transform cost comes back.
