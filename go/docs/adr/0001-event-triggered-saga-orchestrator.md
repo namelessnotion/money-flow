@@ -4,7 +4,8 @@
 - **Date:** 2026-09-07
 - **Scope:** `go/` context only.
 - **See also:** [root ADR 0001](../../../docs/adr/0001-async-event-driven-saga-and-postgres-to-kafka-publication.md),
-  which depends on this decision.
+  which depends on this decision, and [ADR 0003](0003-orchestrator-failure-handling.md), which settles what
+  happens to a trigger this orchestrator cannot process.
 
 ## Context
 
@@ -75,6 +76,11 @@ the assumption this decision required them.
 message and a transaction-topic message can be handled concurrently and both append to the same Transaction.
 `appendSagaStep` already retries `ErrConcurrencyConflict`, so this is handled — but it is now a live path rather
 than a theoretical one, and deserves a test.
+
+> **Tested 2026-09-08.** `TestOrchestrator_ConcurrentTriggersOnOneTransactionConverge` in
+> `go/internal/saga` provokes it rather than trusting the retry by inspection: both handlers are held at the
+> moment they have read the Transaction's stream and not yet written to it, which makes the conflict certain
+> instead of a matter of scheduling luck. The test fails if no conflict actually occurred.
 
 ## Open: rollback of a committed child
 

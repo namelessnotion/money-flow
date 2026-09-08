@@ -29,9 +29,8 @@ import (
 	"github.com/namelessnotion/money_flow/go/internal/holder"
 	"github.com/namelessnotion/money_flow/go/internal/ledger"
 	"github.com/namelessnotion/money_flow/go/internal/operation"
+	"github.com/namelessnotion/money_flow/go/internal/saga"
 	"github.com/namelessnotion/money_flow/go/internal/token"
-	"github.com/namelessnotion/money_flow/go/internal/transaction"
-	"github.com/namelessnotion/money_flow/go/internal/transfer"
 	"github.com/namelessnotion/money_flow/go/internal/wallet"
 )
 
@@ -108,18 +107,14 @@ func newMux(store eventstore.Store, health pinger, tb ledger.Client) *http.Serve
 	tokenServer := tokenpb.NewTokenServiceServer(token.NewServer(store, tb))
 	operationServer := operationpb.NewOperationServiceServer(operation.NewServer(store))
 
-	// transfer.NewServer is built before transaction.NewServer so transfer
-	// can be given transaction.IsOpen/transaction.Exists — both plain
-	// package functions taking (ctx, store, id), not methods on
-	// transaction.Server, so referencing them before any transaction.Server
-	// is constructed is not a chicken-and-egg problem. This keeps transfer
-	// from ever importing transaction: it only ever sees the two checker
-	// func types.
-	isOpen := func(ctx context.Context, transactionID string) (bool, error) { return transaction.IsOpen(ctx, store, transactionID) }
-	exists := func(ctx context.Context, transactionID string) (bool, error) { return transaction.Exists(ctx, store, transactionID) }
-	transferInternal := transfer.NewServer(store, tb, isOpen, exists)
-	transferServer := transferpb.NewTransferServiceServer(transferInternal)
-	transactionServer := transactionpb.NewTransactionServiceServer(transaction.NewServer(store, transferInternal))
+	// saga.Wire ties transfer and transaction to each other — transfer needs
+	// transaction's IsOpen/Exists checkers, transaction needs the transfer
+	// server to dispatch through. It is done there rather than here so this
+	// process and the orchestrator cannot drift into wiring the same two
+	// services differently.
+	sagaServers := saga.Wire(store, tb)
+	transferServer := transferpb.NewTransferServiceServer(sagaServers.Transfer)
+	transactionServer := transactionpb.NewTransactionServiceServer(sagaServers.Transaction)
 
 	mux.Handle(holderServer.PathPrefix(), holderServer)
 	mux.Handle(walletServer.PathPrefix(), walletServer)

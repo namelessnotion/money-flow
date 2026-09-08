@@ -459,8 +459,12 @@ reading the code:
 
 ## Once this has answered its question
 
-1. Lift the validated reducer into real Go as the design reference for the new orchestrator — likely a new
-   package, since the step-dispatch logic is currently duplicated per-aggregate across `transfer` and `transaction`.
+1. ~~Lift the validated reducer into real Go as the design reference for the new orchestrator — likely a new
+   package, since the step-dispatch logic is currently duplicated per-aggregate across `transfer` and `transaction`.~~
+   **Done, 2026-09-08** — `go/internal/saga`, with the failure policy written up as
+   [`go/docs/adr/0003`](../go/docs/adr/0003-orchestrator-failure-handling.md). It orchestrates rather than
+   re-implementing: each aggregate still folds its own stream, and the new package only decides who to wake.
+   Deduplicating `appendSagaStep` itself was deliberately left alone.
 2. ~~Write the ADRs~~ — **done, 2026-09-07:**
    - [`docs/adr/0001-async-event-driven-saga-and-postgres-to-kafka-publication.md`](../docs/adr/0001-async-event-driven-saga-and-postgres-to-kafka-publication.md)
    - [`go/docs/adr/0001-event-triggered-saga-orchestrator.md`](../go/docs/adr/0001-event-triggered-saga-orchestrator.md)

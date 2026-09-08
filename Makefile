@@ -1,4 +1,4 @@
-.PHONY: up down restart migrate ssl proto cdc-up cdc-down
+.PHONY: up down restart migrate ssl proto cdc-up cdc-down orchestrator-up orchestrator-down orchestrator-logs
 
 up:
 	docker compose up -d
@@ -62,3 +62,15 @@ cdc-up:
 
 cdc-down:
 	docker/cdc/teardown.sh
+
+# Event-triggered saga orchestrator (docs/saga-orchestrator.md). It consumes
+# the topics the CDC connector publishes, so run `make cdc-up` first; without
+# the connector there is nothing on them and it simply idles.
+orchestrator-up:
+	docker compose up -d orchestrator
+
+orchestrator-down:
+	docker compose stop orchestrator
+
+orchestrator-logs:
+	docker compose logs -f orchestrator

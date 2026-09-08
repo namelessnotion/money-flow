@@ -690,6 +690,22 @@ func (s *Server) cancelPrepared(ctx context.Context, transferID, reason string) 
 	}
 }
 
+// Resume advances transferID's saga from whatever its stream currently
+// records, and is the event-triggered orchestrator's entire vocabulary for a
+// Transfer: a delivered message names an aggregate, and this re-folds that
+// aggregate's authoritative state and dispatches whatever comes next
+// (go/docs/adr/0001). It is exactly runSaga, exported — deliberately not a
+// second implementation — so a trigger and an RPC drive the Transfer through
+// the same code and converge on the same result when both do it at once.
+//
+// Safe to call any number of times: a Transfer already parked on the outside
+// world or already terminal is left exactly as it is. An id with no stream is
+// an error, not a no-op — every trigger names an aggregate the log already
+// holds, so an unknown one is an inconsistency worth surfacing.
+func (s *Server) Resume(ctx context.Context, transferID string) error {
+	return s.runSaga(ctx, transferID)
+}
+
 // runSaga folds the Transfer's current state and dispatches the next step,
 // looping until it reaches a state that waits on something outside this
 // call — the outside world (Staged, Pending) or a true terminal (Committed,
