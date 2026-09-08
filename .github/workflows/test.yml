@@ -19,16 +19,23 @@ jobs:
         env:
           POSTGRES_USER: money_flow
           POSTGRES_PASSWORD: money_flow
-          POSTGRES_DB: money_flow_dev
+          POSTGRES_DB: money_flow_test
         options: >-
-          --health-cmd "pg_isready -U money_flow -d money_flow_dev"
+          --health-cmd "pg_isready -U money_flow -d money_flow_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
         ports:
           - 5432:5432
     env:
-      DATABASE_URL: postgres://money_flow:money_flow@localhost:5432/money_flow_dev?sslmode=disable
+      # The Go tests append to the real event log, and the events table's
+      # append-only triggers make anything written there permanent — so they
+      # read TEST_DATABASE_URL and refuse outright to run against a database
+      # whose name doesn't end in _test. DATABASE_URL is what cmd/migrate
+      # reads; in CI the service database is created fresh per job, so both
+      # point at the same throwaway database.
+      DATABASE_URL: postgres://money_flow:money_flow@localhost:5432/money_flow_test?sslmode=disable
+      TEST_DATABASE_URL: postgres://money_flow:money_flow@localhost:5432/money_flow_test?sslmode=disable
 
     steps:
       - name: Checkout repository
@@ -66,7 +73,12 @@ jobs:
         ports:
           - 5432:5432
     env:
-      DATABASE_URL: postgres://money_flow:money_flow@localhost:5432/money_flow_dev?sslmode=disable
+      # DATABASE_URL is deliberately absent: spec_helper sets APP_ENV=test,
+      # which makes lib/boot connect to TEST_DATABASE_URL instead, and then
+      # refuses to run at all against a database whose name doesn't end in
+      # _test. The specs assert on whole-table queries, so sharing a database
+      # with anything else makes them fail on rows they didn't create.
+      TEST_DATABASE_URL: postgres://money_flow:money_flow@localhost:5432/money_flow_test?sslmode=disable
 
     steps:
       - name: Checkout repository
@@ -79,9 +91,12 @@ jobs:
           bundler-cache: true
           working-directory: ruby
 
-      - name: Apply Ruby migrations
+      # The service above only creates money_flow_dev, so this exercises the
+      # same create-then-migrate path a fresh developer machine takes rather
+      # than a CI-only shortcut.
+      - name: Create and migrate the test database
         working-directory: ruby
-        run: bundle exec bin/migrate up
+        run: bundle exec bin/setup_test_db
 
       - name: Run Ruby specs
         working-directory: ruby

@@ -60,6 +60,10 @@ services:
       dockerfile: docker/go/Dockerfile
     environment:
       DATABASE_URL: postgres://money_flow:money_flow@postgres:5432/money_flow_dev?sslmode=disable
+      # Shared with the ruby service. The Go tests append to the real event
+      # log and its append-only triggers make that permanent, so they read
+      # this in preference to DATABASE_URL. See go/internal/eventstore.
+      TEST_DATABASE_URL: postgres://money_flow:money_flow@postgres:5432/money_flow_test?sslmode=disable
       DB_HOST: postgres
       LISTEN_ADDR: ":8080"
       TIGERBEETLE_ADDRESS: tigerbeetle:3000
