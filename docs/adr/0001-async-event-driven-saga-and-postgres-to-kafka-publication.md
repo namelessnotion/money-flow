@@ -43,7 +43,7 @@ Nothing is in production, so this is a **hard cutover** — no strangler, no par
 
 ## Evidence
 
-From the throwaway prototype on branch `prototype/async-saga-state-model`, which modelled one Transaction with
+From the throwaway prototype in [`prototype/`](../../prototype/prototype-async-saga-state-model.md), which modelled one Transaction with
 two child Transfers (one staged, one not) against duplicate, reordered, delayed and dropped delivery. Five
 invariants were checked after every action, and a seeded fuzzer searched for violations. 2,000 runs × 400 steps
 per configuration:
@@ -56,7 +56,8 @@ per configuration:
 | …but event-as-data                           | 0 / 2000     | 13     | 1945             |
 | …but no partition key                        | 430 / 2000   | 0      | 1828             |
 
-The prototype is deleted from `main` once this ADR lands, so these numbers live here.
+The prototype is kept in `prototype/` for reference, but it is throwaway and unmaintained — these numbers are
+reproduced here so this decision stands on its own if it is ever deleted.
 
 ## Why not a polling relay
 

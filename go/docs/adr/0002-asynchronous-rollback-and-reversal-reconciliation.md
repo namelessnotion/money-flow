@@ -43,7 +43,8 @@ state's only route.
 
 ## Evidence
 
-Prototype branch `prototype/async-saga-state-model`, extended with Reversals as real child aggregates and a
+The prototype ([`prototype/`](../../../prototype/prototype-async-saga-state-model.md)), extended with Reversals
+as real child aggregates and a
 three-child DAG (`C` depends on `A` and `B`). Under the configuration adopted in the root ADR — CDC, per-type
 topics, event-as-trigger, keyed by aggregate id — **3,000 runs × 500 steps: 0 violations, 0 stalls, and all
 3,000 reached a terminal Transaction state** (2,572 `rolled_back`, 425 `rollback_failed`, 3 `completed`). 477

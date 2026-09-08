@@ -37,7 +37,8 @@ Two corollaries, both load-bearing:
 
 ## Evidence
 
-The prototype (branch `prototype/async-saga-state-model`) ran both readings over identical steps.
+The prototype ([`prototype/`](../../../prototype/prototype-async-saga-state-model.md)) ran both readings over
+identical steps.
 
 **Liveness.** Under event-as-data, the orchestrator records child reconciliation off the `transfer` topic but
 only re-evaluates "are all children terminal?" off the `transaction` topic. A Transaction whose children both

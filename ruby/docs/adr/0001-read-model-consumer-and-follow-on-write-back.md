@@ -43,7 +43,7 @@ That asymmetry is the whole reason this ADR exists separately.
 
 ## Evidence
 
-From the prototype on branch `prototype/async-saga-state-model`.
+From the prototype in [`prototype/`](../../../prototype/prototype-async-saga-state-model.md).
 
 **Why the monotonic guard.** Last-write-wins is idempotent under *duplication* — applying "this aggregate is now
 in state X" twice changes nothing — and defenceless under *reordering*. The fuzzer found this unprompted in 54

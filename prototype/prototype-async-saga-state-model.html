@@ -1,0 +1,1566 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PROTOTYPE — Async Saga State Model (throwaway, do not ship)</title>
+<style>
+  :root {
+    --bg: #f6f7fa; --surface: #fff; --surface-2: #eef0f5; --border: #dde1e8;
+    --text: #1b1f27; --muted: #5b6472; --accent: #4c56d6; --accent-soft: #eceeff;
+    --good: #1f8a5f; --good-soft: #e8f6ef; --bad: #b3261e; --bad-soft: #fdeceb;
+    --warn: #9a6700; --warn-soft: #fff6e0;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; line-height:1.5; }
+  .wrap { max-width: 1180px; margin:0 auto; padding: 28px 20px 80px; }
+  h1 { font-size: 24px; margin: 0 0 6px; }
+  .banner { background: var(--warn-soft); color: var(--warn); border:1px solid #f0d999; border-radius:8px; padding:8px 12px; font-size:13px; font-weight:600; margin-bottom:16px; display:inline-block; }
+  .intro { max-width: 78ch; color: var(--muted); font-size:14.5px; margin: 0 0 22px; }
+  .intro code { background:var(--surface-2); border:1px solid var(--border); border-radius:4px; padding:0 4px; font-size:0.92em; }
+  section { margin-top: 26px; }
+  h2 { font-size: 15px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin: 0 0 10px; }
+  .panel { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:16px; }
+  .cols { display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
+  @media (max-width: 820px) { .cols { grid-template-columns: 1fr; } }
+  .col-title { font-weight:700; font-size:13px; margin-bottom:10px; display:flex; align-items:center; gap:6px; }
+  .dot { width:8px; height:8px; border-radius:50%; display:inline-block; }
+  .dot.go { background:var(--accent); }
+  .dot.ruby { background:var(--good); }
+  .card { border:1px solid var(--border); border-radius:8px; padding:10px 12px; margin-bottom:10px; }
+  .card-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
+  .card-head b { font-size:13px; }
+  .pill { font-size:11px; font-weight:700; padding:2px 8px; border-radius:999px; text-transform:uppercase; letter-spacing:.03em; background:var(--surface-2); color:var(--muted); }
+  .pill.accepted, .pill.requested, .pill.started, .pill.rollback_started { background:var(--warn-soft); color:var(--warn); }
+  .pill.prepared, .pill.staged, .pill.pending { background:var(--accent-soft); color:var(--accent); }
+  .pill.committed, .pill.completed, .pill.rolled_back { background:var(--good-soft); color:var(--good); }
+  .pill.failed, .pill.cancelled, .pill.rollback_failed { background:var(--bad-soft); color:var(--bad); }
+  .pill.unstarted, .pill.untouched { background:var(--surface-2); color:var(--muted); }
+  .badge { font-size:10.5px; color:var(--muted); border:1px solid var(--border); border-radius:4px; padding:1px 5px; margin-left:6px; }
+  .kids { font-size:12px; color:var(--muted); margin-top:6px; }
+  .kids span { margin-right:10px; }
+  .topics { display:flex; flex-direction:column; gap:10px; }
+  .topic-row { border:1px solid var(--border); border-radius:8px; padding:10px 12px; }
+  .topic-title { font-size:12px; font-weight:700; margin-bottom:6px; color:var(--muted); text-transform:uppercase; letter-spacing:.03em; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; overflow-x:auto; }
+  .chip { font-size:11px; font-family: ui-monospace, monospace; border:1px solid var(--border); border-radius:6px; padding:3px 6px; background:var(--surface-2); white-space:nowrap; }
+  .chip .tags { margin-left:4px; }
+  .chip .tag { padding:0 3px; border-radius:3px; font-weight:700; }
+  .chip .tag.s { background:var(--accent-soft); color:var(--accent); }
+  .chip .tag.r { background:#e8f6ef; color:var(--good); }
+  .chip .part { margin-left:5px; padding:0 4px; border-radius:3px; background:var(--surface); border:1px solid var(--border); color:var(--muted); font-size:10px; }
+  .bookmarks { font-size:11px; color:var(--muted); margin-top:6px; }
+  .empty { color:var(--muted); font-size:12px; font-style:italic; }
+  .btn-group { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; }
+  .btn-group-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.03em; color:var(--muted); width:100%; margin: 8px 0 2px; }
+  button.act { font: inherit; font-size:12.5px; padding:7px 11px; border-radius:7px; border:1px solid var(--border); background:var(--surface); cursor:pointer; color:var(--text); }
+  button.act:hover:not(:disabled) { border-color:var(--accent); color:var(--accent); }
+  button.act:disabled { opacity:.42; cursor:not-allowed; }
+  button.act.accent { background:var(--accent); border-color:var(--accent); color:#fff; }
+  /* Without re-stating the colour, the generic .act:hover rule above repaints
+     an accent button's label in the accent colour — on the accent background,
+     i.e. invisible for as long as the pointer rests on it. */
+  button.act.accent:hover:not(:disabled) { opacity:.9; color:#fff; }
+  .toggle-row { display:flex; gap:18px; align-items:center; margin-bottom:10px; flex-wrap:wrap; }
+  .mode-note { font-size:13px; color:var(--muted); background:var(--surface); border:1px solid var(--border);
+               border-left:3px solid var(--accent); border-radius:0 8px 8px 0; padding:10px 12px; max-width:88ch; margin-bottom:14px; }
+  .mode-note b { color:var(--text); }
+  .toggle-row .value { font-weight:700; color:var(--accent); }
+  .inv-list { display:flex; flex-direction:column; gap:6px; }
+  .inv { display:flex; align-items:baseline; gap:10px; font-size:12.5px; padding:6px 10px; border-radius:6px; border:1px solid var(--border); }
+  .inv .st { font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.03em; padding:1px 7px; border-radius:999px; flex:none; }
+  .inv .nm { font-weight:600; flex:none; }
+  .inv .dt { color:var(--muted); font-size:12px; }
+  .inv.ok { background:var(--good-soft); border-color:#bfe3d2; } .inv.ok .st { background:var(--good); color:#fff; }
+  .inv.lag { background:var(--surface-2); } .inv.lag .st { background:var(--muted); color:#fff; }
+  .inv.stalled { background:var(--warn-soft); border-color:#f0d999; } .inv.stalled .st { background:var(--warn); color:#fff; }
+  .inv.violated { background:var(--bad-soft); border-color:#f3c3bf; } .inv.violated .st { background:var(--bad); color:#fff; }
+  .fuzz-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:12px; padding-top:12px; border-top:1px dashed var(--border); }
+  .fuzz-note { font-size:12px; color:var(--muted); flex-basis:100%; margin:0; }
+  #fuzzResult { font-size:12.5px; font-family: ui-monospace, monospace; }
+  .log { font-family: ui-monospace, monospace; font-size:11.5px; max-height:220px; overflow-y:auto; background:var(--surface-2); border-radius:8px; padding:10px 12px; }
+  .log div { padding:2px 0; border-bottom:1px dashed var(--border); }
+  .log div:last-child { border-bottom:none; }
+  .tabs { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px; }
+  .tab-btn { font-size:12.5px; padding:7px 12px; border-radius:7px 7px 0 0; border:1px solid var(--border); border-bottom:none; background:var(--surface-2); cursor:pointer; color:var(--muted); }
+  .tab-btn.active { background:var(--surface); color:var(--accent); font-weight:700; }
+  .scenario-body { border:1px solid var(--border); border-radius:0 8px 8px 8px; padding:14px; background:var(--surface); }
+  .scenario-desc { font-size:13.5px; color:var(--muted); margin-bottom:12px; max-width:80ch; }
+  .step-list { display:flex; flex-direction:column; gap:6px; }
+  .step { display:flex; align-items:center; gap:10px; font-size:12.5px; }
+  .step .n { width:22px; height:22px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700; background:var(--surface-2); color:var(--muted); flex:none; }
+  .step.done .n { background:var(--good-soft); color:var(--good); }
+  .step.next .n { background:var(--accent); color:#fff; }
+  .step button.act { flex:none; }
+  .step.done { color: var(--muted); }
+  .step.done button.act { display:none; }
+  .step:not(.next):not(.done) button.act { display:none; }
+  .scenario-done { color: var(--good); font-weight:700; font-size:13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <span class="banner">PROTOTYPE — throwaway, click-through demo. Not shippable code. Delete after the question below is answered.</span>
+  <h1>Async, Kafka-driven saga vs. today's in-process sync saga</h1>
+  <p class="intro">
+    <b>The question this demo answers:</b> today's <code>runSaga</code> folds a Transfer/Transaction's own event
+    stream and dispatches the next step synchronously, in-process. If instead a saga orchestrator reacts to
+    domain events delivered through Kafka — where delivery can be delayed, duplicated, or reordered, publication
+    can happen via CDC or a polling relay, topics can be unified or split per aggregate type, and Ruby (or any
+    CQRS-style read model) consumes the same stream independently — does the Transfer/Transaction state model
+    still reach correct terminal outcomes, or does it produce states the pieces would disagree about? Use the
+    buttons below freely, or step through a guided scenario in the tabs — the interesting moments are the ones
+    where something looks like it shouldn't be possible.
+  </p>
+
+  <section>
+    <div class="toggle-row">
+      <div>Publisher mode: <span class="value" id="pubModeLabel"></span>
+        <button class="act" data-action='{"type":"TOGGLE_PUBLISHER"}'>Toggle (CDC ⇄ Polling)</button></div>
+      <div>Topic topology: <span class="value" id="topologyLabel"></span>
+        <button class="act" data-action='{"type":"TOGGLE_TOPOLOGY"}'>Toggle (Unified ⇄ Per-Type)</button></div>
+      <div>Saga handler: <span class="value" id="handlerModeLabel"></span>
+        <button class="act" data-action='{"type":"TOGGLE_HANDLER"}'>Toggle (Data ⇄ Trigger)</button></div>
+      <div>Partition key: <span class="value" id="partitionKeyLabel"></span>
+        <button class="act" data-action='{"type":"CYCLE_PARTITION_KEY"}'>Cycle (None → Aggregate → Transaction)</button></div>
+      <div>Saga orchestrator: <span class="value" id="sagaAliveLabel"></span></div>
+      <button class="act" data-action='{"type":"RESET"}'>Reset everything</button>
+    </div>
+    <div class="mode-note" id="handlerModeNote"></div>
+    <div class="mode-note" id="partitionKeyNote"></div>
+  </section>
+
+  <section>
+    <h2>Invariants</h2>
+    <div class="panel">
+      <div class="inv-list" id="invariantBar"></div>
+      <div class="fuzz-row">
+        <button class="act" data-fuzz="200">Fuzz 200 steps from here</button>
+        <button class="act accent" data-hunt="50">Hunt for a violation (50 × 200 steps)</button>
+        <span id="fuzzResult"></span>
+        <p class="fuzz-note">
+          The fuzzer picks uniformly from whatever is legal right now — domain steps, publishes, duplicates,
+          reorders, consumes, crashes — and stops the instant an invariant is violated, leaving the model and the
+          activity log sitting on the reproduction. It never touches publisher mode, topology or handler
+          semantics: those are the knobs under test, so set them first and hunt under each. Runs are seeded and
+          the seed is reported, so a hit is replayable.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Current state</h2>
+    <div class="panel cols">
+      <div>
+        <div class="col-title"><span class="dot go"></span> Go — authoritative</div>
+        <div id="goPanel"></div>
+      </div>
+      <div>
+        <div class="col-title"><span class="dot ruby"></span> Ruby / read-model consumer <span class="badge">general CQRS shape — Ruby is one instance</span></div>
+        <div id="rubyPanel"></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Kafka</h2>
+    <div class="panel">
+      <div class="topics" id="topicsPanel"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Free play</h2>
+    <div class="panel">
+      <div id="transferGroups"></div>
+      <div class="btn-group-label">Transaction</div>
+      <div class="btn-group" id="txnGroup"></div>
+      <div class="btn-group-label">Delivery / plumbing</div>
+      <div class="btn-group" id="plumbingGroup"></div>
+      <div class="btn-group-label">Transfer topic (crash/consume)</div>
+      <div class="btn-group" id="transferTopicGroup"></div>
+      <div class="btn-group-label">Transaction topic (crash/consume)</div>
+      <div class="btn-group" id="transactionTopicGroup"></div>
+      <div class="btn-group-label">Ruby follow-on</div>
+      <div class="btn-group" id="followOnGroup"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Guided walkthroughs</h2>
+    <div class="tabs" id="tabsBar"></div>
+    <div class="scenario-body" id="scenarioBody"></div>
+  </section>
+
+  <section>
+    <h2>Activity log</h2>
+    <div class="log" id="activityLog"></div>
+  </section>
+</div>
+
+<script>
+'use strict';
+
+/* =========================================================================
+ * SagaModel — pure reducer module. No DOM access. Liftable into real code.
+ * States/legality mirror go/internal/transfer/saga.go and
+ * go/internal/transaction/saga.go directly.
+ * ========================================================================= */
+const SagaModel = (() => {
+  // The Transaction's declared children. B depends on A, so the DAG actually
+  // orders something: A dispatches first, and rollback must undo B before A.
+  const TRANSFER_IDS = ['A', 'B', 'C'];
+  const DEPENDS_ON = { A: [], B: [], C: ['A', 'B'] };
+  const DEPENDENTS = { A: ['C'], B: ['C'], C: [] };
+
+  // Deterministic reversal id, mirroring detid.New(txnID + ":reversal:" + childID)
+  // (go/internal/transaction/saga.go). Deterministic so re-requesting a reversal
+  // after redelivery cannot create a second one.
+  function reversalIdFor(childID) { return `rev:${childID}`; }
+  function allTransferIds(m) { return Object.keys(m.transfers); }
+  function isReversal(id) { return id.startsWith('rev:'); }
+  const TRANSFER_TERMINAL = { committed: 'completed', failed: 'failed', cancelled: 'failed' };
+
+  function initial() {
+    return {
+      transfers: {
+        A: { requiresStaging: false, state: 'unstarted' },
+        B: { requiresStaging: true, state: 'unstarted' },
+        C: { requiresStaging: false, state: 'unstarted' },
+      },
+      transaction: { state: 'unstarted', children: { A: 'untouched', B: 'untouched', C: 'untouched' }, reversals: {} },
+      eventLog: [],
+      publishCursor: 0,
+      topics: { transfer: [], transaction: [], unified: [] },
+      bookmarks: {
+        saga: { transfer: 0, transaction: 0, unified: 0 },
+        ruby: { transfer: 0, transaction: 0, unified: 0 },
+      },
+      sagaProcessed: {},
+      sagaAlive: true,
+      rubyView: {
+        transfers: { A: 'unstarted', B: 'unstarted', C: 'unstarted' },
+        transaction: 'unstarted',
+      },
+      rubyFollowOns: {},
+      publisherMode: 'polling',
+      topicTopology: 'per-type',
+      handlerMode: 'data',
+      partitionKey: 'none',
+      rubyPathViolations: [],
+      lastPublishedTopic: null,
+      skippedSeqs: {},
+      activity: [],
+    };
+  }
+
+  function clone(m) { return JSON.parse(JSON.stringify(m)); }
+  function log(m, msg) { m.activity.unshift(msg); if (m.activity.length > 60) m.activity.length = 60; }
+  function pushEvent(m, aggType, aggId, type) {
+    const seq = m.eventLog.length + 1;
+    m.eventLog.push({ seq, aggType, aggId, type });
+    return seq;
+  }
+  const PARTITION_KEYS = ['none', 'aggregate', 'transaction'];
+
+  // Which Transaction an aggregate belongs to. The model has exactly one, but
+  // routing through a lookup keeps the intent visible: keying by transaction
+  // means a Transfer rides on its parent's partition, not its own.
+  function transactionOf(evt) {
+    if (evt.aggType === 'transaction') return evt.aggId;
+    if (evt.aggType === 'transfer') return 'txn';
+    return null;
+  }
+
+  // partitionOf models Kafka's actual ordering guarantee: messages sharing a
+  // partition keep their relative order, messages in different partitions have
+  // no defined order at all. The key decides which is which.
+  //   none        — no key, round-robin: every message its own partition, so
+  //                 nothing is ordered against anything
+  //   aggregate   — per-aggregate order; only cross-aggregate order is loose
+  //   transaction — a Transfer rides its parent Transaction's partition, so a
+  //                 whole transaction tree is totally ordered *within a topic*
+  function partitionOf(m, evt, index) {
+    switch (m.partitionKey) {
+      case 'aggregate': return `${evt.aggType}:${evt.aggId}`;
+      case 'transaction': return `txn:${transactionOf(evt)}`;
+      default: return `unkeyed:${index}`;
+    }
+  }
+
+  function topicKeyFor(m, aggType) {
+    if (aggType !== 'transfer' && aggType !== 'transaction') return null;
+    return m.topicTopology === 'unified' ? 'unified' : aggType;
+  }
+
+  const TRANSFER_ACTIONS = {
+    accept:        { from: ['unstarted'], to: 'accepted', event: 'TransferAccepted', label: 'Accept' },
+    prepare:       { from: ['accepted'], to: 'prepared', event: 'TransferPrepared', label: 'Prepare' },
+    stage:         { from: ['prepared'], to: 'staged', event: 'TransferStaged', label: 'Stage' },
+    confirmStaged: { from: ['staged'], to: 'pending', event: 'TransferPending', label: 'Confirm Staged' },
+    commit:        { from: ['prepared', 'staged', 'pending'], to: 'committed', event: 'TransferCommitted', label: 'Commit' },
+    rejectLedger:  { from: ['prepared', 'staged', 'pending'], to: 'failed', event: 'TransferFailed', label: 'Reject at Ledger' },
+    cancel:        { from: ['accepted', 'prepared', 'staged', 'pending'], to: 'cancelled', event: 'TransferCancelled', label: 'Cancel' },
+  };
+
+  // The legal single-step edges of each state machine, derived from the same
+  // action table the UI gates on so the two can't drift. Used to check that a
+  // read model's *observed path* is a walk of the machine, not just that its
+  // final resting state happens to match.
+  const TRANSFER_EDGES = (() => {
+    const edges = {};
+    for (const spec of Object.values(TRANSFER_ACTIONS)) {
+      for (const from of spec.from) {
+        (edges[from] = edges[from] || new Set()).add(spec.to);
+      }
+    }
+    return edges;
+  })();
+  const TRANSACTION_EDGES = {
+    unstarted: new Set(['started']),
+    started: new Set(['completed', 'rollback_started']),
+    rollback_started: new Set(['rolled_back', 'rollback_failed']),
+  };
+
+  function transferActionLegality(m, id, action) {
+    const t = m.transfers[id];
+    const spec = TRANSFER_ACTIONS[action];
+    if (!spec) return { legal: false, reason: 'unknown action' };
+    if ((action === 'stage' || action === 'confirmStaged') && !t.requiresStaging) {
+      return { legal: false, reason: `Transfer ${id} doesn't require staging` };
+    }
+    if (action === 'commit' && t.requiresStaging && t.state === 'prepared') {
+      return { legal: false, reason: `Transfer ${id} requires staging — Stage (and Confirm) before Commit` };
+    }
+    if (!spec.from.includes(t.state)) {
+      return { legal: false, reason: `Not legal from ${t.state}` };
+    }
+    return { legal: true };
+  }
+
+  function applyTransfer(m, id, action) {
+    const legality = transferActionLegality(m, id, action);
+    const spec = TRANSFER_ACTIONS[action];
+    if (!legality.legal) { log(m, `Refused: ${spec ? spec.label : action} on Transfer ${id} — ${legality.reason}`); return m; }
+    m.transfers[id].state = spec.to;
+    const seq = pushEvent(m, 'transfer', id, spec.event);
+    log(m, `Transfer ${id}: ${spec.event} (event #${seq})`);
+    return m;
+  }
+
+  function canStartTransaction(m) { return m.transaction.state === 'unstarted'; }
+  function applyStartTransaction(m) {
+    if (!canStartTransaction(m)) { log(m, 'Refused: Start Transaction — already started'); return m; }
+    m.transaction.state = 'started';
+    const seq = pushEvent(m, 'transaction', 'txn', 'TransactionStarted');
+    log(m, `Transaction: TransactionStarted (event #${seq})`);
+    return m;
+  }
+
+  // readyToRun mirrors readyToRun in go/internal/transaction/saga.go: a child is
+  // dispatchable once untouched and every dependency has completed.
+  function readyToRun(m, id) {
+    if (m.transaction.children[id] !== 'untouched') return false;
+    return DEPENDS_ON[id].every(dep => m.transaction.children[dep] === 'completed');
+  }
+
+  function canDispatchReady(m) {
+    return m.transaction.state === 'started' && TRANSFER_IDS.some(id => readyToRun(m, id));
+  }
+  function applyDispatchReady(m) {
+    if (m.transaction.state !== 'started') { log(m, 'Refused: Dispatch Ready Children — transaction not started'); return m; }
+    let any = false;
+    for (const id of TRANSFER_IDS) {
+      if (readyToRun(m, id)) {
+        m.transaction.children[id] = 'requested';
+        const seq = pushEvent(m, 'transaction', 'txn', `TransferRequestedWithinTransaction(${id})`);
+        log(m, `Transaction: dispatched Transfer ${id} (event #${seq})`);
+        any = true;
+      }
+    }
+    if (!any) {
+      const blocked = TRANSFER_IDS.filter(id => m.transaction.children[id] === 'untouched');
+      log(m, blocked.length
+        ? `Dispatch Ready Children: ${blocked.join(', ')} still gated on ${blocked.flatMap(id => DEPENDS_ON[id]).join(', ')}`
+        : 'Dispatch Ready Children: nothing to dispatch');
+    }
+    return m;
+  }
+
+  const CHILD_RESOLVED = ['rolled_back', 'rollback_failed'];
+
+  // readyToRollback mirrors readyToRollback: undo a child only once everything
+  // that depended on it is already resolved. B depends on A, so B rolls back first.
+  function readyToRollback(m, id) {
+    const st = m.transaction.children[id];
+    if (CHILD_RESOLVED.includes(st)) return false;
+    if (st === 'rollback_requested') return false; // already in flight, waiting on its reversal
+    return DEPENDENTS[id].every(dep => CHILD_RESOLVED.includes(m.transaction.children[dep]) || m.transaction.children[dep] === 'untouched');
+  }
+
+  function canRollbackChild(m) {
+    return m.transaction.state === 'rollback_started' && TRANSFER_IDS.some(id => readyToRollback(m, id));
+  }
+
+  // applyRollbackChild advances rollback by one child, branching on that child's
+  // LIVE outcome exactly as rollbackChild does. The branch that changed under the
+  // async cutover is 'committed': a Reversal is a whole new Transfer aggregate
+  // running its own saga, so it cannot be confirmed inline. The child parks in
+  // rollback_requested and is resolved later from the reversal's live outcome —
+  // the same shape the forward path already uses for childRequested.
+  function applyRollbackChild(m) {
+    if (m.transaction.state !== 'rollback_started') { log(m, 'Refused: Roll Back Child — transaction not in rollback_started'); return m; }
+    const target = TRANSFER_IDS.find(id => readyToRollback(m, id));
+    if (!target) {
+      const waiting = TRANSFER_IDS.filter(id => m.transaction.children[id] === 'rollback_requested');
+      log(m, waiting.length
+        ? `Roll Back Child: ${waiting.join(', ')} waiting on their reversals to commit`
+        : 'Roll Back Child: nothing ready to roll back');
+      return m;
+    }
+    const st = m.transaction.children[target];
+    const live = m.transfers[target].state;
+
+    // Never requested, or already resolved on its own — nothing to undo.
+    if ((st !== 'requested' && st !== 'completed') || live === 'failed' || live === 'cancelled' || live === 'unstarted') {
+      m.transaction.children[target] = 'rolled_back';
+      const seq = pushEvent(m, 'transaction', 'txn', `TransferRolledBackWithinTransaction(${target}:abandoned)`);
+      log(m, `Transaction: rolled back Transfer ${target} via abandoned (event #${seq})`);
+      return m;
+    }
+
+    // Committed — request a Reversal and WAIT. This is the async change.
+    if (live === 'committed') {
+      const rid = reversalIdFor(target);
+      if (!m.transfers[rid]) {
+        // The reversal inherits the original's staging requirement, exactly as
+        // rollbackChild passes Stage: spec.GetStage() through to RequestReversal.
+        // So reversing a staged Transfer creates a staged Reversal, and rollback
+        // then legitimately waits on the outside world.
+        m.transfers[rid] = { requiresStaging: m.transfers[target].requiresStaging, state: 'accepted', reversalOf: target };
+        const seqA = pushEvent(m, 'transfer', rid, 'ReversalRequestAccepted');
+        log(m, `Reversal ${rid}: ReversalRequestAccepted${m.transfers[rid].requiresStaging ? ' (requires staging)' : ''} (event #${seqA})`);
+      }
+      m.transaction.reversals[target] = rid;
+      m.transaction.children[target] = 'rollback_requested';
+      const seq = pushEvent(m, 'transaction', 'txn', `TransferReversalRequestedWithinTransaction(${target}:${rid})`);
+      log(m, `Transaction: requested reversal of Transfer ${target} as ${rid} — waiting on its own saga (event #${seq})`);
+      return m;
+    }
+
+    // In flight, staged or pending — cancel is a synchronous RPC that completes
+    // before returning, so this branch still resolves in one step.
+    m.transfers[target].state = 'cancelled';
+    const seqC = pushEvent(m, 'transfer', target, 'TransferCancelled');
+    log(m, `Transfer ${target}: TransferCancelled by rollback (event #${seqC})`);
+    m.transaction.children[target] = 'rolled_back';
+    const seq = pushEvent(m, 'transaction', 'txn', `TransferRolledBackWithinTransaction(${target}:cancelled)`);
+    log(m, `Transaction: rolled back Transfer ${target} via cancelled (event #${seq})`);
+    return m;
+  }
+
+  // reconcileRollback resolves a child parked in rollback_requested from its
+  // Reversal's live outcome — the rollback-side twin of reconcileChild.
+  function reconcileRollback(m, id) {
+    if (m.transaction.children[id] !== 'rollback_requested') return false;
+    const rid = m.transaction.reversals[id];
+    const rev = rid && m.transfers[rid];
+    if (!rev) return false;
+    if (rev.state === 'committed') {
+      m.transaction.children[id] = 'rolled_back';
+      const seq = pushEvent(m, 'transaction', 'txn', `TransferRolledBackWithinTransaction(${id}:reversed)`);
+      log(m, `Saga reconciled rollback: Transfer ${id} reversed by ${rid} (event #${seq})`);
+      return true;
+    }
+    if (rev.state === 'failed' || rev.state === 'cancelled') {
+      m.transaction.children[id] = 'rollback_failed';
+      const seq = pushEvent(m, 'transaction', 'txn', `TransferRollbackFailedWithinTransaction(${id}:${rid} reached ${rev.state})`);
+      log(m, `Saga reconciled rollback: Transfer ${id} ROLLBACK FAILED — ${rid} reached ${rev.state} (event #${seq})`);
+      return true;
+    }
+    return false; // reversal still in flight or waiting on the outside world
+  }
+
+  function reconcileChild(m, id) {
+    const t = m.transfers[id];
+    const outcome = TRANSFER_TERMINAL[t.state];
+    if (!outcome) return false;
+    if (m.transaction.children[id] !== 'requested') return false;
+    m.transaction.children[id] = outcome;
+    return true;
+  }
+
+  // recordReconciliation folds one child's LIVE transfer outcome onto the
+  // Transaction's own stream, mirroring reconcileInFlight
+  // (go/internal/transaction/saga.go:508). Returns true if it recorded
+  // anything, so a trigger-mode caller knows to loop again.
+  function recordReconciliation(m, id) {
+    if (!reconcileChild(m, id)) return false;
+    const outcome = m.transaction.children[id];
+    const eventName = outcome === 'completed' ? 'TransferCompletedWithinTransaction' : 'TransferFailedWithinTransaction';
+    const seq = pushEvent(m, 'transaction', 'txn', `${eventName}(${id})`);
+    log(m, `Saga reconciled: Transfer ${id} \u2192 ${outcome} (event #${seq})`);
+    return true;
+  }
+
+  function reevaluateTransaction(m) {
+    const kids = m.transaction.children;
+
+    if (m.transaction.state === 'started') {
+      if (TRANSFER_IDS.some(id => kids[id] === 'failed')) {
+        m.transaction.state = 'rollback_started';
+        const seq = pushEvent(m, 'transaction', 'txn', 'TransactionRollbackStarted');
+        log(m, `Transaction: TransactionRollbackStarted (event #${seq})`);
+        return;
+      }
+      if (TRANSFER_IDS.every(id => kids[id] === 'completed')) {
+        m.transaction.state = 'completed';
+        const seq = pushEvent(m, 'transaction', 'txn', 'TransactionCompleted');
+        log(m, `Transaction: TransactionCompleted (event #${seq})`);
+      }
+      return;
+    }
+
+    // Rollback closes out only once every child is resolved. A child still in
+    // rollback_requested is waiting on its Reversal's own saga, which is the
+    // wait state the synchronous implementation never had.
+    if (m.transaction.state === 'rollback_started') {
+      if (!TRANSFER_IDS.every(id => CHILD_RESOLVED.includes(kids[id]))) return;
+      if (TRANSFER_IDS.some(id => kids[id] === 'rollback_failed')) {
+        m.transaction.state = 'rollback_failed';
+        const seq = pushEvent(m, 'transaction', 'txn', 'TransactionRollbackFailed');
+        log(m, `Transaction: TransactionRollbackFailed (event #${seq})`);
+        return;
+      }
+      m.transaction.state = 'rolled_back';
+      const seq = pushEvent(m, 'transaction', 'txn', 'TransactionRolledBack');
+      log(m, `Transaction: TransactionRolledBack (event #${seq})`);
+    }
+  }
+
+  // runSagaLoop is the event-as-TRIGGER handler: the delivered message is
+  // treated as nothing but "some aggregate moved", and the orchestrator
+  // re-folds authoritative state from scratch — sweeping every requested
+  // child's live outcome and re-evaluating the Transaction, looping until
+  // nothing progresses. That is the shape runSaga already has today
+  // (go/internal/transaction/saga.go:338): load, dispatch, continue. Because
+  // it never reads the delivered message's payload, redelivery, reordering
+  // and cross-topic arrival order cannot change where it lands — the message
+  // only has to arrive at-least-once, eventually, in any order.
+  function runSagaLoop(m) {
+    for (let guard = 0; guard < 32; guard++) {
+      let progressed = false;
+      for (const id of TRANSFER_IDS) {
+        if (recordReconciliation(m, id)) progressed = true;
+        if (reconcileRollback(m, id)) progressed = true;
+      }
+      if (progressed) continue;
+      const before = m.transaction.state;
+      reevaluateTransaction(m);
+      if (m.transaction.state === before) return;
+    }
+    log(m, 'Saga loop guard tripped after 32 passes — the reducer is not converging');
+  }
+
+  function canPublishNext(m) { return m.publishCursor < m.eventLog.length; }
+  function applyPublishNext(m) {
+    if (!canPublishNext(m)) { log(m, 'Publish Next Event: nothing new to publish'); return m; }
+    const evt = m.eventLog[m.publishCursor];
+    m.publishCursor += 1;
+    const topicKey = topicKeyFor(m, evt.aggType);
+    if (!topicKey) { log(m, `${evt.type} (event #${evt.seq}) is not published to Kafka (internal record)`); return m; }
+    m.topics[topicKey].push(evt.seq);
+    m.lastPublishedTopic = topicKey;
+    log(m, `Published ${evt.type} (event #${evt.seq}) → ${topicKey} topic`);
+    return m;
+  }
+
+  function canDuplicateLast(m) { return !!m.lastPublishedTopic && m.topics[m.lastPublishedTopic].length > 0; }
+  function applyDuplicateLast(m) {
+    if (!canDuplicateLast(m)) { log(m, 'Duplicate Last Delivery: nothing published yet'); return m; }
+    const topicKey = m.lastPublishedTopic;
+    const arr = m.topics[topicKey];
+    const seq = arr[arr.length - 1];
+    arr.push(seq);
+    const evt = m.eventLog.find(e => e.seq === seq);
+    log(m, `Duplicated ${evt.type} (event #${seq}) on ${topicKey} topic — redelivered`);
+    return m;
+  }
+
+  // findSwappablePair looks for two *adjacent* undelivered messages that sit in
+  // different partitions — the only pair whose relative order Kafka leaves
+  // undefined, and therefore the only pair a broker is free to hand over
+  // swapped. Under a key that puts both in one partition, there is no such
+  // pair and the reorder is genuinely impossible, not merely unlikely.
+  function findSwappablePair(m) {
+    for (const k of Object.keys(m.topics)) {
+      const arr = m.topics[k];
+      const beyond = Math.max(m.bookmarks.saga[k], m.bookmarks.ruby[k]);
+      for (let i = beyond; i + 1 < arr.length; i++) {
+        const a = m.eventLog.find(e => e.seq === arr[i]);
+        const b = m.eventLog.find(e => e.seq === arr[i + 1]);
+        if (!a || !b) continue;
+        if (partitionOf(m, a, i) !== partitionOf(m, b, i + 1)) return { topicKey: k, i, a, b };
+      }
+    }
+    return null;
+  }
+
+  function canReorder(m) { return !!findSwappablePair(m); }
+
+  function applyReorderPending(m) {
+    const pair = findSwappablePair(m);
+    if (!pair) {
+      const anyPending = Object.keys(m.topics).some(k => m.topics[k].length - Math.max(m.bookmarks.saga[k], m.bookmarks.ruby[k]) >= 2);
+      log(m, anyPending
+        ? `Reorder Pending Pair: every undelivered pair shares a partition under key=${m.partitionKey} — the broker cannot reorder them`
+        : 'Reorder Pending Pair: no topic has two undelivered messages to swap');
+      return m;
+    }
+    const arr = m.topics[pair.topicKey];
+    const tmp = arr[pair.i]; arr[pair.i] = arr[pair.i + 1]; arr[pair.i + 1] = tmp;
+    log(m, `Reordered ${pair.topicKey} topic: ${pair.b.type} (#${pair.b.seq}) now arrives before ${pair.a.type} (#${pair.a.seq}) — different partitions under key=${m.partitionKey}`);
+    return m;
+  }
+
+  function canSimulateRestart(m) { return m.publisherMode === 'polling'; }
+  function applySimulateRelayRestart(m) {
+    if (!canSimulateRestart(m)) { log(m, 'Refused: Simulate Relay Restart — only meaningful under Polling'); return m; }
+    applyDuplicateLast(m);
+    if (m.publishCursor < m.eventLog.length) {
+      const evt = m.eventLog[m.publishCursor];
+      m.skippedSeqs[evt.seq] = true;
+      m.publishCursor += 1;
+      log(m, `Relay restart: poll window missed ${evt.type} (event #${evt.seq}) — it will never be published this session`);
+    }
+    return m;
+  }
+
+  function canSagaConsume(m, topicKey) { return m.sagaAlive && m.bookmarks.saga[topicKey] < m.topics[topicKey].length; }
+  function applySagaConsume(m, topicKey) {
+    if (!m.sagaAlive) { log(m, `Refused: Saga Consume Next (${topicKey}) — orchestrator is crashed`); return m; }
+    const topic = m.topics[topicKey];
+    const pos = m.bookmarks.saga[topicKey];
+    if (pos >= topic.length) { log(m, `Saga Consume Next (${topicKey}): nothing new to consume`); return m; }
+    const seq = topic[pos];
+    m.bookmarks.saga[topicKey] = pos + 1;
+    const evt = m.eventLog.find(e => e.seq === seq);
+
+    // Event-as-TRIGGER: the message is only a wake-up. Nothing in its payload
+    // is read; the orchestrator re-folds authoritative state instead.
+    if (m.handlerMode === 'trigger') {
+      const seen = !!m.sagaProcessed[seq];
+      m.sagaProcessed[seq] = true;
+      log(m, `Saga woken by ${evt.type} (event #${seq}) on ${topicKey} topic${seen ? ' — seen before, but a trigger re-folds live state regardless' : ''}`);
+      runSagaLoop(m);
+      return m;
+    }
+
+    // Event-as-DATA: the message itself is the fact being folded, so which
+    // topic it arrived on decides what the handler is even able to do.
+    if (m.sagaProcessed[seq]) {
+      log(m, `Saga consumed ${evt.type} (event #${seq}) on ${topicKey} topic — already recorded, no-op`);
+      return m;
+    }
+    m.sagaProcessed[seq] = true;
+    log(m, `Saga consumed ${evt.type} (event #${seq}) on ${topicKey} topic`);
+    if (evt.aggType === 'transfer') {
+      if (isReversal(evt.aggId)) {
+        const child = TRANSFER_IDS.find(id => m.transaction.reversals[id] === evt.aggId);
+        if (child) reconcileRollback(m, child);
+      } else {
+        recordReconciliation(m, evt.aggId);
+      }
+    } else if (evt.aggType === 'transaction') {
+      reevaluateTransaction(m);
+    }
+    return m;
+  }
+
+  function eventTypeToTransferState(type) {
+    const map = { TransferAccepted: 'accepted', ReversalRequestAccepted: 'accepted', TransferPrepared: 'prepared', TransferStaged: 'staged', TransferPending: 'pending', TransferCommitted: 'committed', TransferFailed: 'failed', TransferCancelled: 'cancelled' };
+    return map[type] || null;
+  }
+  function eventTypeToTransactionState(type) {
+    const map = { TransactionStarted: 'started', TransactionCompleted: 'completed', TransactionRollbackStarted: 'rollback_started', TransactionRolledBack: 'rolled_back', TransactionRollbackFailed: 'rollback_failed' };
+    return map[type] || null;
+  }
+
+  function canRubyConsume(m, topicKey) { return m.bookmarks.ruby[topicKey] < m.topics[topicKey].length; }
+  function applyRubyConsume(m, topicKey) {
+    const topic = m.topics[topicKey];
+    const pos = m.bookmarks.ruby[topicKey];
+    if (pos >= topic.length) { log(m, `Ruby Consume Next (${topicKey}): nothing new to consume`); return m; }
+    const seq = topic[pos];
+    m.bookmarks.ruby[topicKey] = pos + 1;
+    const evt = m.eventLog.find(e => e.seq === seq);
+    log(m, `Ruby consumed ${evt.type} (event #${seq}) on ${topicKey} topic`);
+    if (evt.aggType === 'transfer') {
+      const target = eventTypeToTransferState(evt.type);
+      if (target) {
+        if (m.rubyView.transfers[evt.aggId] === undefined) m.rubyView.transfers[evt.aggId] = 'unstarted';
+        recordRubyEdge(m, `Transfer ${evt.aggId}`, m.rubyView.transfers[evt.aggId], target, evt, TRANSFER_EDGES);
+        m.rubyView.transfers[evt.aggId] = target;
+      }
+    } else if (evt.aggType === 'transaction') {
+      const target = eventTypeToTransactionState(evt.type);
+      if (target) {
+        recordRubyEdge(m, 'Transaction', m.rubyView.transaction, target, evt, TRANSACTION_EDGES);
+        m.rubyView.transaction = target;
+      }
+    }
+    return m;
+  }
+
+  // recordRubyEdge notes when the read model's own state jumps somewhere the
+  // state machine has no edge to. A self-loop is exempt: that is redelivery
+  // of a fact already applied, and absorbing it silently is precisely the
+  // last-write-wins idempotency the projector is relying on.
+  function recordRubyEdge(m, label, from, to, evt, edges) {
+    if (from === to) return;
+    const allowed = edges[from];
+    if (allowed && allowed.has(to)) return;
+    m.rubyPathViolations.push({ label, from, to, seq: evt.seq, type: evt.type });
+    log(m, `INVARIANT BROKEN: read model moved ${label} ${from} → ${to} on event #${evt.seq} — no such edge`);
+  }
+
+  function derivedFollowOnId(aggType, aggId) { return `followon:${aggType}:${aggId}`; }
+  function canOriginateFollowOn(m, aggType, aggId) {
+    const state = aggType === 'transfer' ? m.rubyView.transfers[aggId] : m.rubyView.transaction;
+    const terminal = aggType === 'transfer' ? !!TRANSFER_TERMINAL[state] : state === 'completed';
+    return terminal && !m.rubyFollowOns[derivedFollowOnId(aggType, aggId)];
+  }
+  function applyOriginateFollowOn(m, aggType, aggId) {
+    if (!canOriginateFollowOn(m, aggType, aggId)) {
+      const id = derivedFollowOnId(aggType, aggId);
+      const reason = m.rubyFollowOns[id] ? `id ${id} already originated, no-op` : `Ruby hasn't consumed a terminal event for ${aggType} ${aggId} yet`;
+      log(m, `Refused: Ruby Originate Follow-On (${aggType} ${aggId}) — ${reason}`);
+      return m;
+    }
+    const id = derivedFollowOnId(aggType, aggId);
+    m.rubyFollowOns[id] = true;
+    const seq = pushEvent(m, 'ruby-followon', id, 'FollowOnTransactionInitiated');
+    log(m, `Ruby originated follow-on transaction ${id} (event #${seq})`);
+    return m;
+  }
+
+  /* -----------------------------------------------------------------------
+   * Invariants. Each returns one of:
+   *   ok       — holds right now
+   *   lag      — differs, but undelivered messages exist that would resolve it
+   *   stalled  — nothing left to deliver, yet the system is parked short of
+   *              where a re-fold would take it. Not wrong; just never finishing
+   *   violated — wrong, and no further delivery can fix it
+   * The lag/violated split is the whole point: eventual consistency means a
+   * disagreement is only a defect once there is nothing left to consume.
+   * --------------------------------------------------------------------- */
+  const ALL_TOPIC_KEYS = ['transfer', 'transaction', 'unified'];
+
+  function affectsReadModel(evt) {
+    if (evt.aggType === 'transfer') return !!eventTypeToTransferState(evt.type);
+    if (evt.aggType === 'transaction') return !!eventTypeToTransactionState(evt.type);
+    return false;
+  }
+
+  // Scans every topic key, not just the current topology's, so that messages
+  // stranded by a mid-flight topology toggle read as "still pending" rather
+  // than as a violation the model can't distinguish from a real one.
+  function pendingFor(m, who, match) {
+    for (let i = m.publishCursor; i < m.eventLog.length; i++) {
+      if (match(m.eventLog[i])) return true;
+    }
+    for (const k of ALL_TOPIC_KEYS) {
+      for (let i = m.bookmarks[who][k]; i < m.topics[k].length; i++) {
+        const evt = m.eventLog.find(e => e.seq === m.topics[k][i]);
+        if (evt && match(evt)) return true;
+      }
+    }
+    return false;
+  }
+
+  function checkInvariants(m) {
+    const out = [];
+    const worst = (a, b) => (['ok', 'lag', 'stalled', 'violated'].indexOf(a) > ['ok', 'lag', 'stalled', 'violated'].indexOf(b) ? a : b);
+
+    // 1. The read model agrees with the ledger of record, or is owed a message.
+    let agreeStatus = 'ok';
+    const disagreements = [];
+    const pairs = [
+      ...allTransferIds(m).map(id => ['transfer', id, `Transfer ${id}`, m.transfers[id].state, m.rubyView.transfers[id] ?? 'unstarted']),
+      ['transaction', 'txn', 'Transaction', m.transaction.state, m.rubyView.transaction],
+    ];
+    for (const [aggType, aggId, label, goState, rubyState] of pairs) {
+      if (goState === rubyState) continue;
+      const owed = pendingFor(m, 'ruby', e => e.aggType === aggType && e.aggId === aggId && affectsReadModel(e));
+      disagreements.push(`${label}: Go ${goState} vs Ruby ${rubyState}${owed ? ' (message still in flight)' : ' (nothing left to deliver)'}`);
+      agreeStatus = worst(agreeStatus, owed ? 'lag' : 'violated');
+    }
+    out.push({
+      label: 'Read model agrees with the ledger of record',
+      status: agreeStatus,
+      detail: disagreements.length ? disagreements.join(' · ') : 'every aggregate matches',
+    });
+
+    // 2. The read model's observed path is a walk of the state machine.
+    const v = m.rubyPathViolations;
+    out.push({
+      label: 'Read model observed a legal path',
+      status: v.length ? 'violated' : 'ok',
+      detail: v.length
+        ? `${v.length} illegal jump(s); first: ${v[0].label} ${v[0].from} → ${v[0].to} on event #${v[0].seq} (${v[0].type})`
+        : 'every state change the read model applied was a single legal edge',
+    });
+
+    // 3. Reconciled child outcomes match the children's live states.
+    const stale = [];
+    for (const id of TRANSFER_IDS) {
+      const recorded = m.transaction.children[id];
+      const live = m.transfers[id].state;
+      if (recorded === 'completed' && live !== 'committed') stale.push(`${id}: recorded completed, live ${live}`);
+      if (recorded === 'failed' && live !== 'failed' && live !== 'cancelled') stale.push(`${id}: recorded failed, live ${live}`);
+    }
+    out.push({
+      label: 'Reconciled children match live transfers',
+      status: stale.length ? 'violated' : 'ok',
+      detail: stale.length ? stale.join(' · ') : 'no child was reconciled against a stale fact',
+    });
+
+    // 4. A terminal Transaction implies terminal children.
+    const bad = [];
+    if (m.transaction.state === 'completed') {
+      for (const id of TRANSFER_IDS) if (m.transaction.children[id] !== 'completed') bad.push(`txn completed but child ${id} is ${m.transaction.children[id]}`);
+    }
+    if (m.transaction.state === 'rolled_back') {
+      for (const id of TRANSFER_IDS) if (m.transaction.children[id] !== 'rolled_back') bad.push(`txn rolled_back but child ${id} is ${m.transaction.children[id]}`);
+    }
+    out.push({
+      label: 'Terminal transaction implies terminal children',
+      status: bad.length ? 'violated' : 'ok',
+      detail: bad.length ? bad.join(' · ') : 'no transaction closed over an unresolved child',
+    });
+
+    // 4b. A child is only rolled_back once its Reversal actually committed.
+    const premature = [];
+    for (const id of TRANSFER_IDS) {
+      const rid = m.transaction.reversals[id];
+      if (!rid) continue;
+      const rev = m.transfers[rid];
+      if (m.transaction.children[id] === 'rolled_back' && (!rev || rev.state !== 'committed')) {
+        premature.push(`${id} rolled_back but ${rid} is ${rev ? rev.state : 'missing'}`);
+      }
+      if (m.transaction.children[id] === 'rollback_failed' && rev && rev.state === 'committed') {
+        premature.push(`${id} rollback_failed but ${rid} committed`);
+      }
+    }
+    out.push({
+      label: 'Rollback claims match the reversals behind them',
+      status: premature.length ? 'violated' : 'ok',
+      detail: premature.length ? premature.join(' · ') : 'no child was closed out ahead of its reversal',
+    });
+
+    // 4c. Rollback respects the DAG: never undo a child while something that
+    //     depended on it is still unresolved.
+    const outOfOrder = [];
+    for (const id of TRANSFER_IDS) {
+      const st = m.transaction.children[id];
+      if (st !== 'rolled_back' && st !== 'rollback_failed' && st !== 'rollback_requested') continue;
+      for (const dep of DEPENDENTS[id]) {
+        const ds = m.transaction.children[dep];
+        if (ds !== 'untouched' && !CHILD_RESOLVED.includes(ds)) {
+          outOfOrder.push(`${id} rolled back while dependent ${dep} is ${ds}`);
+        }
+      }
+    }
+    out.push({
+      label: 'Rollback respects dependency order',
+      status: outOfOrder.length ? 'violated' : 'ok',
+      detail: outOfOrder.length ? outOfOrder.join(' · ') : 'no child was undone before its dependents',
+    });
+
+    // 5. Nothing is parked short of where a re-fold would take it. Asked by
+    //    actually re-folding a copy: if the orchestrator has drained every
+    //    topic and a fresh fold would still move the Transaction, then no
+    //    future delivery will move it either — that is a stall, not lag.
+    let stallDetail = 'the orchestrator has nothing left it could act on';
+    let stallStatus = 'ok';
+    const sagaOwed = pendingFor(m, 'saga', () => true);
+    const live = m.transaction.state;
+    // A Reversal inherits its original's staging requirement, so a rollback can
+    // sit in staged/pending waiting on the outside world for days. That is the
+    // system working, not a stall — the same way transfer.runSaga stops there.
+    const awaitingWorld = allTransferIds(m).filter(id => ['staged', 'pending'].includes(m.transfers[id].state));
+    // Anything accepted/prepared/staged/pending is mid-saga. The Transaction
+    // waiting on it is the system working, not a stall — including a Reversal,
+    // which is why rollback is now a wait state rather than a single call.
+    const inFlight = allTransferIds(m).filter(id => !['unstarted', 'committed', 'failed', 'cancelled'].includes(m.transfers[id].state));
+    if (!sagaOwed && m.sagaAlive && live !== 'unstarted' && live !== 'completed' && live !== 'rolled_back' && live !== 'rollback_failed' && live !== 'rejected') {
+      const probe = clone(m);
+      runSagaLoop(probe);
+      if (probe.transaction.state !== live) {
+        stallStatus = 'stalled';
+        stallDetail = `every topic drained, yet a re-fold would move the Transaction ${live} → ${probe.transaction.state}`;
+      } else if (awaitingWorld.length) {
+        stallDetail = `waiting on the outside world: ${awaitingWorld.join(', ')} in a staging wait state`;
+      } else if (inFlight.length) {
+        stallDetail = `waiting on ${inFlight.join(', ')} to reach a terminal state`;
+      }
+    } else if (sagaOwed) {
+      stallDetail = 'the orchestrator still has messages to consume';
+    }
+    out.push({ label: 'No progress left on the table', status: stallStatus, detail: stallDetail });
+
+    return out;
+  }
+
+  /* -----------------------------------------------------------------------
+   * Fuzzer. Picks uniformly from the currently-legal actions, weighted so
+   * delivery churn outpaces domain progress, and stops the moment an
+   * invariant is violated so the model is left sitting on a reproduction.
+   * Seeded, so a found violation can be replayed exactly.
+   * Publisher mode, topology and handler semantics are deliberately NOT
+   * fuzzed: they are the design knobs under test, and toggling topology
+   * mid-flight strands published messages (see the plan's notes), which
+   * would manufacture failures that say nothing about the design.
+   * --------------------------------------------------------------------- */
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = a + 0x6D2B79F5 | 0;
+      let t = Math.imul(a ^ a >>> 15, 1 | a);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+
+  function fuzzCandidates(m) {
+    const pool = [];
+    const add = (weight, action) => { for (let i = 0; i < weight; i++) pool.push(action); };
+    for (const id of allTransferIds(m)) {
+      for (const name of Object.keys(TRANSFER_ACTIONS)) {
+        if (transferActionLegality(m, id, name).legal) add(3, { type: 'TRANSFER', id, name });
+      }
+    }
+    if (canStartTransaction(m)) add(5, { type: 'START_TRANSACTION' });
+    if (canDispatchReady(m)) add(5, { type: 'DISPATCH_READY' });
+    if (canRollbackChild(m)) add(5, { type: 'ROLLBACK_CHILD' });
+    if (canPublishNext(m)) add(9, { type: 'PUBLISH_NEXT' });
+    if (canDuplicateLast(m)) add(3, { type: 'DUPLICATE_LAST' });
+    if (canReorder(m)) add(3, { type: 'REORDER_PENDING' });
+    if (canSimulateRestart(m) && canPublishNext(m)) add(1, { type: 'SIMULATE_RESTART' });
+    for (const k of (m.topicTopology === 'unified' ? ['unified'] : ['transfer', 'transaction'])) {
+      if (canSagaConsume(m, k)) add(7, { type: 'SAGA_CONSUME', topic: k });
+      if (canRubyConsume(m, k)) add(7, { type: 'RUBY_CONSUME', topic: k });
+    }
+    if (m.sagaAlive) add(1, { type: 'CRASH_SAGA' }); else add(8, { type: 'RESTART_SAGA' });
+    for (const [aggType, aggId] of [['transfer', 'A'], ['transfer', 'B'], ['transaction', 'txn']]) {
+      if (canOriginateFollowOn(m, aggType, aggId)) add(2, { type: 'ORIGINATE_FOLLOWON', aggType, aggId });
+    }
+    return pool;
+  }
+
+  function fuzz(model, opts) {
+    const steps = (opts && opts.steps) || 200;
+    const seed = (opts && opts.seed !== undefined && opts.seed !== null) ? (opts.seed >>> 0) : (Math.random() * 4294967296) >>> 0;
+    const rand = mulberry32(seed);
+    let m = model;
+    for (let i = 0; i < steps; i++) {
+      const pool = fuzzCandidates(m);
+      if (!pool.length) return { model: m, seed, steps: i, exhausted: true, failure: null };
+      const action = pool[Math.floor(rand() * pool.length)];
+      m = dispatch(m, action);
+      const broken = checkInvariants(m).find(inv => inv.status === 'violated');
+      if (broken) return { model: m, seed, steps: i + 1, exhausted: false, failure: { invariant: broken.label, detail: broken.detail, action } };
+    }
+    return { model: m, seed, steps, exhausted: false, failure: null };
+  }
+
+  function dispatch(model, action) {
+    const m = clone(model);
+    switch (action.type) {
+      case 'TRANSFER': return applyTransfer(m, action.id, action.name);
+      case 'START_TRANSACTION': return applyStartTransaction(m);
+      case 'DISPATCH_READY': return applyDispatchReady(m);
+      case 'ROLLBACK_CHILD': return applyRollbackChild(m);
+      case 'TOGGLE_PUBLISHER': m.publisherMode = m.publisherMode === 'polling' ? 'cdc' : 'polling'; log(m, `Publisher mode → ${m.publisherMode}`); return m;
+      case 'CYCLE_PARTITION_KEY': {
+        const next = PARTITION_KEYS[(PARTITION_KEYS.indexOf(m.partitionKey) + 1) % PARTITION_KEYS.length];
+        m.partitionKey = next; log(m, `Partition key → ${next}`); return m;
+      }
+      case 'TOGGLE_HANDLER': m.handlerMode = m.handlerMode === 'data' ? 'trigger' : 'data'; log(m, `Saga handler semantics → event-as-${m.handlerMode}`); return m;
+      case 'TOGGLE_TOPOLOGY': m.topicTopology = m.topicTopology === 'unified' ? 'per-type' : 'unified'; log(m, `Topic topology → ${m.topicTopology}`); return m;
+      case 'PUBLISH_NEXT': return applyPublishNext(m);
+      case 'DUPLICATE_LAST': return applyDuplicateLast(m);
+      case 'REORDER_PENDING': return applyReorderPending(m);
+      case 'SIMULATE_RESTART': return applySimulateRelayRestart(m);
+      case 'SAGA_CONSUME': return applySagaConsume(m, action.topic);
+      case 'RUBY_CONSUME': return applyRubyConsume(m, action.topic);
+      case 'CRASH_SAGA': m.sagaAlive = false; log(m, 'Saga orchestrator crashed'); return m;
+      case 'RESTART_SAGA': m.sagaAlive = true; log(m, 'Saga orchestrator restarted — resuming from bookmarks'); return m;
+      case 'ORIGINATE_FOLLOWON': return applyOriginateFollowOn(m, action.aggType, action.aggId);
+      case 'RESET': return initial();
+      default: return m;
+    }
+  }
+
+  return {
+    initial, dispatch, TRANSFER_IDS, TRANSFER_ACTIONS, TRANSFER_TERMINAL,
+    transferActionLegality, canStartTransaction, canDispatchReady, canRollbackChild,
+    canPublishNext, canDuplicateLast, canReorder, canSimulateRestart,
+    canSagaConsume, canRubyConsume, canOriginateFollowOn, derivedFollowOnId, topicKeyFor,
+    checkInvariants, fuzz, partitionOf, PARTITION_KEYS,
+    allTransferIds, isReversal, reversalIdFor, DEPENDS_ON, DEPENDENTS,
+  };
+})();
+</script>
+<script>
+'use strict';
+/* =========================================================================
+ * Scenario definitions — ordered step lists. Each step dispatches a real
+ * action; apply* functions already guard legality, so steps are safe to
+ * click even when "testing" an illegal transition on purpose.
+ * ========================================================================= */
+const TRANSFER = (id, name) => ({ type: 'TRANSFER', id, name });
+function times(label, action, n) {
+  return Array.from({ length: n }, (_, i) => ({ label: `${label}`, action }));
+}
+
+const SCENARIOS = [
+  {
+    title: 'Happy path',
+    desc: 'CDC mode, both transfers driven fully to committed, both consumers kept in lockstep. Watch: the Go-authoritative and Ruby panels always agree — Ruby only ever lags by bookmark position, never disagrees.',
+    steps: [
+      { label: 'Set Publisher Mode to CDC', action: { type: 'TOGGLE_PUBLISHER' } },
+      { label: 'Start Transaction', action: { type: 'START_TRANSACTION' } },
+      { label: 'Dispatch Ready Children', action: { type: 'DISPATCH_READY' } },
+      { label: 'Accept Transfer A', action: TRANSFER('A', 'accept') },
+      { label: 'Prepare Transfer A', action: TRANSFER('A', 'prepare') },
+      { label: 'Commit Transfer A', action: TRANSFER('A', 'commit') },
+      { label: 'Accept Transfer B', action: TRANSFER('B', 'accept') },
+      { label: 'Prepare Transfer B', action: TRANSFER('B', 'prepare') },
+      { label: 'Stage Transfer B', action: TRANSFER('B', 'stage') },
+      { label: 'Confirm Staged Transfer B', action: TRANSFER('B', 'confirmStaged') },
+      { label: 'Commit Transfer B', action: TRANSFER('B', 'commit') },
+      ...times('Publish Next Event', { type: 'PUBLISH_NEXT' }, 12),
+      ...times('Saga: Consume Next (transfer)', { type: 'SAGA_CONSUME', topic: 'transfer' }, 12),
+      ...times('Saga: Consume Next (transaction)', { type: 'SAGA_CONSUME', topic: 'transaction' }, 12),
+      { label: 'Dispatch Ready Children — C unblocks once A and B complete', action: { type: 'DISPATCH_READY' } },
+      { label: 'Accept Transfer C', action: TRANSFER('C', 'accept') },
+      { label: 'Prepare Transfer C', action: TRANSFER('C', 'prepare') },
+      { label: 'Commit Transfer C', action: TRANSFER('C', 'commit') },
+      ...times('Publish Next Event', { type: 'PUBLISH_NEXT' }, 20),
+      ...times('Saga: Consume Next (transfer)', { type: 'SAGA_CONSUME', topic: 'transfer' }, 10),
+      ...times('Saga: Consume Next (transaction)', { type: 'SAGA_CONSUME', topic: 'transaction' }, 10),
+      ...times('Publish Next Event', { type: 'PUBLISH_NEXT' }, 5),
+      ...times('Saga: Consume Next (transaction)', { type: 'SAGA_CONSUME', topic: 'transaction' }, 5),
+      ...times('Ruby: Consume Next (transfer)', { type: 'RUBY_CONSUME', topic: 'transfer' }, 10),
+      ...times('Ruby: Consume Next (transaction)', { type: 'RUBY_CONSUME', topic: 'transaction' }, 10),
+      ...times('Publish Next Event', { type: 'PUBLISH_NEXT' }, 5),
+      ...times('Ruby: Consume Next (transaction)', { type: 'RUBY_CONSUME', topic: 'transaction' }, 5),
+    ],
+  },
+  {
+    title: 'Duplicate delivery',
+    desc: "Transfer B (the staging path) is driven to staged, then its last delivery is duplicated. Watch: the saga's second consume of the same event is a no-op — the async analogue of appendSagaStep's real idempotency guard.",
+    steps: [
+      { label: 'Accept Transfer B', action: TRANSFER('B', 'accept') },
+      { label: 'Prepare Transfer B', action: TRANSFER('B', 'prepare') },
+      { label: 'Stage Transfer B', action: TRANSFER('B', 'stage') },
+      ...times('Publish Next Event', { type: 'PUBLISH_NEXT' }, 5),
+      ...times('Saga: Consume Next (transfer)', { type: 'SAGA_CONSUME', topic: 'transfer' }, 5),
+      { label: 'Duplicate Last Delivery', action: { type: 'DUPLICATE_LAST' } },
+      { label: 'Saga: Consume Next (transfer) — the duplicate', action: { type: 'SAGA_CONSUME', topic: 'transfer' } },
+    ],
+  },
+  {
+    title: 'Reordered delivery',
+    desc: "Transfer A is left at prepared and Transfer B is rejected at the ledger while staged; their two pending messages are reordered so B's Failed arrives before A's Prepared. Watch: rollbackChild is keyed off each child's LIVE outcome, not stream position — rollback still lands correctly for both.",
+    steps: [
+      { label: 'Start Transaction', action: { type: 'START_TRANSACTION' } },
+      { label: 'Dispatch Ready Children', action: { type: 'DISPATCH_READY' } },
+      ...times('Publish Next Event', { type: 'PUBLISH_NEXT' }, 3),
+      ...times('Saga: Consume Next (transaction)', { type: 'SAGA_CONSUME', topic: 'transaction' }, 3),
+      ...times('Ruby: Consume Next (transaction)', { type: 'RUBY_CONSUME', topic: 'transaction' }, 3),
+      { label: 'Accept Transfer A', action: TRANSFER('A', 'accept') },
+      { label: 'Publish Next Event', action: { type: 'PUBLISH_NEXT' } },
+      { label: 'Saga: Consume Next (transfer)', action: { type: 'SAGA_CONSUME', topic: 'transfer' } },
+      { label: 'Ruby: Consume Next (transfer)', action: { type: 'RUBY_CONSUME', topic: 'transfer' } },
+      { label: 'Accept Transfer B', action: TRANSFER('B', 'accept') },
+      { label: 'Publish Next Event', action: { type: 'PUBLISH_NEXT' } },
+      { label: 'Saga: Consume Next (transfer)', action: { type: 'SAGA_CONSUME', topic: 'transfer' } },
+      { label: 'Ruby: Consume Next (transfer)', action: { type: 'RUBY_CONSUME', topic: 'transfer' } },
+      { label: 'Prepare Transfer B', action: TRANSFER('B', 'prepare') },
+      { label: 'Publish Next Event', action: { type: 'PUBLISH_NEXT' } },
+      { label: 'Saga: Consume Next (transfer)', action: { type: 'SAGA_CONSUME', topic: 'transfer' } },
+      { label: 'Ruby: Consume Next (transfer)', action: { type: 'RUBY_CONSUME', topic: 'transfer' } },
+      { label: 'Stage Transfer B', action: TRANSFER('B', 'stage') },
+      { label: 'Publish Next Event', action: { type: 'PUBLISH_NEXT' } },
+      { label: 'Saga: Consume Next (transfer)', action: { type: 'SAGA_CONSUME', topic: 'transfer' } },
+      { label: 'Ruby: Consume Next (transfer)', action: { type: 'RUBY_CONSUME', topic: 'transfer' } },
+      { label: 'Prepare Transfer A (leave it here, unpublished)', action: TRANSFER('A', 'prepare') },
+      { label: 'Reject at Ledger — Transfer B (leave it here, unpublished)', action: TRANSFER('B', 'rejectLedger') },
+      { label: "Publish Next Event — publishes A's Prepared", action: { type: 'PUBLISH_NEXT' } },
+      { label: "Publish Next Event — publishes B's Failed", action: { type: 'PUBLISH_NEXT' } },
+      { label: 'Reorder Pending Pair — swap them', action: { type: 'REORDER_PENDING' } },
+      { label: "Saga: Consume Next (transfer) — consumes B's Failed first, out of true order", action: { type: 'SAGA_CONSUME', topic: 'transfer' } },
+      { label: "Saga: Consume Next (transfer) — consumes A's Prepared, not terminal, no-op", action: { type: 'SAGA_CONSUME', topic: 'transfer' } },
+      { label: 'Publish Next Event — publishes the reconciliation fact', action: { type: 'PUBLISH_NEXT' } },
+      { label: 'Saga: Consume Next (transaction) — notices the failure, starts rollback', action: { type: 'SAGA_CONSUME', topic: 'transaction' } },
+      { label: 'Publish Next Event', action: { type: 'PUBLISH_NEXT' } },
+      { label: 'Saga: Consume Next (transaction)', action: { type: 'SAGA_CONSUME', topic: 'transaction' } },
+      { label: 'Roll Back Child — C first: never dispatched, so abandoned', action: { type: 'ROLLBACK_CHILD' } },
+      { label: 'Roll Back Child — Transfer A (in-flight → cancelled)', action: { type: 'ROLLBACK_CHILD' } },
+      { label: 'Roll Back Child — Transfer B (already failed → abandoned)', action: { type: 'ROLLBACK_CHILD' } },
+    ],
+  },
+  {
+    title: 'Illegal attempt',
+    desc: "Transfer B is prepared, the saga orchestrator is crashed and a consume is attempted (refused), then restarted and Commit is attempted directly from prepared while staging is required (refused). Watch: domain-level legality and delivery-layer aliveness are two independent guards.",
+    steps: [
+      { label: 'Accept Transfer B', action: TRANSFER('B', 'accept') },
+      { label: 'Prepare Transfer B', action: TRANSFER('B', 'prepare') },
+      ...times('Publish Next Event', { type: 'PUBLISH_NEXT' }, 5),
+      { label: 'Crash Saga Orchestrator', action: { type: 'CRASH_SAGA' } },
+      { label: 'Saga: Consume Next (transfer) — should be refused', action: { type: 'SAGA_CONSUME', topic: 'transfer' } },
+      { label: 'Restart Saga Orchestrator', action: { type: 'RESTART_SAGA' } },
+      { label: 'Commit Transfer B directly — should be refused (staging required)', action: TRANSFER('B', 'commit') },
+    ],
+  },
+  {
+    title: 'Polling gap',
+    desc: "Polling mode (the default). Transfer A is driven to committed while a relay restart skips publishing its Prepared event entirely. Watch: Ruby's projection jumps straight from accepted to committed — a structural hole, not just lag.",
+    steps: [
+      { label: 'Accept Transfer A', action: TRANSFER('A', 'accept') },
+      { label: 'Publish Next Event', action: { type: 'PUBLISH_NEXT' } },
+      { label: 'Prepare Transfer A (leave it unpublished)', action: TRANSFER('A', 'prepare') },
+      { label: 'Simulate Relay Restart — duplicates the last delivery, skips Prepared', action: { type: 'SIMULATE_RESTART' } },
+      { label: 'Commit Transfer A', action: TRANSFER('A', 'commit') },
+      { label: 'Publish Next Event — publishes Committed (Prepared was skipped)', action: { type: 'PUBLISH_NEXT' } },
+      { label: 'Ruby: Consume Next (transfer) — the original Accepted', action: { type: 'RUBY_CONSUME', topic: 'transfer' } },
+      { label: 'Ruby: Consume Next (transfer) — the duplicate Accepted', action: { type: 'RUBY_CONSUME', topic: 'transfer' } },
+      { label: 'Ruby: Consume Next (transfer) — Committed, never having seen Prepared', action: { type: 'RUBY_CONSUME', topic: 'transfer' } },
+    ],
+  },
+  {
+    title: 'Reconciliation gap (event-as-data)',
+    desc: "Per-type topology and event-as-data handling, both defaults. Both transfers are driven fully to committed and reconciled via the transfer topic — but the transaction topic is never consumed. Watch: both children show completed, yet the Transaction itself stays parked in started. Then run Scenario 8, which is these exact steps under event-as-trigger, before concluding this is a cost of splitting the topic.",
+    steps: [
+      { label: 'Start Transaction', action: { type: 'START_TRANSACTION' } },
+      { label: 'Dispatch Ready Children', action: { type: 'DISPATCH_READY' } },
+      { label: 'Accept Transfer A', action: TRANSFER('A', 'accept') },
+      { label: 'Prepare Transfer A', action: TRANSFER('A', 'prepare') },
+      { label: 'Commit Transfer A', action: TRANSFER('A', 'commit') },
+      { label: 'Accept Transfer B', action: TRANSFER('B', 'accept') },
+      { label: 'Prepare Transfer B', action: TRANSFER('B', 'prepare') },
+      { label: 'Stage Transfer B', action: TRANSFER('B', 'stage') },
+      { label: 'Confirm Staged Transfer B', action: TRANSFER('B', 'confirmStaged') },
+      { label: 'Commit Transfer B', action: TRANSFER('B', 'commit') },
+      ...times('Publish Next Event', { type: 'PUBLISH_NEXT' }, 12),
+      ...times('Saga: Consume Next (transfer)', { type: 'SAGA_CONSUME', topic: 'transfer' }, 12),
+      { label: 'Dispatch Ready Children — C unblocks once A and B complete', action: { type: 'DISPATCH_READY' } },
+      { label: 'Accept Transfer C', action: TRANSFER('C', 'accept') },
+      { label: 'Prepare Transfer C', action: TRANSFER('C', 'prepare') },
+      { label: 'Commit Transfer C', action: TRANSFER('C', 'commit') },
+      ...times('Publish Next Event', { type: 'PUBLISH_NEXT' }, 12),
+      ...times('Saga: Consume Next (transfer) — reconciles every child', { type: 'SAGA_CONSUME', topic: 'transfer' }, 12),
+      ...times('Ruby: Consume Next (transfer)', { type: 'RUBY_CONSUME', topic: 'transfer' }, 14),
+    ],
+  },
+  {
+    title: "Ruby's follow-on",
+    desc: 'Transfer A completes and Ruby consumes it, then originates a follow-on transaction (e.g. an auto-invest) with a deterministic id. The triggering event is then redelivered. Watch: the second origination attempt is a no-op — Kafka\'s at-least-once guarantee can\'t double-trigger it.',
+    steps: [
+      { label: 'Accept Transfer A', action: TRANSFER('A', 'accept') },
+      { label: 'Prepare Transfer A', action: TRANSFER('A', 'prepare') },
+      { label: 'Commit Transfer A', action: TRANSFER('A', 'commit') },
+      ...times('Publish Next Event', { type: 'PUBLISH_NEXT' }, 5),
+      ...times('Ruby: Consume Next (transfer)', { type: 'RUBY_CONSUME', topic: 'transfer' }, 5),
+      { label: 'Ruby: Originate Follow-On (Transfer A)', action: { type: 'ORIGINATE_FOLLOWON', aggType: 'transfer', aggId: 'A' } },
+      { label: "Duplicate Last Delivery — redelivers A's Committed event", action: { type: 'DUPLICATE_LAST' } },
+      { label: 'Ruby: Consume Next (transfer) — the duplicate', action: { type: 'RUBY_CONSUME', topic: 'transfer' } },
+      { label: 'Ruby: Originate Follow-On (Transfer A) again — should no-op', action: { type: 'ORIGINATE_FOLLOWON', aggType: 'transfer', aggId: 'A' } },
+    ],
+  },
+  {
+    title: 'Same gap, event-as-trigger',
+    desc: "Scenario 6's steps exactly, with one change: the orchestrator treats each message as a wake-up rather than as the fact to fold, re-folding live state the way runSaga already does. The transaction topic is still never consumed. Watch: the Transaction reaches completed anyway. Scenario 6's stall is a property of the handler shape, not of splitting the topic — which is the question worth settling before the topology decision gets written down as its cause.",
+    steps: [
+      { label: 'Set Saga Handler to event-as-trigger', action: { type: 'TOGGLE_HANDLER' } },
+      { label: 'Start Transaction', action: { type: 'START_TRANSACTION' } },
+      { label: 'Dispatch Ready Children', action: { type: 'DISPATCH_READY' } },
+      { label: 'Accept Transfer A', action: TRANSFER('A', 'accept') },
+      { label: 'Prepare Transfer A', action: TRANSFER('A', 'prepare') },
+      { label: 'Commit Transfer A', action: TRANSFER('A', 'commit') },
+      { label: 'Accept Transfer B', action: TRANSFER('B', 'accept') },
+      { label: 'Prepare Transfer B', action: TRANSFER('B', 'prepare') },
+      { label: 'Stage Transfer B', action: TRANSFER('B', 'stage') },
+      { label: 'Confirm Staged Transfer B', action: TRANSFER('B', 'confirmStaged') },
+      { label: 'Commit Transfer B', action: TRANSFER('B', 'commit') },
+      ...times('Publish Next Event', { type: 'PUBLISH_NEXT' }, 12),
+      ...times('Saga: Consume Next (transfer) — each one re-folds live state', { type: 'SAGA_CONSUME', topic: 'transfer' }, 12),
+      { label: 'Dispatch Ready Children — C unblocks once A and B complete', action: { type: 'DISPATCH_READY' } },
+      { label: 'Accept Transfer C', action: TRANSFER('C', 'accept') },
+      { label: 'Prepare Transfer C', action: TRANSFER('C', 'prepare') },
+      { label: 'Commit Transfer C', action: TRANSFER('C', 'commit') },
+      ...times('Publish Next Event', { type: 'PUBLISH_NEXT' }, 12),
+      ...times('Saga: Consume Next (transfer) — each one re-folds live state', { type: 'SAGA_CONSUME', topic: 'transfer' }, 12),
+      ...times('Ruby: Consume Next (transfer)', { type: 'RUBY_CONSUME', topic: 'transfer' }, 14),
+    ],
+  },
+  {
+    title: 'Read-model corruption (no key)',
+    desc: "CDC mode, nothing dropped, nothing crashed — the benign configuration. Transfer A's own Prepared and Committed are swapped on the topic, which an unkeyed producer permits because round-robin puts them in different partitions. Watch the invariant bar: Ruby settles on prepared while Go is committed, with nothing left to consume, and it never recovers. Then cycle the partition key to AGGREGATE ID and re-run — the Reorder button refuses the swap outright, because those two messages now share a partition. This is the fuzzer's finding as a fixed path.",
+    steps: [
+      { label: 'Set Publisher Mode to CDC', action: { type: 'TOGGLE_PUBLISHER' } },
+      { label: 'Accept Transfer A', action: TRANSFER('A', 'accept') },
+      { label: 'Publish Next Event', action: { type: 'PUBLISH_NEXT' } },
+      { label: 'Ruby: Consume Next (transfer) — Ruby is now at accepted', action: { type: 'RUBY_CONSUME', topic: 'transfer' } },
+      { label: 'Saga: Consume Next (transfer)', action: { type: 'SAGA_CONSUME', topic: 'transfer' } },
+      { label: 'Prepare Transfer A', action: TRANSFER('A', 'prepare') },
+      { label: 'Commit Transfer A', action: TRANSFER('A', 'commit') },
+      { label: "Publish Next Event — A's Prepared", action: { type: 'PUBLISH_NEXT' } },
+      { label: "Publish Next Event — A's Committed", action: { type: 'PUBLISH_NEXT' } },
+      { label: 'Reorder Pending Pair — same aggregate, allowed only because there is no key', action: { type: 'REORDER_PENDING' } },
+      { label: 'Ruby: Consume Next (transfer) — Committed arrives first', action: { type: 'RUBY_CONSUME', topic: 'transfer' } },
+      { label: 'Ruby: Consume Next (transfer) — Prepared arrives second and wins', action: { type: 'RUBY_CONSUME', topic: 'transfer' } },
+    ],
+  },
+  {
+    title: 'Async rollback with a staged reversal',
+    desc: "The part the earlier scenarios never reached. A and B both commit (B through the staging path), C unblocks, and C fails at the ledger — so the whole Transaction rolls back. Watch three things. (1) DAG order: C is undone first, because A and B are what it depended on. (2) A committed child cannot be undone in one step any more — reversing it creates a whole new Transfer aggregate and parks the child in rollback_requested until that reversal's own saga finishes. (3) rev:B inherits B's staging requirement, so this rollback now waits on the outside world, and the invariant bar says 'waiting' rather than calling it a stall. Drive rev:B to committed to land on rolled_back — or reject it at the ledger to see TransactionRollbackFailed, which has no other route once the inline confirmation is gone.",
+    steps: [
+      { label: 'Set Publisher Mode to CDC', action: { type: 'TOGGLE_PUBLISHER' } },
+      { label: 'Set Saga Handler to event-as-trigger', action: { type: 'TOGGLE_HANDLER' } },
+      { label: 'Set Partition Key to aggregate id', action: { type: 'CYCLE_PARTITION_KEY' } },
+      { label: 'Start Transaction', action: { type: 'START_TRANSACTION' } },
+      { label: 'Dispatch Ready Children — A and B only; C is gated on both', action: { type: 'DISPATCH_READY' } },
+      { label: 'Accept Transfer A', action: TRANSFER('A', 'accept') },
+      { label: 'Prepare Transfer A', action: TRANSFER('A', 'prepare') },
+      { label: 'Commit Transfer A', action: TRANSFER('A', 'commit') },
+      { label: 'Accept Transfer B', action: TRANSFER('B', 'accept') },
+      { label: 'Prepare Transfer B', action: TRANSFER('B', 'prepare') },
+      { label: 'Stage Transfer B', action: TRANSFER('B', 'stage') },
+      { label: 'Confirm Staged Transfer B', action: TRANSFER('B', 'confirmStaged') },
+      { label: 'Commit Transfer B', action: TRANSFER('B', 'commit') },
+      ...times('Publish Next Event', { type: 'PUBLISH_NEXT' }, 14),
+      ...times('Saga: Consume Next (transfer)', { type: 'SAGA_CONSUME', topic: 'transfer' }, 14),
+      { label: 'Dispatch Ready Children — C is released now', action: { type: 'DISPATCH_READY' } },
+      { label: 'Accept Transfer C', action: TRANSFER('C', 'accept') },
+      { label: 'Prepare Transfer C', action: TRANSFER('C', 'prepare') },
+      { label: 'Reject at Ledger — Transfer C', action: TRANSFER('C', 'rejectLedger') },
+      ...times('Publish Next Event', { type: 'PUBLISH_NEXT' }, 8),
+      ...times('Saga: Consume Next (transfer) — notices C failed', { type: 'SAGA_CONSUME', topic: 'transfer' }, 8),
+      { label: 'Roll Back Child — C first (DAG order), abandoned', action: { type: 'ROLLBACK_CHILD' } },
+      { label: 'Roll Back Child — A was committed, so this REQUESTS rev:A and waits', action: { type: 'ROLLBACK_CHILD' } },
+      { label: 'Roll Back Child — B was committed, so this REQUESTS rev:B and waits', action: { type: 'ROLLBACK_CHILD' } },
+      ...times('Publish Next Event', { type: 'PUBLISH_NEXT' }, 8),
+      ...times('Saga: Consume Next (transfer) — nothing resolves; reversals are only accepted', { type: 'SAGA_CONSUME', topic: 'transfer' }, 8),
+      { label: 'Prepare rev:A', action: TRANSFER('rev:A', 'prepare') },
+      { label: 'Commit rev:A — child A can now be closed out', action: TRANSFER('rev:A', 'commit') },
+      { label: 'Prepare rev:B', action: TRANSFER('rev:B', 'prepare') },
+      { label: 'Stage rev:B — the reversal inherited B\'s staging requirement', action: TRANSFER('rev:B', 'stage') },
+      ...times('Publish Next Event', { type: 'PUBLISH_NEXT' }, 8),
+      ...times('Saga: Consume Next (transfer)', { type: 'SAGA_CONSUME', topic: 'transfer' }, 8),
+      { label: 'Confirm Staged rev:B — the outside world finally answers', action: TRANSFER('rev:B', 'confirmStaged') },
+      { label: 'Commit rev:B', action: TRANSFER('rev:B', 'commit') },
+      ...times('Publish Next Event', { type: 'PUBLISH_NEXT' }, 12),
+      ...times('Saga: Consume Next (transfer)', { type: 'SAGA_CONSUME', topic: 'transfer' }, 12),
+      ...times('Publish Next Event', { type: 'PUBLISH_NEXT' }, 8),
+      ...times('Saga: Consume Next (transaction)', { type: 'SAGA_CONSUME', topic: 'transaction' }, 8),
+      ...times('Publish Next Event', { type: 'PUBLISH_NEXT' }, 8),
+      ...times('Ruby: Consume Next (transfer)', { type: 'RUBY_CONSUME', topic: 'transfer' }, 24),
+      ...times('Ruby: Consume Next (transaction)', { type: 'RUBY_CONSUME', topic: 'transaction' }, 24),
+    ],
+  },
+];
+</script>
+<script>
+'use strict';
+/* =========================================================================
+ * Page shell — thin renderer over SagaModel. Everything below reads model
+ * state and writes DOM; nothing here belongs in the lifted module.
+ * ========================================================================= */
+let model = SagaModel.initial();
+let activeScenario = 0;
+let scenarioProgress = {};
+
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+function pill(state) { return `<span class="pill ${state}">${state.replace(/_/g, ' ')}</span>`; }
+
+function actBtn(label, action, legal, reason, extraClass) {
+  const cls = 'act' + (extraClass ? ' ' + extraClass : '');
+  const disabled = legal ? '' : 'disabled';
+  const title = legal ? '' : ` title="${esc(reason || 'not legal right now')}"`;
+  return `<button class="${cls}" data-action='${JSON.stringify(action)}' ${disabled}${title}>${esc(label)}</button>`;
+}
+
+function renderStatePanels() {
+  const goRows = SagaModel.allTransferIds(model).map(id => {
+    const t = model.transfers[id];
+    const deps = SagaModel.DEPENDS_ON[id] || [];
+    const name = SagaModel.isReversal(id) ? `Reversal ${id}` : `Transfer ${id}`;
+    const extra = SagaModel.isReversal(id)
+      ? `<span class="badge">undoing ${t.reversalOf}</span>`
+      : (deps.length ? `<span class="badge">depends on ${deps.join(' + ')}</span>` : '');
+    return `<div class="card"><div class="card-head"><b>${name}</b>${pill(t.state)}</div>
+      <span class="badge">${t.requiresStaging ? 'requires staging' : 'no staging'}</span>${extra}</div>`;
+  }).join('');
+  const kidsLine = SagaModel.TRANSFER_IDS.map(id => {
+    const rev = model.transaction.reversals[id];
+    return `<span>${id}: <b>${model.transaction.children[id].replace(/_/g,' ')}</b>${rev ? ` <span class="badge">via ${rev}</span>` : ''}</span>`;
+  }).join('');
+  document.getElementById('goPanel').innerHTML = goRows +
+    `<div class="card"><div class="card-head"><b>Transaction</b>${pill(model.transaction.state)}</div>
+      <div class="kids">children (reconciled): ${kidsLine}</div></div>`;
+
+  const rubyRows = SagaModel.allTransferIds(model).map(id => {
+    const name = SagaModel.isReversal(id) ? `Reversal ${id}` : `Transfer ${id}`;
+    return `<div class="card"><div class="card-head"><b>${name}</b>${pill(model.rubyView.transfers[id] ?? 'unstarted')}</div></div>`;
+  }).join('');
+  document.getElementById('rubyPanel').innerHTML = rubyRows +
+    `<div class="card"><div class="card-head"><b>Transaction</b>${pill(model.rubyView.transaction)}</div></div>`;
+}
+
+function renderTopics() {
+  const keys = model.topicTopology === 'unified' ? ['unified'] : ['transfer', 'transaction'];
+  const names = { unified: 'Kafka topic (unified)', transfer: 'transfer-events topic', transaction: 'transaction-events topic' };
+  document.getElementById('topicsPanel').innerHTML = keys.map(k => {
+    const arr = model.topics[k];
+    const sBm = model.bookmarks.saga[k], rBm = model.bookmarks.ruby[k];
+    const chips = arr.length ? arr.map((seq, idx) => {
+      const evt = model.eventLog.find(e => e.seq === seq);
+      const tags = (idx < sBm ? '<span class="tag s">S</span>' : '') + (idx < rBm ? '<span class="tag r">R</span>' : '');
+      const part = model.partitionKey === 'none' ? '' : `<span class="part">${esc(SagaModel.partitionOf(model, evt, idx))}</span>`;
+      return `<span class="chip">#${seq} ${esc(evt.type)}${part}<span class="tags">${tags}</span></span>`;
+    }).join('') : '<span class="empty">nothing published yet</span>';
+    return `<div class="topic-row"><div class="topic-title">${names[k]}</div>
+      <div class="chips">${chips}</div>
+      <div class="bookmarks">Saga has consumed ${sBm} of ${arr.length} · Ruby has consumed ${rBm} of ${arr.length}</div>
+      </div>`;
+  }).join('');
+}
+
+function renderFreePlay() {
+  document.getElementById('pubModeLabel').textContent = model.publisherMode.toUpperCase();
+  document.getElementById('topologyLabel').textContent = model.topicTopology === 'unified' ? 'UNIFIED' : 'PER-TYPE';
+  document.getElementById('sagaAliveLabel').innerHTML = model.sagaAlive ? '<span class="pill committed">alive</span>' : '<span class="pill failed">crashed</span>';
+  const PK_LABEL = { none: 'NONE (round-robin)', aggregate: 'AGGREGATE ID', transaction: 'TRANSACTION ID' };
+  document.getElementById('partitionKeyLabel').textContent = PK_LABEL[model.partitionKey];
+  const PK_NOTE = {
+    none: `<b>No partition key.</b> Messages round-robin across partitions, so Kafka guarantees no order between any
+       two of them \u2014 including two facts about the <i>same</i> Transfer. That is what makes a read model built on
+       last-write-wins unsafe: it can be handed <code>Committed</code> before <code>Prepared</code> and settle there
+       permanently. Run Scenario 9, or hunt for a violation, and watch the path invariant break.`,
+    aggregate: `<b>Keyed by aggregate id.</b> Every fact about one Transfer lands on one partition, so that Transfer\u2019s
+       own history can never arrive out of order \u2014 the Reorder button will now refuse a same-aggregate pair outright
+       rather than merely being unlikely to pick one. Order <i>between</i> aggregates is still undefined, which is what
+       Scenario 3 exercises and what <code>rollbackChild</code>\u2019s live-outcome read already tolerates. This is the
+       weakest key that makes the read model sound.`,
+    transaction: `<b>Keyed by transaction id.</b> A Transfer rides its parent Transaction\u2019s partition, so a whole
+       transaction tree is totally ordered \u2014 <i>within one topic</i>. Two topics are independent partitions no matter
+       what you key on, so under per-type topology this still buys you nothing across the transfer/transaction split;
+       only unified topology plus this key gives total per-transaction order. The cost the model cannot show you is
+       throughput: one partition per transaction also means one consumer thread per transaction, which is the same
+       property that removes concurrent appends to a Transaction\u2019s stream.`,
+  };
+  document.getElementById('partitionKeyNote').innerHTML = PK_NOTE[model.partitionKey];
+
+  const trigger = model.handlerMode === 'trigger';
+  document.getElementById('handlerModeLabel').textContent = trigger ? 'EVENT-AS-TRIGGER' : 'EVENT-AS-DATA';
+  document.getElementById('handlerModeNote').innerHTML = trigger
+    ? `<b>Event-as-trigger.</b> A delivered message means only \u201csome aggregate moved\u201d. The orchestrator ignores its
+       payload and re-folds authoritative state \u2014 sweeping every requested child\u2019s live outcome and re-evaluating the
+       Transaction until nothing progresses \u2014 which is what <code>runSaga</code> already does today. Redelivery, reordering
+       and which topic a message landed on stop mattering: a message only has to arrive at-least-once, eventually, in any
+       order. A message that is <i>never</i> delivered still stalls the saga until the next nudge, so a polling gap degrades
+       to lateness rather than wrongness. Ruby is unaffected either way \u2014 it lives in another context with no access to
+       Go\u2019s store, so the topic really is its only channel.`
+    : `<b>Event-as-data.</b> The delivered message <i>is</i> the fact being folded, so which topic it arrived on decides what
+       the handler can do at all: child reconciliation is recorded off the <code>transfer</code> topic, but \u201care all
+       children terminal?\u201d is only re-evaluated off the <code>transaction</code> topic. That split is what makes
+       Scenario 6 a real stall, and it is what makes duplicate and out-of-order delivery worth testing at all. Flip to
+       event-as-trigger to see how much of that fragility is inherent and how much is this handler shape.`;
+
+  document.getElementById('transferGroups').innerHTML = SagaModel.allTransferIds(model).map(id => {
+    const t = model.transfers[id];
+    const deps = SagaModel.DEPENDS_ON[id] || [];
+    const label = SagaModel.isReversal(id)
+      ? `Reversal ${id} — undoing Transfer ${t.reversalOf}${t.requiresStaging ? ', requires staging' : ''}`
+      : `Transfer ${id} (${t.requiresStaging ? 'staging required' : 'no staging'}${deps.length ? `, depends on ${deps.join(' + ')}` : ''})`;
+    const btns = Object.keys(SagaModel.TRANSFER_ACTIONS).map(key => {
+      const spec = SagaModel.TRANSFER_ACTIONS[key];
+      const legality = SagaModel.transferActionLegality(model, id, key);
+      return actBtn(spec.label, TRANSFER(id, key), legality.legal, legality.reason);
+    }).join('');
+    return `<div class="btn-group-label">${esc(label)}</div><div class="btn-group">${btns}</div>`;
+  }).join('');
+
+  document.getElementById('txnGroup').innerHTML = [
+    actBtn('Start Transaction', { type: 'START_TRANSACTION' }, SagaModel.canStartTransaction(model), 'Already started'),
+    actBtn('Dispatch Ready Children', { type: 'DISPATCH_READY' }, SagaModel.canDispatchReady(model), 'Not started, or nothing left to dispatch'),
+    actBtn('Roll Back Child', { type: 'ROLLBACK_CHILD' }, SagaModel.canRollbackChild(model), 'Transaction not in rollback_started, or nothing left to roll back'),
+  ].join('');
+
+  document.getElementById('plumbingGroup').innerHTML = [
+    actBtn('Publish Next Event', { type: 'PUBLISH_NEXT' }, SagaModel.canPublishNext(model), 'Nothing new to publish'),
+    actBtn('Duplicate Last Delivery', { type: 'DUPLICATE_LAST' }, SagaModel.canDuplicateLast(model), 'Nothing published yet'),
+    actBtn('Reorder Pending Pair', { type: 'REORDER_PENDING' }, SagaModel.canReorder(model),
+      `No two adjacent undelivered messages sit in different partitions under key=${model.partitionKey}`),
+    actBtn('Simulate Relay Restart (Polling only)', { type: 'SIMULATE_RESTART' }, SagaModel.canSimulateRestart(model), 'Only meaningful under Polling'),
+    actBtn('Crash Saga Orchestrator', { type: 'CRASH_SAGA' }, model.sagaAlive, 'Already crashed'),
+    actBtn('Restart Saga Orchestrator', { type: 'RESTART_SAGA' }, !model.sagaAlive, 'Already alive'),
+  ].join('');
+
+  const perType = model.topicTopology === 'per-type';
+  const transferTopicKey = perType ? 'transfer' : 'unified';
+  document.getElementById('transferTopicGroup').innerHTML = [
+    actBtn(`Saga: Consume Next (${perType ? 'transfer' : 'unified'})`, { type: 'SAGA_CONSUME', topic: transferTopicKey }, SagaModel.canSagaConsume(model, transferTopicKey), 'Crashed, or nothing new'),
+    actBtn(`Ruby: Consume Next (${perType ? 'transfer' : 'unified'})`, { type: 'RUBY_CONSUME', topic: transferTopicKey }, SagaModel.canRubyConsume(model, transferTopicKey), 'Nothing new'),
+  ].join('');
+  const txnTopicGroupEl = document.getElementById('transactionTopicGroup');
+  const txnTopicLabelEl = txnTopicGroupEl.previousElementSibling;
+  if (perType) {
+    txnTopicLabelEl.style.display = '';
+    txnTopicGroupEl.style.display = '';
+    txnTopicGroupEl.innerHTML = [
+      actBtn('Saga: Consume Next (transaction)', { type: 'SAGA_CONSUME', topic: 'transaction' }, SagaModel.canSagaConsume(model, 'transaction'), 'Crashed, or nothing new'),
+      actBtn('Ruby: Consume Next (transaction)', { type: 'RUBY_CONSUME', topic: 'transaction' }, SagaModel.canRubyConsume(model, 'transaction'), 'Nothing new'),
+    ].join('');
+  } else {
+    txnTopicLabelEl.style.display = 'none';
+    txnTopicGroupEl.style.display = 'none';
+  }
+
+  const followTargets = [
+    ...SagaModel.allTransferIds(model).map(id => ['transfer', id, SagaModel.isReversal(id) ? `Reversal ${id}` : `Transfer ${id}`]),
+    ['transaction', 'txn', 'Transaction'],
+  ];
+  document.getElementById('followOnGroup').innerHTML = followTargets.map(([aggType, aggId, name]) =>
+    actBtn(`Originate Follow-On (${name})`, { type: 'ORIGINATE_FOLLOWON', aggType, aggId },
+      SagaModel.canOriginateFollowOn(model, aggType, aggId),
+      `Ruby hasn't consumed a terminal event for ${name} yet, or it's already originated`)
+  ).join('');
+}
+
+const STATUS_WORD = { ok: 'holds', lag: 'lagging', stalled: 'stalled', violated: 'broken' };
+
+function renderInvariants() {
+  document.getElementById('invariantBar').innerHTML = SagaModel.checkInvariants(model).map(inv =>
+    `<div class="inv ${inv.status}">
+       <span class="st">${STATUS_WORD[inv.status]}</span>
+       <span class="nm">${esc(inv.label)}</span>
+       <span class="dt">${esc(inv.detail)}</span>
+     </div>`
+  ).join('');
+}
+
+// A fresh model carrying the design knobs currently selected, so a hunt
+// searches the configuration the user is actually evaluating.
+function freshLikeCurrent() {
+  let m = SagaModel.initial();
+  if (m.publisherMode !== model.publisherMode) m = SagaModel.dispatch(m, { type: 'TOGGLE_PUBLISHER' });
+  if (m.topicTopology !== model.topicTopology) m = SagaModel.dispatch(m, { type: 'TOGGLE_TOPOLOGY' });
+  if (m.handlerMode !== model.handlerMode) m = SagaModel.dispatch(m, { type: 'TOGGLE_HANDLER' });
+  while (m.partitionKey !== model.partitionKey) m = SagaModel.dispatch(m, { type: 'CYCLE_PARTITION_KEY' });
+  return m;
+}
+
+function reportFuzz(result, runsTried) {
+  const el = document.getElementById('fuzzResult');
+  const where = runsTried ? `run ${runsTried}, ` : '';
+  if (result.failure) {
+    el.innerHTML = `<span class="pill failed">violation</span> ${esc(result.failure.invariant)} — ${where}seed ${result.seed}, step ${result.steps} ` +
+      `(${esc(JSON.stringify(result.failure.action))}). State and log below are the reproduction.`;
+  } else if (runsTried) {
+    el.innerHTML = `<span class="pill committed">no violation</span> ${runsTried} runs × ${result.steps} steps under ` +
+      `${model.publisherMode.toUpperCase()} / ${model.topicTopology} / event-as-${model.handlerMode} / key=${model.partitionKey}.`;
+  } else {
+    el.innerHTML = `<span class="pill committed">no violation</span> ${result.steps} steps, seed ${result.seed}` +
+      `${result.exhausted ? ' (ran out of legal actions)' : ''}.`;
+  }
+}
+
+function renderActivity() {
+  document.getElementById('activityLog').innerHTML = model.activity.length
+    ? model.activity.map(l => `<div>${esc(l)}</div>`).join('')
+    : '<div class="empty">Nothing yet — click a free-play button or start a scenario.</div>';
+}
+
+function renderScenarios() {
+  document.getElementById('tabsBar').innerHTML = SCENARIOS.map((s, i) =>
+    `<button class="tab-btn ${i === activeScenario ? 'active' : ''}" data-tab="${i}">${i + 1}. ${esc(s.title)}</button>`
+  ).join('');
+  const s = SCENARIOS[activeScenario];
+  const progress = scenarioProgress[activeScenario] || 0;
+  const stepsHtml = s.steps.map((step, i) => {
+    const cls = i < progress ? 'done' : (i === progress ? 'next' : '');
+    const mark = i < progress ? '✓' : (i + 1);
+    const btn = i === progress ? actBtn(step.label, step.action, true, '', 'accent') : '';
+    return `<div class="step ${cls}"><span class="n">${mark}</span><span>${esc(step.label)}</span>${btn}</div>`;
+  }).join('');
+  const doneMsg = progress >= s.steps.length ? '<div class="scenario-done">Scenario complete — check the state panels and activity log above.</div>' : '';
+  document.getElementById('scenarioBody').innerHTML =
+    `<div class="scenario-desc">${esc(s.desc)}</div>
+     <button class="act accent" data-restart-scenario="1" style="margin-bottom:12px;">Start / Restart This Scenario</button>
+     <div class="step-list">${stepsHtml}</div>${doneMsg}`;
+}
+
+function render() {
+  renderInvariants();
+  renderStatePanels();
+  renderTopics();
+  renderFreePlay();
+  renderActivity();
+  renderScenarios();
+}
+
+document.addEventListener('click', (e) => {
+  const tabBtn = e.target.closest('[data-tab]');
+  if (tabBtn) { activeScenario = Number(tabBtn.getAttribute('data-tab')); render(); return; }
+
+  const restartBtn = e.target.closest('[data-restart-scenario]');
+  if (restartBtn) {
+    model = SagaModel.initial();
+    scenarioProgress[activeScenario] = 0;
+    render();
+    return;
+  }
+
+  const fuzzBtn = e.target.closest('[data-fuzz]');
+  if (fuzzBtn) {
+    const result = SagaModel.fuzz(model, { steps: Number(fuzzBtn.getAttribute('data-fuzz')) });
+    model = result.model;
+    render();
+    reportFuzz(result, 0);
+    return;
+  }
+
+  const huntBtn = e.target.closest('[data-hunt]');
+  if (huntBtn) {
+    const runs = Number(huntBtn.getAttribute('data-hunt'));
+    let last = null;
+    for (let i = 1; i <= runs; i++) {
+      last = SagaModel.fuzz(freshLikeCurrent(), { steps: 200 });
+      if (last.failure) { model = last.model; render(); reportFuzz(last, i); return; }
+    }
+    render();
+    reportFuzz(last, runs);
+    return;
+  }
+
+  const btn = e.target.closest('[data-action]');
+  if (!btn || btn.disabled) return;
+  const action = JSON.parse(btn.getAttribute('data-action'));
+  model = SagaModel.dispatch(model, action);
+
+  const s = SCENARIOS[activeScenario];
+  const progress = scenarioProgress[activeScenario] || 0;
+  if (progress < s.steps.length && JSON.stringify(s.steps[progress].action) === JSON.stringify(action) && btn.classList.contains('accent') && btn.closest('.step')) {
+    scenarioProgress[activeScenario] = progress + 1;
+  }
+  render();
+});
+
+render();
+</script>
+</body>
+</html>
