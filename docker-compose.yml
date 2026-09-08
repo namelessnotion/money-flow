@@ -1,6 +1,13 @@
 services:
   postgres:
     image: postgres:17
+    # wal_level=logical is what lets Debezium's replication slot decode the
+    # events table from the WAL (docs/adr/0001). It is a server parameter, so
+    # it needs a restart — but NOT a fresh volume: money_flow_postgres holds
+    # real development data and must survive this. max_wal_senders and
+    # max_replication_slots default to 10 in postgres 17, which is ample for
+    # the single slot the connector opens.
+    command: postgres -c wal_level=logical
     environment:
       POSTGRES_USER: money_flow
       POSTGRES_PASSWORD: money_flow
@@ -83,6 +90,72 @@ services:
       - "8080:8080"
     volumes:
       - ./go:/app
+
+  # --- CDC tracer bullet (docs/cdc-tracer-bullet.md) -------------------------
+  # Kafka and Kafka Connect exist to prove the Postgres -> Kafka publication
+  # path from docs/adr/0001. Nothing in go/, ruby/ or client/ reads from them
+  # yet. Single-node, no persistence volume, PLAINTEXT, in-network only: this
+  # is a development rig, not a template for a deployed broker.
+  kafka:
+    image: apache/kafka:3.9.1
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      # One broker, so every internal topic has to be replication-factor 1.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      # More than one partition on purpose: ADR 0001 decision 4 partitions by
+      # aggregate_id, and a single-partition topic would make that claim
+      # unfalsifiable.
+      KAFKA_NUM_PARTITIONS: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+
+  # Debezium's Kafka Connect distribution. The connector itself is not baked
+  # in: docker/cdc/setup.sh POSTs docker/cdc/events-connector.json to the REST
+  # API on :8083, so registering and dropping it is a scriptable, revertible
+  # step rather than container state.
+  connect:
+    image: quay.io/debezium/connect:3.0.0.Final
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: money-flow-cdc
+      CONFIG_STORAGE_TOPIC: connect_configs
+      OFFSET_STORAGE_TOPIC: connect_offsets
+      STATUS_STORAGE_TOPIC: connect_statuses
+      CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+      OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+      STATUS_STORAGE_REPLICATION_FACTOR: "1"
+      # Keys stay raw strings so a consumed message shows the aggregate_id
+      # itself rather than a JSON-quoted or schema-wrapped rendering of it.
+      KEY_CONVERTER: org.apache.kafka.connect.storage.StringConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      # ADR 0001 decision 5. Without idempotence a producer retry can reorder
+      # records within a partition, which would silently void decision 4.
+      # Connect does not turn it on by default, so this is load-bearing. Set at
+      # the worker rather than per connector (`producer.override.*`, which also
+      # works): one owner, and it covers any connector registered later.
+      CONNECT_PRODUCER_ENABLE_IDEMPOTENCE: "true"
+      CONNECT_PRODUCER_ACKS: all
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8083:8083"
 
   # VueJS client, served by Vite's dev server. Reachable directly on :5173
   # or via the proxy at https://app.local.namelessnotion.com.
