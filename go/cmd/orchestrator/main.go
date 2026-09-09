@@ -48,9 +48,10 @@ const (
 	defaultTigerBeetleClusterID = "0"
 
 	// groupPrefix names this orchestrator's consumer groups. One group per
-	// aggregate type, per root docs/adr/0001 decision 6: separate offsets,
-	// separate lag to watch, and a halt on one topic that does not stop the
-	// other.
+	// aggregate type, per root docs/adr/0001 decision 6: separate offsets and
+	// separate lag to watch per topic. It does not give one topic's halt any
+	// fault isolation from the other's — run cancels both on the first error,
+	// per go/docs/adr/0003.
 	groupPrefix = "money-flow-saga-"
 )
 
