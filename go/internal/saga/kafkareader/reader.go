@@ -152,21 +152,33 @@ func (w topicWait) exists(ctx context.Context) (bool, error) {
 	return false, errors.Join(errs...)
 }
 
+// dialAndCheckTopic asks broker for topic's metadata through kafka.Client
+// rather than the lower-level kafka.Conn: Conn.ReadPartitions hardcodes
+// AllowAutoTopicCreation on the metadata request it sends, so an existence
+// check made through it can create the very topic it was checking for on a
+// cluster that has not disabled broker-side auto-creation. kafka.Client's
+// Metadata leaves that flag at its zero value, false, and — unlike Conn,
+// which stops observing ctx once DialContext returns — keeps every dial and
+// read bound to ctx for the life of the call, so a broker that accepts a
+// connection and then stalls the response cannot hang this past ctx.
 func dialAndCheckTopic(ctx context.Context, broker, topic string) (bool, error) {
-	conn, err := (&kafka.Dialer{}).DialContext(ctx, "tcp", broker)
+	client := &kafka.Client{Addr: kafka.TCP(broker)}
+	resp, err := client.Metadata(ctx, &kafka.MetadataRequest{Topics: []string{topic}})
 	if err != nil {
-		return false, fmt.Errorf("dial: %w", err)
+		return false, fmt.Errorf("metadata: %w", err)
 	}
-	defer func() { _ = conn.Close() }()
+	if len(resp.Topics) != 1 {
+		return false, fmt.Errorf("metadata: got %d topic(s) in response, want 1", len(resp.Topics))
+	}
 
-	partitions, err := conn.ReadPartitions(topic)
-	if err != nil {
-		if errors.Is(err, kafka.UnknownTopicOrPartition) {
-			return false, nil
-		}
-		return false, fmt.Errorf("read partitions: %w", err)
+	t := resp.Topics[0]
+	if errors.Is(t.Error, kafka.UnknownTopicOrPartition) {
+		return false, nil
 	}
-	return len(partitions) > 0, nil
+	if t.Error != nil {
+		return false, t.Error
+	}
+	return len(t.Partitions) > 0, nil
 }
 
 // Reader consumes one topic as a member of one consumer group.
