@@ -3,6 +3,7 @@ package saga
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"testing"
@@ -235,5 +236,45 @@ func TestConsumer_DoesNotHaltWhenShutdownInterruptsARetry(t *testing.T) {
 
 	if err := c.Run(ctx); err != nil {
 		t.Errorf("Run() error = %v, want nil: shutdown is not a halt", err)
+	}
+}
+
+// A deadline that expires *below* the handler — a per-message timeout, a
+// database connect timeout — is a dependency failing, not this process being
+// asked to stop. Treating it as shutdown would return nil from Run, and
+// cmd/orchestrator reads nil as "this consumer finished cleanly": it records
+// no error and cancels nothing, so the sibling topic keeps running, the
+// process stays up, and one topic is silently no longer consumed. That is the
+// loss go/docs/adr/0003 halts to avoid, dressed up as health.
+func TestConsumer_HaltsWhenADeadlineExpiresBelowTheHandler(t *testing.T) {
+	t.Parallel()
+	reader := &scriptedReader{messages: []Message{message(9, observedKey, observedValue)}}
+	// Wrapped, the way a real caller returns it: errors.Is sees straight
+	// through twirp.InternalErrorWith and every other Unwrap-preserving error.
+	timedOut := fmt.Errorf("ledger call: %w", context.DeadlineExceeded)
+	calls := 0
+	c := quietConsumer(reader, handlerFunc(func(Trigger) error {
+		calls++
+		return timedOut
+	}), WithAttempts(2))
+
+	// Not runUntilIdle: the consumer's own context must stay live, or the
+	// deadline under test is indistinguishable from this process stopping.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err := c.Run(ctx)
+
+	var halt *HaltError
+	if !errors.As(err, &halt) {
+		t.Fatalf("Run() error = %v, want a *HaltError", err)
+	}
+	if halt.Message.Offset != 9 {
+		t.Errorf("halted on offset %d, want the failing 9", halt.Message.Offset)
+	}
+	if calls != 2 {
+		t.Errorf("handler called %d times, want the 2 attempts allowed: a deadline below the handler is retryable", calls)
+	}
+	if len(reader.committed) != 0 {
+		t.Errorf("committed %v; a halted message must never be committed", reader.committed)
 	}
 }

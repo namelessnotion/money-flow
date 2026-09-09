@@ -204,8 +204,16 @@ func (c *Consumer) process(ctx context.Context, msg Message) error {
 // than anything having gone wrong. Both halves matter: a cancelled context
 // often surfaces as a transport error that does not wrap context.Canceled at
 // all, so the context is checked as well as the error.
+//
+// Only this consumer's own context counts. ctx.Err() covers a deadline on it,
+// but context.DeadlineExceeded arriving from below — a per-message timeout, a
+// connect_timeout, any deadline inside the handler — is a dependency failing
+// and must halt. Classifying it as shutdown returns nil from Run, which
+// cmd/orchestrator reads as a clean finish: nothing is recorded, the sibling
+// consumer is not cancelled, and the process stays up with one topic no longer
+// consumed. That is the silent loss go/docs/adr/0003 halts to avoid.
 func isShutdown(ctx context.Context, err error) bool {
-	return ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+	return ctx.Err() != nil || errors.Is(err, context.Canceled)
 }
 
 func sleep(ctx context.Context, d time.Duration) error {
