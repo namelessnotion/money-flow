@@ -144,10 +144,8 @@ func (o OutcomeKind) String() string {
 // Outcome folds transferID's own stream (a Transfer's or a Reversal's — same
 // aggregate type) into a coarse, exported summary. Read-only: it never
 // drives the saga forward, only reports where the stream currently stands.
-// A rejected request never advances past its first event, so it is checked
-// for directly rather than through currentState, which has no vocabulary
-// for it at all — a rejection is a terminal outcome unrelated to the saga's
-// own accepted-through-committed progression.
+// A rejection is reported straight off the opening event rather than folded
+// — see rejectedRequest.
 func Outcome(ctx context.Context, store eventstore.Store, transferID string) (OutcomeKind, error) {
 	events, err := store.Load(ctx, AggregateType, transferID)
 	if err != nil {
@@ -156,8 +154,7 @@ func Outcome(ctx context.Context, store eventstore.Store, transferID string) (Ou
 	if len(events) == 0 {
 		return OutcomeNotFound, nil
 	}
-	switch events[0].EventType {
-	case eventstore.EventType(&pb.TransferRequestRejected{}), eventstore.EventType(&pb.ReversalRequestRejected{}):
+	if rejectedRequest(events) {
 		return OutcomeRejected, nil
 	}
 
@@ -176,6 +173,21 @@ func Outcome(ctx context.Context, store eventstore.Store, transferID string) (Ou
 		return OutcomeCancelled, nil
 	default:
 		return OutcomeNotFound, nil
+	}
+}
+
+// rejectedRequest reports whether events is a rejected request's stream. A
+// rejection is the decision not to start a saga at all, so it is always event
+// 0 and nothing can ever follow it: the fact is read off the opening event
+// rather than folded, since currentState has no vocabulary for it — its states
+// are the accepted-through-committed progression a rejection never enters.
+// events must be non-empty.
+func rejectedRequest(events []eventstore.Event) bool {
+	switch events[0].EventType {
+	case eventstore.EventType(&pb.TransferRequestRejected{}), eventstore.EventType(&pb.ReversalRequestRejected{}):
+		return true
+	default:
+		return false
 	}
 }
 
@@ -690,6 +702,22 @@ func (s *Server) cancelPrepared(ctx context.Context, transferID, reason string) 
 	}
 }
 
+// Resume advances transferID's saga from whatever its stream currently
+// records, and is the event-triggered orchestrator's entire vocabulary for a
+// Transfer: a delivered message names an aggregate, and this re-folds that
+// aggregate's authoritative state and dispatches whatever comes next
+// (go/docs/adr/0001). It is exactly runSaga, exported — deliberately not a
+// second implementation — so a trigger and an RPC drive the Transfer through
+// the same code and converge on the same result when both do it at once.
+//
+// Safe to call any number of times: a Transfer already parked on the outside
+// world or already terminal is left exactly as it is. An id with no stream is
+// an error, not a no-op — every trigger names an aggregate the log already
+// holds, so an unknown one is an inconsistency worth surfacing.
+func (s *Server) Resume(ctx context.Context, transferID string) error {
+	return s.runSaga(ctx, transferID)
+}
+
 // runSaga folds the Transfer's current state and dispatches the next step,
 // looping until it reaches a state that waits on something outside this
 // call — the outside world (Staged, Pending) or a true terminal (Committed,
@@ -704,6 +732,15 @@ func (s *Server) runSaga(ctx context.Context, transferID string) error {
 		}
 		if len(events) == 0 {
 			return fmt.Errorf("transfer %q: no events", transferID)
+		}
+		if rejectedRequest(events) {
+			// A rejected request is terminal before the saga begins: there
+			// are no legs, no Operations and no next step, so resuming one is
+			// legitimately nothing to do. Ordinary business rejections reach
+			// the orchestrator down the same topic as every other event
+			// (go/docs/adr/0001), and treating one as an unrecognized state
+			// would halt the consumer on a message no retry can get past.
+			return nil
 		}
 
 		switch state := currentState(events); state {

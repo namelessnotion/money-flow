@@ -157,6 +157,43 @@ services:
     ports:
       - "8083:8083"
 
+  # Event-triggered saga orchestrator (go/internal/saga, go/docs/adr/0001 and
+  # 0003). It consumes transfer-events and transaction-events and drives the
+  # sagas forward, running alongside the synchronous dispatch in `go` rather
+  # than replacing it.
+  #
+  # Under the `cdc` profile, so `docker compose up -d` does not start it: it is
+  # only meaningful once docker/cdc/setup.sh has registered the connector, and
+  # it consumes the scratch money_flow_cdc database the tracer publishes —
+  # nothing publishes money_flow_dev. Start it with `make orchestrator-up`, and
+  # see docs/saga-orchestrator.md for the walkthrough.
+  orchestrator:
+    profiles: ["cdc"]
+    build:
+      context: .
+      dockerfile: docker/go/Dockerfile
+    environment:
+      DATABASE_URL: postgres://money_flow:money_flow@postgres:5432/money_flow_cdc?sslmode=disable
+      DB_HOST: postgres
+      KAFKA_BROKERS: kafka:9092
+      TIGERBEETLE_ADDRESS: tigerbeetle:3000
+      TIGERBEETLE_CLUSTER_ID: "0"
+    command: ["go", "run", "./cmd/orchestrator"]
+    # The orchestrator drives the same sagas the RPC server does, so it stages,
+    # posts and voids in TigerBeetle and needs tb_client's io_uring exemption
+    # for exactly the reason the `go` service does.
+    security_opt:
+      - "seccomp=unconfined"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      tigerbeetle:
+        condition: service_started
+    volumes:
+      - ./go:/app
+
   # VueJS client, served by Vite's dev server. Reachable directly on :5173
   # or via the proxy at https://app.local.namelessnotion.com.
   client:

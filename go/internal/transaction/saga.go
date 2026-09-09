@@ -338,6 +338,21 @@ func logSagaError(rpc, transactionID string, err error) {
 	}
 }
 
+// Resume advances transactionID's saga from whatever its stream currently
+// records — the Transaction-side twin of transfer.Server.Resume, and the other
+// half of the event-triggered orchestrator's vocabulary. It is exactly
+// runSaga, exported, for the same reason: a trigger and an RPC must drive the
+// Transaction through the same code.
+//
+// It differs from the ResumeTransaction RPC only in what it does with a
+// failure. The RPC answers a caller that wants the Transaction's state and so
+// logs a saga error rather than surfacing it; the orchestrator is the driver
+// and needs the error back, because whether a trigger is retried or the
+// partition halts is its decision to make (go/docs/adr/0003).
+func (s *Server) Resume(ctx context.Context, transactionID string) error {
+	return s.runSaga(ctx, transactionID)
+}
+
 // runSaga folds the Transaction's current state and dispatches the next
 // step, looping until it reaches a state that waits on something outside
 // this call — an in-flight or gated child, or an external
