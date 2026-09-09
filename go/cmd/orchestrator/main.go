@@ -89,10 +89,36 @@ func main() {
 	brokers := strings.Split(env("KAFKA_BROKERS", defaultKafkaBrokers), ",")
 	orchestrator := saga.Wire(eventstore.NewPostgresStore(pool), tb).Orchestrator()
 
-	if err := run(ctx, brokers, orchestrator); err != nil {
+	if err := run(ctx, kafkaTransport(brokers), orchestrator); err != nil {
 		log.Fatalf("orchestrator: %v", err)
 	}
 	log.Print("orchestrator: stopped")
+}
+
+// topicReader is the transport a consumer holds: a saga.Reader whose group
+// membership has to be released when it stops.
+type topicReader interface {
+	saga.Reader
+	Close() error
+}
+
+// transport is the two Kafka calls run makes, held as values rather than made
+// directly, so that run's own start-up — which topic blocks what — is
+// exercisable without a broker.
+type transport struct {
+	waitForTopic func(ctx context.Context, topic string) error
+	newReader    func(groupID, topic string) topicReader
+}
+
+func kafkaTransport(brokers []string) transport {
+	return transport{
+		waitForTopic: func(ctx context.Context, topic string) error {
+			return kafkareader.WaitForTopic(ctx, brokers, topic)
+		},
+		newReader: func(groupID, topic string) topicReader {
+			return kafkareader.New(brokers, groupID, topic)
+		},
+	}
 }
 
 // run consumes every topic until the process is asked to stop or one of the
@@ -102,37 +128,20 @@ func main() {
 // practice — a Transaction stuck because transfer triggers stopped arriving is
 // not usefully "still working" — and stopping together makes the failure
 // visible as one incident rather than as a partial system that looks healthy.
-func run(ctx context.Context, brokers []string, orchestrator *saga.Orchestrator) error {
+func run(ctx context.Context, tr transport, handler saga.Handler) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	var (
-		wg      sync.WaitGroup
-		mu      sync.Mutex
-		first   error
-		readers []*kafkareader.Reader
+		wg    sync.WaitGroup
+		mu    sync.Mutex
+		first error
 	)
 	for _, aggregateType := range consumedAggregateTypes {
-		topic := saga.Topic(aggregateType)
-
-		// Before the reader, not after: a consumer group that forms while its
-		// topic does not exist is assigned nothing and never recovers. See
-		// kafkareader.WaitForTopic.
-		if err := kafkareader.WaitForTopic(ctx, brokers, topic); err != nil {
-			if ctx.Err() != nil {
-				break // shutting down before we got started
-			}
-			return err
-		}
-
-		reader := kafkareader.New(brokers, groupPrefix+aggregateType, topic)
-		readers = append(readers, reader)
-
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			log.Printf("orchestrator: consuming %s as %s", topic, groupPrefix+aggregateType)
-			if err := saga.NewConsumer(reader, orchestrator).Run(ctx); err != nil {
+			if err := consume(ctx, tr, aggregateType, handler); err != nil {
 				mu.Lock()
 				if first == nil {
 					first = err
@@ -144,12 +153,42 @@ func run(ctx context.Context, brokers []string, orchestrator *saga.Orchestrator)
 	}
 
 	wg.Wait()
-	for _, reader := range readers {
+	return first
+}
+
+// consume waits for one topic to exist, opens its reader, and consumes it
+// until ctx is cancelled or the consumer gives up.
+//
+// The wait belongs here, inside the topic's own goroutine, rather than in
+// run's loop: waited for in sequence, a topic nothing has published to yet
+// holds up every consumer behind it. On a fresh CDC database that is the
+// ordinary starting state rather than a corner of one — a Transaction whose
+// children are all auto_process:false, or one rejected at initialization,
+// leaves transfer-events uncreated — and after the cutover it is a bootstrap
+// deadlock, because the only thing that can dispatch the first Transfer is a
+// transaction trigger this orchestrator would be blocked from consuming.
+func consume(ctx context.Context, tr transport, aggregateType string, handler saga.Handler) error {
+	topic, group := saga.Topic(aggregateType), groupPrefix+aggregateType
+
+	// Before the reader, not after: a consumer group that forms while its
+	// topic does not exist is assigned nothing and never recovers. See
+	// kafkareader.WaitForTopic.
+	if err := tr.waitForTopic(ctx, topic); err != nil {
+		if ctx.Err() != nil {
+			return nil // shutting down before we got started
+		}
+		return err
+	}
+
+	reader := tr.newReader(group, topic)
+	defer func() {
 		if err := reader.Close(); err != nil {
 			log.Printf("orchestrator: %v", err)
 		}
-	}
-	return first
+	}()
+
+	log.Printf("orchestrator: consuming %s as %s", topic, group)
+	return saga.NewConsumer(reader, handler).Run(ctx)
 }
 
 func env(key, fallback string) string {

@@ -136,6 +136,11 @@ healthy-looking generation reading nothing. Since the topics here are created by
 publication, that was the *normal* startup order, not a corner case. `kafkareader.WaitForTopic` now blocks
 until the topic exists before the group forms, and says so while it waits.
 
+Each topic is waited for in its own goroutine, not one after another. Sequentially, a topic nothing has
+published to yet would hold up every consumer behind it, and after the cutover that is a deadlock rather than a
+delay: `transfer-events` does not exist until a Transaction dispatches its first child, and the only thing that
+can make it do so is a `transaction-events` trigger the orchestrator would be blocked from consuming.
+
 ## A note on the tracer bullet's own messages
 
 `go/cmd/cdctracer` appends synthetic events — a `TransferRequestAccepted` naming no wallets, for instance — to
