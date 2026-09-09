@@ -254,6 +254,43 @@ func TestOrchestrator_DrivesAStandaloneTransferWithNoTransaction(t *testing.T) {
 	}
 }
 
+// A rejected request is published on the transfer topic like every other
+// event, so the orchestrator is handed a trigger naming a Transfer whose saga
+// never began. Nothing about that is exotic — insufficient capacity is an
+// ordinary business answer — and the consumer commits no offset for a message
+// its handler failed on, so treating a rejection as a failure would stop the
+// orchestrator here and on every restart after it.
+func TestOrchestrator_ARejectedRequestIsDrivenNoFurther(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t, eventstore.NewMemoryStore(), ledger.NewFakeClient())
+	from := testutil.ID("w1")
+	to := testutil.ID("w2")
+	w.openWallet(from, sharedpb.Allows_ALLOWS_ONRAMP_AND_OFFRAMP)
+	w.openWallet(to, sharedpb.Allows_ALLOWS_ONRAMP_AND_OFFRAMP)
+	w.mintAndFundToken(from, testutil.ID("t1"), usd(100))
+
+	// Rejected by the real server for the most ordinary reason there is: the
+	// source Wallet cannot cover the amount.
+	transferID := testutil.ID("xfer-rejected")
+	resp, err := w.transfers.RequestTransfer(context.Background(), &transferpb.RequestTransferRequest{
+		Id: transferID, FromWalletId: from, ToWalletId: to, Amount: usd(400),
+	})
+	if err != nil {
+		t.Fatalf("RequestTransfer() error = %v", err)
+	}
+	if resp.GetTransferRequestRejected() == nil {
+		t.Fatalf("result = %v, want a rejection to trigger on", resp.GetResult())
+	}
+
+	if err := w.deliver(transfer.AggregateType, transferID); err != nil {
+		t.Fatalf("Handle(transfer %s) error = %v; a rejection must not halt the orchestrator", transferID, err)
+	}
+
+	if got := w.outcome(transferID); got != transfer.OutcomeRejected {
+		t.Errorf("Outcome() = %v, want rejected", got)
+	}
+}
+
 // stagedReversalRollback builds a Transaction whose staged real leg settles and
 // completes, and whose shadow leg is then rejected outright because its source
 // Wallet was never provisioned. Rollback therefore has to reverse a committed

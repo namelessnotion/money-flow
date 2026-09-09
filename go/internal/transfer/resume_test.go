@@ -89,3 +89,61 @@ func TestResume_ErrorsOnAnUnknownID(t *testing.T) {
 		t.Error("Resume() on an unknown id = nil, want an error")
 	}
 }
+
+// An ordinary business rejection — insufficient capacity, an unknown Wallet, a
+// closed Transaction — is recorded on the Transfer's own stream and published
+// like any other event, so the orchestrator will deliver a trigger naming it.
+// The request never entered the saga, so there is nothing to drive: Resume has
+// to settle for doing nothing rather than failing, which under the consumer's
+// retry-then-halt policy would stop the orchestrator on a message it can never
+// get past.
+func TestResume_IsANoOpOnARejectedRequest(t *testing.T) {
+	t.Parallel()
+	store := eventstore.NewMemoryStore()
+	ctx := context.Background()
+	transferID := testutil.ID("xfer1")
+	if err := store.Append(ctx, AggregateType, transferID, 0, &pb.TransferRequestRejected{
+		Id: transferID, Reason: "insufficient capacity",
+	}); err != nil {
+		t.Fatalf("seed rejected: %v", err)
+	}
+
+	server := NewServer(store, ledger.NewFakeClient(), nil, nil)
+	if err := server.Resume(ctx, transferID); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+
+	events, err := store.Load(ctx, AggregateType, transferID)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Errorf("stream grew to %d events; a rejected request must stay as it is", len(events))
+	}
+	if got, err := Outcome(ctx, store, transferID); err != nil || got != OutcomeRejected {
+		t.Fatalf("Outcome() = (%v, %v), want OutcomeRejected", got, err)
+	}
+}
+
+// A Reversal's rejection opens its stream the same way a Transfer's does, on
+// the same aggregate type, and reaches the orchestrator down the same topic.
+func TestResume_IsANoOpOnARejectedReversal(t *testing.T) {
+	t.Parallel()
+	store := eventstore.NewMemoryStore()
+	ctx := context.Background()
+	reversalID := testutil.ID("rev1")
+	if err := store.Append(ctx, AggregateType, reversalID, 0, &pb.ReversalRequestRejected{
+		Id: reversalID, Reason: "transfer not reversible",
+	}); err != nil {
+		t.Fatalf("seed rejected: %v", err)
+	}
+
+	server := NewServer(store, ledger.NewFakeClient(), nil, nil)
+	if err := server.Resume(ctx, reversalID); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+
+	if got, err := Outcome(ctx, store, reversalID); err != nil || got != OutcomeRejected {
+		t.Fatalf("Outcome() = (%v, %v), want OutcomeRejected", got, err)
+	}
+}
