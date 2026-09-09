@@ -152,16 +152,33 @@ func (w topicWait) exists(ctx context.Context) (bool, error) {
 	return false, errors.Join(errs...)
 }
 
+// checkTimeout bounds one call to dialAndCheckTopic.
+//
+// Without an explicit bound of its own, this check inherits whatever ctx
+// WaitForTopic was given — cmd/orchestrator's is cancelled by SIGTERM but
+// carries no deadline. kafka.Client's connection pool bootstraps a broker
+// address the first time it is asked about, and that bootstrap retries with
+// its own backoff for as long as ctx stays alive; a broker that accepts the
+// TCP connection and then never answers keeps this call — and the poll tick
+// that made it — blocked for that whole retry, not just one attempt. Because
+// topicWait.exists only measures unreachableSince between calls that return,
+// a call that never returns lets a stalled broker sit outside the
+// maxUnreachable budget entirely, silent and unbounded, rather than failing
+// the check the way a refused connection already does. Giving the call its
+// own deadline, shorter than maxUnreachable, guarantees it returns — success,
+// "not yet", or an error — often enough for that budget to actually apply.
+const checkTimeout = 5 * time.Second
+
 // dialAndCheckTopic asks broker for topic's metadata through kafka.Client
 // rather than the lower-level kafka.Conn: Conn.ReadPartitions hardcodes
 // AllowAutoTopicCreation on the metadata request it sends, so an existence
 // check made through it can create the very topic it was checking for on a
 // cluster that has not disabled broker-side auto-creation. kafka.Client's
-// Metadata leaves that flag at its zero value, false, and — unlike Conn,
-// which stops observing ctx once DialContext returns — keeps every dial and
-// read bound to ctx for the life of the call, so a broker that accepts a
-// connection and then stalls the response cannot hang this past ctx.
+// Metadata leaves that flag at its zero value, false.
 func dialAndCheckTopic(ctx context.Context, broker, topic string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, checkTimeout)
+	defer cancel()
+
 	client := &kafka.Client{Addr: kafka.TCP(broker)}
 	resp, err := client.Metadata(ctx, &kafka.MetadataRequest{Topics: []string{topic}})
 	if err != nil {
