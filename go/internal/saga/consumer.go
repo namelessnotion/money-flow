@@ -2,7 +2,6 @@ package saga
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -135,14 +134,14 @@ func (c *Consumer) Run(ctx context.Context) error {
 	for {
 		msg, err := c.reader.Fetch(ctx)
 		if err != nil {
-			if isShutdown(ctx, err) {
+			if isShutdown(ctx) {
 				return nil
 			}
 			return fmt.Errorf("saga: fetch: %w", err)
 		}
 
 		if err := c.process(ctx, msg); err != nil {
-			if isShutdown(ctx, err) {
+			if isShutdown(ctx) {
 				return nil
 			}
 			c.logger.Printf("saga: HALTED on %s; nothing further will be consumed from this reader: %v", msg, err)
@@ -152,7 +151,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 		// After the side effects, never before: a crash between the two
 		// redelivers the message, and redelivery re-folds to the same place.
 		if err := c.reader.Commit(ctx, msg); err != nil {
-			if isShutdown(ctx, err) {
+			if isShutdown(ctx) {
 				return nil
 			}
 			return fmt.Errorf("saga: commit %s: %w", msg, err)
@@ -193,27 +192,32 @@ func (c *Consumer) process(ctx context.Context, msg Message) error {
 			c.logger.Printf("saga: handled %s: %s", msg, trigger)
 			return nil
 		}
-		if isShutdown(ctx, lastErr) {
+		if isShutdown(ctx) {
 			return lastErr
 		}
 	}
 	return &HaltError{Message: msg, Attempts: c.attempts, Err: lastErr}
 }
 
-// isShutdown reports whether err is this process being asked to stop rather
-// than anything having gone wrong. Both halves matter: a cancelled context
-// often surfaces as a transport error that does not wrap context.Canceled at
-// all, so the context is checked as well as the error.
+// isShutdown reports whether this consumer's own ctx is why the caller's
+// operation returned, rather than anything having gone wrong.
 //
-// Only this consumer's own context counts. ctx.Err() covers a deadline on it,
-// but context.DeadlineExceeded arriving from below — a per-message timeout, a
-// connect_timeout, any deadline inside the handler — is a dependency failing
-// and must halt. Classifying it as shutdown returns nil from Run, which
-// cmd/orchestrator reads as a clean finish: nothing is recorded, the sibling
-// consumer is not cancelled, and the process stays up with one topic no longer
-// consumed. That is the silent loss go/docs/adr/0003 halts to avoid.
-func isShutdown(ctx context.Context, err error) bool {
-	return ctx.Err() != nil || errors.Is(err, context.Canceled)
+// Only ctx.Err() is checked, deliberately. ctx.Err() becomes non-nil before
+// ctx.Done() closes, so any operation that observes this ctx's cancellation
+// and returns will see it set — checking the returned error too would let a
+// context.Canceled wrapped from an unrelated child context (a handler's own
+// timeout, a fetch or commit's internal cancellation) masquerade as this
+// consumer shutting down. That misclassifies a live dependency failure as a
+// clean stop: Run returns nil, cmd/orchestrator records nothing and never
+// cancels the sibling consumer, and the process stays up with one topic no
+// longer consumed. That is the silent loss go/docs/adr/0003 halts to avoid.
+//
+// The same reasoning covers context.DeadlineExceeded: a deadline arriving
+// from below — a per-message timeout, a connect_timeout, any deadline inside
+// the handler — is a dependency failing and must halt, not be swallowed as
+// shutdown.
+func isShutdown(ctx context.Context) bool {
+	return ctx.Err() != nil
 }
 
 func sleep(ctx context.Context, d time.Duration) error {

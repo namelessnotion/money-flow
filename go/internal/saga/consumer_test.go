@@ -278,3 +278,44 @@ func TestConsumer_HaltsWhenADeadlineExpiresBelowTheHandler(t *testing.T) {
 		t.Errorf("committed %v; a halted message must never be committed", reader.committed)
 	}
 }
+
+// context.Canceled arriving from a source other than this consumer's own ctx
+// — a handler's own child context, a fetch or commit's internal cancellation
+// — is a dependency failing, not this process being asked to stop. Treating
+// it as shutdown would return nil from Run and, like a deadline arriving from
+// below, read as a clean finish to cmd/orchestrator: no error recorded, the
+// sibling consumer never cancelled, one topic silently no longer consumed.
+func TestConsumer_HaltsOnACanceledContextThatIsNotItsOwn(t *testing.T) {
+	t.Parallel()
+	reader := &scriptedReader{messages: []Message{message(11, observedKey, observedValue)}}
+	// Wrapped, the way a real caller returns it: errors.Is sees straight
+	// through any Unwrap-preserving error, including this consumer's own ctx
+	// being live throughout.
+	foreignCancel := fmt.Errorf("dependent call: %w", context.Canceled)
+	calls := 0
+	c := quietConsumer(reader, handlerFunc(func(Trigger) error {
+		calls++
+		return foreignCancel
+	}), WithAttempts(2))
+
+	// Not runUntilIdle: the consumer's own context must stay live, or the
+	// foreign cancellation under test is indistinguishable from this process
+	// stopping.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err := c.Run(ctx)
+
+	var halt *HaltError
+	if !errors.As(err, &halt) {
+		t.Fatalf("Run() error = %v, want a *HaltError", err)
+	}
+	if halt.Message.Offset != 11 {
+		t.Errorf("halted on offset %d, want the failing 11", halt.Message.Offset)
+	}
+	if calls != 2 {
+		t.Errorf("handler called %d times, want the 2 attempts allowed: a foreign cancellation is retryable", calls)
+	}
+	if len(reader.committed) != 0 {
+		t.Errorf("committed %v; a halted message must never be committed", reader.committed)
+	}
+}
