@@ -141,6 +141,15 @@ published to yet would hold up every consumer behind it, and after the cutover t
 delay: `transfer-events` does not exist until a Transaction dispatches its first child, and the only thing that
 can make it do so is a `transaction-events` trigger the orchestrator would be blocked from consuming.
 
+The wait is unbounded for a *missing topic* and bounded for a *missing cluster*, because only one of those
+arrives on its own. A topic the connector has not published to yet appears without anyone doing anything, so
+waiting for it forever is right. A cluster nothing in `KAFKA_BROKERS` answers does not: left unbounded, a
+misconfigured address produces a process that logs a dial failure every two seconds and consumes nothing while
+looking perfectly healthy. After a minute with no broker reachable the wait fails, which stops the
+orchestrator with an error naming every address it tried. Each poll asks the brokers in turn and takes the
+first answer — any broker serves metadata for the whole cluster, so a multi-broker `KAFKA_BROKERS` survives
+one of them being down or restarting rather than being no more available than a single-broker one.
+
 ## A note on the tracer bullet's own messages
 
 `go/cmd/cdctracer` appends synthetic events — a `TransferRequestAccepted` naming no wallets, for instance — to
