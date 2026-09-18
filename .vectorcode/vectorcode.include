@@ -1,2 +1,7 @@
 ruby/**/*
 go/**/*
+proto/**/*
+docs/**/*
+client/src/**/*
+/client/README.md
+/README.md
