@@ -2,6 +2,7 @@
 # typed: strict
 
 require_relative '../../../gen/proto/transaction/v1/transaction_pb'
+require_relative 'entity_wallets'
 
 module Services
   module Ach
@@ -10,15 +11,25 @@ module Services
     #
     # The **real leg** moves money across the bank boundary and is staged: it
     # waits, pending, while the ACH network settles over days. The **shadow
-    # leg** records the same movement in the clearing accounts, and depends on
-    # the real leg, so it runs only once the real leg has posted. Both shapes
-    # are the ones go/internal/transaction/saga_test.go works through.
+    # leg** records the same movement in the clearing accounts. Which runs
+    # first depends on the direction (ruby/docs/adr/0004):
+    #
+    # - a deposit's shadow leg waits for the real leg to post, so uncleared
+    #   cash is only minted for money the ACH network actually delivered;
+    # - a withdrawal's real leg waits for the shadow leg, so the cleared cash
+    #   is moved to bank control — and a shortfall refused — before any money
+    #   leaves over ACH.
     class TransactionShape < T::Struct
-      class MissingAccount < StandardError; end
-
       # ACH moves US dollars only.
       CURRENCY = 'USD'
-      FACTORY_VERSION = '1'
+
+      # Bumped whenever a direction's legs or their order change, so Go's
+      # record of each Transaction says which shape it ran. Withdrawal 1 ran
+      # the real leg first.
+      FACTORY_VERSIONS = T.let(
+        { Types::Enums::AchDirection::Deposit => '1', Types::Enums::AchDirection::Withdrawal => '2' }.freeze,
+        T::Hash[Types::Enums::AchDirection, String]
+      )
 
       # One Transfer of the shape, with its accounts named by type.
       class Leg < T::Struct
@@ -64,7 +75,7 @@ module Services
       end
       def self.for(direction:, accounts:, real_transfer_id:, shadow_transfer_id:)
         new(direction: direction, real_transfer_id: real_transfer_id, shadow_transfer_id: shadow_transfer_id,
-            wallets: wallets_for(account_types(direction), accounts))
+            wallets: EntityWallets.for(account_types(direction), accounts))
       end
 
       # Every account type a `direction` Transaction moves money between.
@@ -73,20 +84,6 @@ module Services
         LEGS.fetch(direction).values.flat_map { |leg| [leg.from, leg.to] }.uniq
       end
       private_class_method :account_types
-
-      # The wallet backing each of the `needed` account types.
-      sig do
-        params(needed: T::Array[AccountType], accounts: T::Array[Models::Account])
-          .returns(T::Hash[AccountType, String])
-      end
-      def self.wallets_for(needed, accounts)
-        by_type = accounts.to_h { |account| [AccountType.deserialize(account.type), account.wallet_uuid] }
-        missing = needed.reject { |type| by_type.key?(type) }
-        raise MissingAccount, "entity has no #{missing.map(&:serialize).join(', ')} account" unless missing.empty?
-
-        needed.to_h { |type| [type, by_type.fetch(type)] }
-      end
-      private_class_method :wallets_for
 
       # e.g. "ach_deposit" — opaque to Go, which records it on the Transaction.
       sig { returns(String) }
@@ -103,17 +100,28 @@ module Services
         Transaction::V1::StartInitializingTransactionRequest.new(
           id: transaction_id,
           factory_name: factory_name,
-          factory_version: FACTORY_VERSION,
+          factory_version: FACTORY_VERSIONS.fetch(direction),
           transfers: {
             real_transfer_id => transfer(real_transfer_id, :real, amount_minor_units),
             shadow_transfer_id => transfer(shadow_transfer_id, :shadow, amount_minor_units)
           },
-          # The shadow leg waits for the real leg to post.
-          transfer_dependency: { shadow_transfer_id => Transaction::V1::TransferIdList.new(transfer_id: [real_transfer_id]) }
+          transfer_dependency: dependency
         )
       end
 
       private
+
+      # Which leg waits for which: see the class comment.
+      sig { returns(T::Hash[String, T.untyped]) }
+      def dependency
+        first, second =
+          if direction == Types::Enums::AchDirection::Withdrawal
+            [shadow_transfer_id, real_transfer_id]
+          else
+            [real_transfer_id, shadow_transfer_id]
+          end
+        { second => Transaction::V1::TransferIdList.new(transfer_id: [first]) }
+      end
 
       sig { params(id: String, role: Symbol, amount_minor_units: Integer).returns(T.untyped) }
       def transfer(id, role, amount_minor_units)

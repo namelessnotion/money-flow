@@ -16,6 +16,15 @@ module Types
                                                     extras: [:lookahead],
                                                     description: 'Onboarded entities, paginated at 100 per page.'
 
+    field :entity, Types::Entity, null: true, description: 'One entity by id, or null when there is none.' do |field|
+      field.argument :id, ID, required: true
+    end
+
+    field :ach_transaction, Types::AchTransaction,
+          null: true, description: 'One ACH Transaction by id, or null when there is none.' do |field|
+      field.argument :id, ID, required: true
+    end
+
     field :ach_transactions, Types::AchTransaction.connection_type,
           null: false, default_page_size: 100, max_page_size: 100,
           description: "An entity's ACH Transactions, oldest first, paginated at 100 per page." do |field|
@@ -35,6 +44,19 @@ module Types
     end
     def entities(lookahead:)
       Types::Entity.scope(lookahead, Models::Entity.dataset.order(:id))
+    end
+
+    # An id that is not a bigint names no entity, rather than being an error.
+    sig { params(id: String).returns(T.nilable(Models::Entity)) }
+    def entity(id:)
+      return nil unless /\A\d{1,18}\z/.match?(id)
+
+      Models::Entity[Integer(id, 10)]
+    end
+
+    sig { params(id: String).returns(T.nilable(Models::AchTransaction)) }
+    def ach_transaction(id:)
+      Types::AchTransaction.find(id)
     end
 
     # Oldest first. The id breaks ties, so pages stay stable when rows share a

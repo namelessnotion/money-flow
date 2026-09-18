@@ -59,6 +59,26 @@ RSpec.describe Consumer::Envelope do
         .to raise_error(described_class::MalformedMessage, /sequence/)
     end
 
+    # Debezium publishes events.occurred_at (timestamptz) as an ISO-8601 string.
+    it 'reads the event time Go recorded' do
+      value = JSON.parse(value_for(accepted)).merge('occurred_at' => '2026-09-18T14:52:36.123456Z').to_json
+
+      envelope = described_class.parse(key: transfer_id, value: value)
+
+      expect(envelope.occurred_at).to eq(Time.utc(2026, 9, 18, 14, 52, 36.123456r))
+    end
+
+    it 'has no event time for a message published before the envelope carried one' do
+      expect(described_class.parse(key: transfer_id, value: value_for(accepted)).occurred_at).to be_nil
+    end
+
+    it 'rejects an event time that is not ISO-8601' do
+      value = JSON.parse(value_for(accepted)).merge('occurred_at' => 'yesterday').to_json
+
+      expect { described_class.parse(key: transfer_id, value: value) }
+        .to raise_error(described_class::MalformedMessage, /occurred_at/)
+    end
+
     it 'rejects a sequence that is not an integer' do
       value = JSON.parse(value_for(accepted)).merge('sequence' => '1').to_json
 

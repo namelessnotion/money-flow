@@ -163,7 +163,7 @@ func TestTransferServiceOverHTTP(t *testing.T) {
 	// The saga runs synchronously within RequestTransfer, so by the time the
 	// HTTP response above came back the whole thing — mint, debit, credit —
 	// already committed; confirm via the shared ledger.
-	if balance, _, _ := lc.AccountBalance(ctx, testutil.ID("t1")); balance != 600 {
+	if balance, _, _ := ledger.AccountBalance(ctx, lc, testutil.ID("t1")); balance != 600 {
 		t.Errorf("t1 balance = %d, want 600 (1000 - 400)", balance)
 	}
 }

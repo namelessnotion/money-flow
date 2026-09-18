@@ -115,7 +115,7 @@ func TestFakeClient_CreateAccounts_LinkedBatchOneFailsFailsAll(t *testing.T) {
 	}
 
 	// Neither account should have been created.
-	if _, found, _ := c.AccountBalance(context.Background(), good.ID); found {
+	if _, found, _ := ledger.AccountBalance(context.Background(), c, good.ID); found {
 		t.Errorf("good account %q was created despite linked failure", good.ID)
 	}
 }
@@ -149,7 +149,7 @@ func TestFakeClient_CreateTransfers_RegularPostsImmediately(t *testing.T) {
 		t.Fatalf("got %+v, want single OK", results)
 	}
 
-	balance, found, err := c.AccountBalance(context.Background(), credit.ID)
+	balance, found, err := ledger.AccountBalance(context.Background(), c, credit.ID)
 	if err != nil || !found {
 		t.Fatalf("AccountBalance(credit): found=%v err=%v", found, err)
 	}
@@ -157,7 +157,7 @@ func TestFakeClient_CreateTransfers_RegularPostsImmediately(t *testing.T) {
 		t.Errorf("credit balance = %d, want 500", balance)
 	}
 
-	balance, found, err = c.AccountBalance(context.Background(), debit.ID)
+	balance, found, err = ledger.AccountBalance(context.Background(), c, debit.ID)
 	if err != nil || !found {
 		t.Fatalf("AccountBalance(debit): found=%v err=%v", found, err)
 	}
@@ -189,7 +189,7 @@ func TestFakeClient_CreateTransfers_ExceedsDebitsRejectsCredit(t *testing.T) {
 		t.Fatalf("got %+v, want single ExceedsDebits", results)
 	}
 
-	if balance, found, _ := c.AccountBalance(context.Background(), credit.ID); found && balance != 0 {
+	if balance, found, _ := ledger.AccountBalance(context.Background(), c, credit.ID); found && balance != 0 {
 		t.Errorf("credit balance = %d, want 0 (transfer should not have applied)", balance)
 	}
 }
@@ -232,7 +232,7 @@ func TestFakeClient_CreateTransfers_PendingReservesWithoutPosting(t *testing.T) 
 		t.Fatalf("got %+v, want single OK", results)
 	}
 
-	balance, found, err := c.AccountBalance(context.Background(), credit.ID)
+	balance, found, err := ledger.AccountBalance(context.Background(), c, credit.ID)
 	if err != nil || !found {
 		t.Fatalf("AccountBalance(credit): found=%v err=%v", found, err)
 	}
@@ -289,7 +289,7 @@ func TestFakeClient_CreateTransfers_PostPendingFinalizesIntoPosted(t *testing.T)
 		t.Fatalf("got %+v, want single OK", results)
 	}
 
-	balance, found, err := c.AccountBalance(context.Background(), credit.ID)
+	balance, found, err := ledger.AccountBalance(context.Background(), c, credit.ID)
 	if err != nil || !found {
 		t.Fatalf("AccountBalance(credit): found=%v err=%v", found, err)
 	}
@@ -305,7 +305,7 @@ func TestFakeClient_CreateTransfers_PostPendingFinalizesIntoPosted(t *testing.T)
 	if len(results) != 1 || results[0].Result != ledger.TransferResultExists {
 		t.Fatalf("got %+v, want single Exists", results)
 	}
-	if balance, _, _ := c.AccountBalance(context.Background(), credit.ID); balance != 500 {
+	if balance, _, _ := ledger.AccountBalance(context.Background(), c, credit.ID); balance != 500 {
 		t.Errorf("credit posted balance after retry = %d, want 500 (no double-post)", balance)
 	}
 }
@@ -358,7 +358,7 @@ func TestFakeClient_CreateTransfers_VoidPendingReleasesReservation(t *testing.T)
 		t.Fatalf("got %+v, want single OK", results)
 	}
 
-	if balance, _, _ := c.AccountBalance(context.Background(), credit.ID); balance != 0 {
+	if balance, _, _ := ledger.AccountBalance(context.Background(), c, credit.ID); balance != 0 {
 		t.Errorf("credit posted balance = %d, want 0 (voided, never posted)", balance)
 	}
 
@@ -415,7 +415,7 @@ func TestFakeClient_CreateTransfers_LinkedBatchOneFailsAppliesNone(t *testing.T)
 		t.Errorf("results[1] = %v, want AccountNotFound", results[1].Result)
 	}
 
-	if balance, _, _ := c.AccountBalance(context.Background(), credit.ID); balance != 0 {
+	if balance, _, _ := ledger.AccountBalance(context.Background(), c, credit.ID); balance != 0 {
 		t.Errorf("credit balance = %d, want 0 (linked batch should not have applied)", balance)
 	}
 }
@@ -450,11 +450,56 @@ func TestFakeClient_CreateTransfers_DuplicateWithDifferentFieldsRejected(t *test
 func TestFakeClient_AccountBalance_NotFound(t *testing.T) {
 	t.Parallel()
 	c := ledger.NewFakeClient()
-	_, found, err := c.AccountBalance(context.Background(), newID(t))
+	_, found, err := ledger.AccountBalance(context.Background(), c, newID(t))
 	if err != nil {
 		t.Fatalf("AccountBalance: %v", err)
 	}
 	if found {
 		t.Errorf("found = true for an account that was never created")
+	}
+}
+
+func TestFakeClient_Balances_ReportsPostedAndPendingPerAccount(t *testing.T) {
+	t.Parallel()
+	c := ledger.NewFakeClient()
+	debit := newAccount(t, ledger.AccountFlags{})
+	credit := newAccount(t, ledger.AccountFlags{})
+	mustCreateAccounts(t, c, debit, credit)
+
+	pending := ledger.Transfer{
+		ID: newID(t), DebitAccountID: debit.ID, CreditAccountID: credit.ID,
+		MinorUnits: 500, Currency: "USD", Kind: ledger.TransferKindPending, Timeout: 3600,
+	}
+	posted := ledger.Transfer{
+		ID: newID(t), DebitAccountID: debit.ID, CreditAccountID: credit.ID,
+		MinorUnits: 200, Currency: "USD", Kind: ledger.TransferKindRegular,
+	}
+	if _, err := c.CreateTransfers(context.Background(), []ledger.Transfer{pending, posted}); err != nil {
+		t.Fatalf("CreateTransfers: %v", err)
+	}
+
+	unknown := newID(t)
+	balances, err := c.Balances(context.Background(), []string{debit.ID, credit.ID, unknown})
+	if err != nil {
+		t.Fatalf("Balances: %v", err)
+	}
+	if got, want := balances[debit.ID], (ledger.Balance{Currency: "USD", DebitsPosted: 200, DebitsPending: 500}); got != want {
+		t.Errorf("debit = %+v, want %+v", got, want)
+	}
+	if got, want := balances[credit.ID], (ledger.Balance{Currency: "USD", CreditsPosted: 200, CreditsPending: 500}); got != want {
+		t.Errorf("credit = %+v, want %+v", got, want)
+	}
+	if _, ok := balances[unknown]; ok {
+		t.Errorf("an account that was never created must be absent from the result")
+	}
+}
+
+func TestBalance_PostedNet(t *testing.T) {
+	t.Parallel()
+	if net, err := (ledger.Balance{CreditsPosted: 200, DebitsPosted: 500, CreditsPending: 900}).PostedNet(); err != nil || net != -300 {
+		t.Errorf("PostedNet = %d, %v; want -300, nil (pending excluded, negative allowed)", net, err)
+	}
+	if _, err := (ledger.Balance{CreditsPosted: 1 << 63}).PostedNet(); err == nil {
+		t.Errorf("PostedNet: want an overflow error for credits beyond int64")
 	}
 }

@@ -310,13 +310,21 @@ func (c *FakeClient) CreateTransfers(_ context.Context, transfers []Transfer) ([
 	return results, nil
 }
 
-func (c *FakeClient) AccountBalance(_ context.Context, accountID string) (int64, bool, error) {
+func (c *FakeClient) Balances(_ context.Context, accountIDs []string) (map[string]Balance, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	a, ok := c.accounts[accountID]
-	if !ok {
-		return 0, false, nil
+	balances := make(map[string]Balance, len(accountIDs))
+	for _, id := range accountIDs {
+		a, ok := c.accounts[id]
+		if !ok {
+			continue
+		}
+		balances[id] = Balance{
+			Currency:     a.currency,
+			DebitsPosted: a.debitsPosted, CreditsPosted: a.creditsPosted,
+			DebitsPending: a.debitsPending, CreditsPending: a.creditsPending,
+		}
 	}
-	return int64(a.creditsPosted) - int64(a.debitsPosted), true, nil
+	return balances, nil
 }

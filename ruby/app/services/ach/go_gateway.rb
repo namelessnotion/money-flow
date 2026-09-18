@@ -23,6 +23,17 @@ module Services
     class GoGateway
       DEFAULT_URL = 'http://localhost:8080/twirp'
 
+      # Where a Transaction stands once Go has run its saga as far as it can.
+      class Outcome < T::Struct
+        # A Transaction::V1::TransactionState enum name, e.g. :TRANSACTION_STATE_STARTED.
+        const :state, Symbol
+        # Why, when Go gave a reason; empty otherwise.
+        const :reason, String
+
+        sig { returns(T::Boolean) }
+        def started? = state == :TRANSACTION_STATE_STARTED
+      end
+
       sig do
         params(
           transaction_client: Transaction::V1::TransactionServiceClient,
@@ -73,12 +84,13 @@ module Services
       end
 
       # Runs the Transaction's saga forward from what its Transfers now say —
-      # the shadow leg after a settlement, the rollback after a return. Returns
-      # the Transaction's state, as a proto enum name, once Go has done so.
-      sig { params(transaction_id: String).returns(Symbol) }
+      # the shadow leg after a settlement, the rollback after a return — and
+      # answers where it then stands.
+      sig { params(transaction_id: String).returns(Outcome) }
       def resume(transaction_id)
         request = Transaction::V1::ResumeTransactionRequest.new(id: transaction_id)
-        retrying { T.unsafe(@transaction_client).resume_transaction(request) }.data.state
+        data = retrying { T.unsafe(@transaction_client).resume_transaction(request) }.data
+        Outcome.new(state: data.state, reason: data.reason)
       end
 
       private

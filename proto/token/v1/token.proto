@@ -6,8 +6,9 @@ import "shared/v1/money.proto";
 
 // A Token's balance-affecting activity (debit/credit intent) is recorded on
 // the Operation aggregate's event stream, not here — see operation.proto.
-// Token only owns its own lifecycle: it is minted into a Wallet with a fixed
-// capacity, backed 1:1 by a TigerBeetle account on the shared ledger.
+// Token owns its own lifecycle: it is minted into a Wallet with a fixed
+// capacity, backed 1:1 by a TigerBeetle account on the shared ledger, and
+// publishes what that account holds (TokenBalanceRecorded).
 
 message MintRequest {
   string id = 1;
@@ -19,6 +20,27 @@ message TokenMinted {
   string id = 1;
   string wallet_id = 2;
   shared.v1.Money capacity = 3;
+}
+
+// TokenBalanceRecorded is Go's published observation of the Token's
+// TigerBeetle account, appended to the Token's own stream after every ledger
+// write that touched it. The read side keeps the one with the highest stream
+// sequence: it is appended with optimistic concurrency, re-reading the
+// ledger on conflict, so the last one on the stream reflects every write
+// that came before it. An Account's balance is the sum over its Wallet's
+// Tokens.
+message TokenBalanceRecorded {
+  string id = 1;
+  string wallet_id = 2;
+  string currency = 3;
+  // Posted credits minus posted debits. Signed: a Token in a Wallet that
+  // allows both onramp and offramp can go negative.
+  int64 posted_minor_units = 4;
+  // Reserved by staged Transfers debiting this Token (TigerBeetle's
+  // debits_pending): leaving once posted, back if voided.
+  uint64 pending_outgoing_minor_units = 5;
+  // Reserved by staged Transfers crediting this Token (credits_pending).
+  uint64 pending_incoming_minor_units = 6;
 }
 
 message TokenMintRejected {

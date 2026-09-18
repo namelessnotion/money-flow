@@ -28,5 +28,17 @@ module Consumer
       value = field.get(@message)
       value.is_a?(String) && !value.empty? ? value : nil
     end
+
+    # The value of the integer field `name`: 0 when the event leaves it unset,
+    # as proto3 does. Raises for a field the event doesn't have, or that isn't
+    # an integer — a missing number can't honestly be read as zero.
+    sig { params(name: String).returns(Integer) }
+    def integer(name)
+      field = T.let(@descriptor.lookup(name), T.nilable(Google::Protobuf::FieldDescriptor))
+      value = field&.get(@message)
+      return value if value.is_a?(Integer)
+
+      raise Envelope::MalformedMessage, "#{@descriptor.name} has no integer field #{name.inspect}"
+    end
   end
 end

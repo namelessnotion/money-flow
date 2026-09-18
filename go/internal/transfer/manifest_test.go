@@ -209,3 +209,41 @@ func TestReversalManifest_RejectsUnknownTransfer(t *testing.T) {
 		t.Fatal("rejection = nil, want a rejection for an unknown transfer")
 	}
 }
+
+// countingLedger counts Balances round trips so a test can prove source
+// selection asks TigerBeetle once per Wallet, not once per Token.
+type countingLedger struct {
+	ledger.Client
+	balanceCalls int
+}
+
+func (c *countingLedger) Balances(ctx context.Context, ids []string) (map[string]ledger.Balance, error) {
+	c.balanceCalls++
+	return c.Client.Balances(ctx, ids)
+}
+
+func TestSelectSourceTokens_OneLookupForTheWholeWallet(t *testing.T) {
+	t.Parallel()
+	store := eventstore.NewMemoryStore()
+	lc := &countingLedger{Client: ledger.NewFakeClient()}
+	openWallet(t, store, testutil.ID("w1"), sharedpb.Allows_ALLOWS_ONRAMP_AND_OFFRAMP)
+	// Three spent Tokens ahead of the one that can pay: each used to cost
+	// its own round trip before selection reached money it could use.
+	for _, id := range []string{"t1", "t2", "t3"} {
+		mintToken(t, store, lc, testutil.ID("w1"), testutil.ID(id), usd(100))
+	}
+	mintToken(t, store, lc, testutil.ID("w1"), testutil.ID("t4"), usd(500))
+	fundToken(t, lc, testutil.ID("t4"), 500)
+	lc.balanceCalls = 0
+
+	legs, rejection, err := selectSourceTokens(context.Background(), store, lc, testutil.ID("w1"), usd(400), "", nil)
+	if err != nil || rejection != nil {
+		t.Fatalf("selectSourceTokens() = %v, %v; want legs", rejection, err)
+	}
+	if len(legs) != 1 || legs[0].SourceTokenID != testutil.ID("t4") {
+		t.Fatalf("legs = %+v, want one leg from t4", legs)
+	}
+	if lc.balanceCalls != 1 {
+		t.Errorf("Balances called %d times, want 1", lc.balanceCalls)
+	}
+}

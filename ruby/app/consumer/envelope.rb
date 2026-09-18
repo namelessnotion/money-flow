@@ -3,6 +3,7 @@
 
 require 'base64'
 require 'json'
+require 'time'
 require_relative 'event_body'
 
 module Consumer
@@ -24,6 +25,9 @@ module Consumer
     const :global_seq, Integer
     # The event's protobuf bytes, already base64-decoded.
     const :payload, String
+    # When Go recorded the event (events.occurred_at). Nil for messages
+    # published before the envelope carried it.
+    const :occurred_at, T.nilable(Time), default: nil
 
     STRING_FIELDS = T.let(%w[payload aggregate_type event_type].freeze, T::Array[String])
     INTEGER_FIELDS = T.let(%w[sequence global_seq].freeze, T::Array[String])
@@ -39,9 +43,17 @@ module Consumer
         event_type: fields.fetch('event_type'),
         sequence: fields.fetch('sequence'),
         global_seq: fields.fetch('global_seq'),
-        payload: decode_payload(fields.fetch('payload'))
+        **decoded_fields(fields)
       )
     end
+
+    # The fields that need decoding rather than a type check: the base64
+    # payload and the ISO-8601 event time.
+    sig { params(fields: T::Hash[String, T.untyped]).returns({ payload: String, occurred_at: T.nilable(Time) }) }
+    def self.decoded_fields(fields)
+      { payload: decode_payload(fields.fetch('payload')), occurred_at: parse_time(fields['occurred_at']) }
+    end
+    private_class_method :decoded_fields
 
     # The payload decoded as the generated class event_type names.
     sig { returns(EventBody) }
@@ -66,6 +78,18 @@ module Consumer
       fields
     end
     private_class_method :routing_fields
+
+    # Debezium publishes a timestamptz as an ISO-8601 string.
+    sig { params(value: T.untyped).returns(T.nilable(Time)) }
+    def self.parse_time(value)
+      return nil if value.nil?
+      raise MalformedMessage, "occurred_at must be an ISO-8601 string, got #{value.inspect}" unless value.is_a?(String)
+
+      Time.iso8601(value)
+    rescue ArgumentError
+      raise MalformedMessage, "occurred_at is not ISO-8601: #{value.inspect}"
+    end
+    private_class_method :parse_time
 
     sig { params(encoded: String).returns(String) }
     def self.decode_payload(encoded)

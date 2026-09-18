@@ -93,7 +93,7 @@ func TestRealClient_CreateAccountsAndTransfer(t *testing.T) {
 		t.Fatalf("got %+v, want single OK", transferResults)
 	}
 
-	balance, found, err := c.AccountBalance(ctx, credit.ID)
+	balance, found, err := ledger.AccountBalance(ctx, c, credit.ID)
 	if err != nil || !found {
 		t.Fatalf("AccountBalance(credit): found=%v err=%v", found, err)
 	}
@@ -123,8 +123,18 @@ func TestRealClient_PendingTransferLifecycle(t *testing.T) {
 		t.Fatalf("pending: got %v, want OK", results[0].Result)
 	}
 
-	if balance, found, err := c.AccountBalance(ctx, credit.ID); err != nil || !found || balance != 0 {
+	if balance, found, err := ledger.AccountBalance(ctx, c, credit.ID); err != nil || !found || balance != 0 {
 		t.Fatalf("AccountBalance(credit) after pending: balance=%d found=%v err=%v, want 0/true/nil", balance, found, err)
+	}
+	balances, err := c.Balances(ctx, []string{debit.ID, credit.ID})
+	if err != nil {
+		t.Fatalf("Balances after pending: %v", err)
+	}
+	if got, want := balances[debit.ID], (ledger.Balance{Currency: "USD", DebitsPending: 500}); got != want {
+		t.Errorf("debit after pending = %+v, want %+v", got, want)
+	}
+	if got, want := balances[credit.ID], (ledger.Balance{Currency: "USD", CreditsPending: 500}); got != want {
+		t.Errorf("credit after pending = %+v, want %+v", got, want)
 	}
 
 	post := ledger.Transfer{
@@ -137,7 +147,7 @@ func TestRealClient_PendingTransferLifecycle(t *testing.T) {
 		t.Fatalf("post: got %v, want OK", results[0].Result)
 	}
 
-	if balance, found, err := c.AccountBalance(ctx, credit.ID); err != nil || !found || balance != 500 {
+	if balance, found, err := ledger.AccountBalance(ctx, c, credit.ID); err != nil || !found || balance != 500 {
 		t.Fatalf("AccountBalance(credit) after post: balance=%d found=%v err=%v, want 500/true/nil", balance, found, err)
 	}
 }

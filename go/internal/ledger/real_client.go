@@ -241,23 +241,59 @@ func transferResultCode(status tb.CreateTransferStatus) TransferResultCode {
 	}
 }
 
-func (c *RealClient) AccountBalance(_ context.Context, accountID string) (int64, bool, error) {
-	id, err := idToUint128(accountID)
+// lookupBatchMax is how many accounts one LookupAccounts request can return:
+// TigerBeetle's 1 MiB message minus its 256-byte header, over 128 bytes per
+// Account.
+const lookupBatchMax = 8189
+
+func (c *RealClient) Balances(_ context.Context, accountIDs []string) (map[string]Balance, error) {
+	// Keyed back by the caller's own spelling of each id, not a re-rendered
+	// UUID, so lookups into the result always match what was asked for.
+	ids := make([]tb.Uint128, len(accountIDs))
+	callerID := make(map[tb.Uint128]string, len(accountIDs))
+	for i, accountID := range accountIDs {
+		id, err := idToUint128(accountID)
+		if err != nil {
+			return nil, err
+		}
+		ids[i] = id
+		callerID[id] = accountID
+	}
+
+	balances := make(map[string]Balance, len(accountIDs))
+	for start := 0; start < len(ids); start += lookupBatchMax {
+		end := min(start+lookupBatchMax, len(ids))
+		accounts, err := c.tb.LookupAccounts(ids[start:end])
+		if err != nil {
+			return nil, fmt.Errorf("ledger: LookupAccounts: %w", err)
+		}
+		for _, a := range accounts {
+			b, err := balanceOf(a)
+			if err != nil {
+				return nil, err
+			}
+			balances[callerID[a.ID]] = b
+		}
+	}
+	return balances, nil
+}
+
+func balanceOf(a tb.Account) (Balance, error) {
+	currency, err := CurrencyOf(a.Ledger)
 	if err != nil {
-		return 0, false, err
+		return Balance{}, err
 	}
-	accounts, err := c.tb.LookupAccounts([]tb.Uint128{id})
-	if err != nil {
-		return 0, false, fmt.Errorf("ledger: LookupAccounts: %w", err)
+	totals := [4]tb.Uint128{a.DebitsPosted, a.CreditsPosted, a.DebitsPending, a.CreditsPending}
+	var lo [4]uint64
+	for i, total := range totals {
+		l, hi := total.Uint64()
+		if hi != 0 {
+			return Balance{}, fmt.Errorf("ledger: account %v total overflows uint64", a.ID)
+		}
+		lo[i] = l
 	}
-	if len(accounts) == 0 {
-		return 0, false, nil
-	}
-	a := accounts[0]
-	creditsLo, creditsHi := a.CreditsPosted.Uint64()
-	debitsLo, debitsHi := a.DebitsPosted.Uint64()
-	if creditsHi != 0 || debitsHi != 0 {
-		return 0, false, fmt.Errorf("ledger: account %q balance overflows int64", accountID)
-	}
-	return int64(creditsLo) - int64(debitsLo), true, nil
+	return Balance{
+		Currency:     currency,
+		DebitsPosted: lo[0], CreditsPosted: lo[1], DebitsPending: lo[2], CreditsPending: lo[3],
+	}, nil
 }

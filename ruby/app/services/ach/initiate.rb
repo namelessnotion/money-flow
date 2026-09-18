@@ -15,8 +15,12 @@ module Services
     # 1. Records the intent — direction, amount and every id — before calling
     #    anything, so a retry or a re-run after a crash resends the same ids and
     #    converges on Go's idempotency instead of originating twice.
-    # 2. Asks Go to run the Transaction. Its real leg stops, staged.
-    # 3. Submits the entry to the provider, then confirms the staged real leg:
+    # 2. Asks Go to run the Transaction. Its real leg stops, staged — after,
+    #    for a withdrawal, the cleared cash has moved to bank control.
+    # 3. Asks Go how the Transaction stands, and goes on only if it is still
+    #    running: a withdrawal short of cleared cash is rolled back inside
+    #    step 2, and must never reach the provider (ruby/docs/adr/0004).
+    # 4. Submits the entry to the provider, then confirms the staged real leg:
     #    it now waits, pending, for the ACH network to settle or return it.
     #
     # Lifecycle state is not recorded here: it arrives through the projection.
@@ -37,11 +41,22 @@ module Services
 
         @go.start_transaction(shape.start_request(transaction_id: ach.id,
                                                   amount_minor_units: ach.amount_minor_units))
+        require_running!(ach)
         submit(ach, shape)
         ach
       end
 
       private
+
+      # Nothing has left the platform yet, so a Transaction Go did not keep
+      # running is simply refused.
+      sig { params(ach: Models::AchTransaction).void }
+      def require_running!(ach)
+        outcome = @go.resume(ach.id)
+        return if outcome.started?
+
+        raise Refused, "refused before any money moved: #{outcome.reason.empty? ? outcome.state : outcome.reason}"
+      end
 
       sig { params(request: InitiateAchRequest).returns(TransactionShape) }
       def plan(request)

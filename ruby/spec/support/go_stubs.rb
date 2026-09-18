@@ -47,6 +47,11 @@ module GoStubs
     twirp_ok(Transaction::V1::ResumeTransactionResponse.new(id: id, state: state))
   end
 
+  def rolled_back(id, reason)
+    twirp_ok(Transaction::V1::ResumeTransactionResponse.new(id: id, state: :TRANSACTION_STATE_ROLLED_BACK,
+                                                            reason: reason))
+  end
+
   # Stubs every Go RPC an ACH Transaction's life touches with its happy-path
   # answer, echoing the id each request was sent with.
   def stub_go_happy_path

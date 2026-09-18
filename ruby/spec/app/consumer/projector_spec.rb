@@ -8,8 +8,8 @@ RSpec.describe Consumer::Projector do
   let(:transaction_id) { SecureRandom.uuid_v7 }
   let(:transfer_id) { SecureRandom.uuid_v7 }
 
-  def txn_event(message, sequence)
-    envelope_for(message, aggregate_id: transaction_id, sequence: sequence)
+  def txn_event(message, sequence, occurred_at: nil)
+    envelope_for(message, aggregate_id: transaction_id, sequence: sequence, occurred_at: occurred_at)
   end
 
   def transfer_event(message, sequence, aggregate_id: transfer_id)
@@ -69,6 +69,22 @@ RSpec.describe Consumer::Projector do
 
       expect(transaction_row.state).to eq('started')
       expect(transaction_row.last_sequence).to eq(3)
+    end
+
+    it 'stamps when the state changed with Go\'s event time' do
+      completed_at = Time.utc(2026, 9, 14, 15, 0)
+      projector.apply(txn_event(initialized, 1, occurred_at: Time.utc(2026, 9, 14, 14, 0)))
+      projector.apply(txn_event(completed, 2, occurred_at: completed_at))
+      projector.apply(txn_event(step, 3, occurred_at: Time.utc(2026, 9, 15)))
+
+      # The step event after completion does not move it: the state did not change.
+      expect(transaction_row.state_changed_at).to eq(completed_at)
+    end
+
+    it 'falls back to when it was projected for an event with no source time' do
+      projector.apply(txn_event(initialized, 1))
+
+      expect(transaction_row.state_changed_at).to be_within(60).of(Time.now)
     end
 
     it 'records the reason a terminal state carries' do
@@ -137,5 +153,14 @@ RSpec.describe Consumer::Projector do
 
     expect { projector.apply(envelope) }.to raise_error(Consumer::EventStateMap::UnmappedEvent)
     expect(Models::TransferProjection[transfer_id]).to be_nil
+  end
+
+  it "hands a Token's events to the balance read model" do
+    token_id = SecureRandom.uuid_v7
+    recorded = Token::V1::TokenBalanceRecorded.new(id: token_id, wallet_id: SecureRandom.uuid_v7,
+                                                   currency: 'USD', posted_minor_units: 100)
+
+    expect(projector.apply(envelope_for(recorded, aggregate_id: token_id, sequence: 2))).to be true
+    expect(Models::TokenBalanceProjection[token_id].posted_minor_units).to eq(100)
   end
 end

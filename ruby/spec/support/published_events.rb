@@ -4,7 +4,7 @@
 # generated protobuf messages, so projector and runner specs exercise the same
 # decoding path as a message off the topic.
 module PublishedEvents
-  def envelope_for(message, aggregate_id:, sequence:, global_seq: sequence)
+  def envelope_for(message, aggregate_id:, sequence:, global_seq: sequence, occurred_at: nil)
     event_type = message.class.descriptor.name
     Consumer::Envelope.new(
       aggregate_id: aggregate_id,
@@ -12,7 +12,8 @@ module PublishedEvents
       event_type: event_type,
       sequence: sequence,
       global_seq: global_seq,
-      payload: message.class.encode(message)
+      payload: message.class.encode(message),
+      occurred_at: occurred_at
     )
   end
 

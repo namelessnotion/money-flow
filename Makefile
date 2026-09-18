@@ -1,5 +1,5 @@
 .PHONY: up down restart migrate ssl proto cdc-up cdc-down orchestrator-up orchestrator-down orchestrator-logs \
-	consumer-up consumer-down consumer-logs
+	consumer-up consumer-down consumer-logs events jobs-up jobs-down jobs-logs clear-ach-now
 
 up:
 	docker compose up -d
@@ -75,6 +75,14 @@ orchestrator-down:
 orchestrator-logs:
 	docker compose logs -f orchestrator
 
+# Prints Go's event log as it is written (go/cmd/events), e.g. to watch an ACH
+# Transaction's saga. Reads Postgres directly, so it needs neither CDC nor
+# Kafka. Runs on the host: it does not link TigerBeetle. Pass flags via ARGS:
+#   make events ARGS="-types transaction,transfer"
+#   make events ARGS="-last 50"
+events:
+	cd go && go run ./cmd/events $(ARGS)
+
 # Ruby read-model consumer (ruby/bin/consumer). Reads what cdc-up publishes
 # into the projection tables of money_flow_dev.
 consumer-up:
@@ -85,3 +93,19 @@ consumer-down:
 
 consumer-logs:
 	docker compose logs -f ruby-consumer
+
+# Resque worker + scheduler (ruby/config/resque_schedule.yml) and their Redis.
+# The scheduler enqueues the ACH clearing sweep hourly on weekdays; the worker
+# runs it. clear-ach-now enqueues one sweep immediately.
+jobs-up:
+	docker compose up -d redis resque-worker resque-scheduler
+
+jobs-down:
+	docker compose stop resque-scheduler resque-worker redis
+
+jobs-logs:
+	docker compose logs -f resque-scheduler resque-worker
+
+clear-ach-now:
+	docker compose exec resque-worker bundle exec ruby -e \
+	  'require "./lib/resque_boot"; ResqueBoot.load!; Resque.enqueue(Jobs::ClearAchDeposits); puts "enqueued"'

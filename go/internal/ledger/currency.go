@@ -24,3 +24,14 @@ func LedgerID(currency string) (uint32, error) {
 	}
 	return id, nil
 }
+
+// CurrencyOf is LedgerID's inverse: the currency code a TigerBeetle ledger id
+// stands for.
+func CurrencyOf(ledgerID uint32) (string, error) {
+	for currency, id := range ledgerIDs {
+		if id == ledgerID {
+			return currency, nil
+		}
+	}
+	return "", fmt.Errorf("ledger: unknown ledger id %d", ledgerID)
+}

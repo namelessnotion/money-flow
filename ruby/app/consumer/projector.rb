@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 # typed: strict
 
+require_relative 'balance_projector'
 require_relative 'envelope'
 require_relative 'event_state_map'
 
@@ -12,14 +13,23 @@ module Consumer
   # above the aggregate's high-water mark, so a duplicate or reordered delivery
   # can never walk the read model backwards. The mark is advanced in the same
   # row, in the same database transaction, as the state it guards.
+  #
+  # A Token's events carry no lifecycle state; they go to the BalanceProjector.
   class Projector
     Row = T.type_alias { T.any(Models::TransactionProjection, Models::TransferProjection) }
+
+    sig { params(balances: BalanceProjector).void }
+    def initialize(balances: BalanceProjector.new)
+      @balances = balances
+    end
 
     # Applies `envelope`, and returns whether it changed the read model. Raises
     # EventStateMap::UnmappedEvent, before writing anything, for an event the
     # read model has no mapping for.
     sig { params(envelope: Envelope).returns(T::Boolean) }
     def apply(envelope)
+      return @balances.apply(envelope) if envelope.aggregate_type == 'token'
+
       state = EventStateMap.transition(aggregate_type: envelope.aggregate_type, event_type: envelope.event_type)
 
       DB.transaction do
@@ -67,17 +77,21 @@ module Consumer
 
     sig { params(row: Row, envelope: Envelope, state: T.nilable(T::Enum)).void }
     def record(row, envelope, state)
-      describe(row, envelope.body, state)
+      describe(row, envelope, state)
       row.last_sequence = envelope.sequence
       row.last_global_seq = envelope.global_seq
       row.updated_at = Time.now
       row.save
     end
 
-    sig { params(row: Row, body: EventBody, state: T.nilable(T::Enum)).void }
-    def describe(row, body, state)
+    sig { params(row: Row, envelope: Envelope, state: T.nilable(T::Enum)).void }
+    def describe(row, envelope, state)
+      body = envelope.body
       unless state.nil?
         row.state = state.serialize
+        # Go's clock when the envelope carries it; otherwise the best we have
+        # is now, which lags by however far behind the consumer is.
+        row.state_changed_at = envelope.occurred_at || Time.now
         # The reason explains the state it arrived with, so it is replaced
         # (or cleared) on every transition and kept across step events.
         row.reason = body.string('reason')

@@ -8,7 +8,7 @@ require_relative 'source'
 require_relative 'topic_waiter'
 
 module Consumer
-  # Reads transfer-events and transaction-events through librdkafka, as the
+  # Reads transfer-events, transaction-events and token-events through librdkafka, as the
   # consumer group money-flow-ruby-projection — its own group, so its offsets
   # are independent of the Go orchestrator's money-flow-saga-* groups.
   #
@@ -20,7 +20,8 @@ module Consumer
 
     TRANSFER_TOPIC = 'transfer-events'
     TRANSACTION_TOPIC = 'transaction-events'
-    TOPICS = T.let([TRANSFER_TOPIC, TRANSACTION_TOPIC].freeze, T::Array[String])
+    TOKEN_TOPIC = 'token-events'
+    TOPICS = T.let([TRANSFER_TOPIC, TRANSACTION_TOPIC, TOKEN_TOPIC].freeze, T::Array[String])
     GROUP_ID = 'money-flow-ruby-projection'
     POLL_TIMEOUT_MS = 1_000
     METADATA_TIMEOUT_MS = 5_000
@@ -52,7 +53,7 @@ module Consumer
     sig { void }
     def start
       TopicWaiter.new(list_topics: -> { topic_names }, logger: @logger).wait_for(TOPICS)
-      @consumer.subscribe(TRANSFER_TOPIC, TRANSACTION_TOPIC)
+      @consumer.subscribe(TRANSFER_TOPIC, TRANSACTION_TOPIC, TOKEN_TOPIC)
       @logger.info("subscribed to #{TOPICS.join(', ')} as #{GROUP_ID}")
     end
 

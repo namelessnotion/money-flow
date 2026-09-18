@@ -4,5 +4,4 @@
 
 # typed: false
 
-module ::GRPC::GenericService; end
-module Google::Protobuf::FileDescriptorProto; end
+module ::ConnectionPool::ForkTracker; end

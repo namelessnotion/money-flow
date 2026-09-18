@@ -5,14 +5,47 @@ import (
 	"testing"
 
 	sharedpb "github.com/namelessnotion/money_flow/go/gen/proto/shared/v1"
+	tokenpb "github.com/namelessnotion/money_flow/go/gen/proto/token/v1"
 	pb "github.com/namelessnotion/money_flow/go/gen/proto/transfer/v1"
 	"github.com/namelessnotion/money_flow/go/internal/eventstore"
 	"github.com/namelessnotion/money_flow/go/internal/ledger"
 	"github.com/namelessnotion/money_flow/go/internal/testutil"
+	"github.com/namelessnotion/money_flow/go/internal/token"
 )
 
 func transferRequest(id, fromWallet, toWallet string, amount *sharedpb.Money, stage bool) *pb.RequestTransferRequest {
 	return &pb.RequestTransferRequest{Id: id, FromWalletId: fromWallet, ToWalletId: toWallet, Amount: amount, Stage: stage}
+}
+
+// lastBalanceRecorded returns the newest TokenBalanceRecorded on tokenID's
+// stream — what the read side shows for it — or nil if none.
+func lastBalanceRecorded(t *testing.T, store eventstore.Store, tokenID string) *tokenpb.TokenBalanceRecorded {
+	t.Helper()
+	events, err := store.Load(context.Background(), token.AggregateType, tokenID)
+	if err != nil {
+		t.Fatalf("Load(token) error = %v", err)
+	}
+	var last *tokenpb.TokenBalanceRecorded
+	for _, e := range events {
+		msg, err := e.Decode()
+		if err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		if r, ok := msg.(*tokenpb.TokenBalanceRecorded); ok {
+			last = r
+		}
+	}
+	return last
+}
+
+// assertBalanceRecorded checks the balance the read side would show for
+// tokenID.
+func assertBalanceRecorded(t *testing.T, store eventstore.Store, tokenID string, posted int64, outgoing, incoming uint64) {
+	t.Helper()
+	got := lastBalanceRecorded(t, store, tokenID)
+	if got.GetPostedMinorUnits() != posted || got.GetPendingOutgoingMinorUnits() != outgoing || got.GetPendingIncomingMinorUnits() != incoming {
+		t.Errorf("token %s recorded %v, want posted=%d outgoing=%d incoming=%d", tokenID, got, posted, outgoing, incoming)
+	}
 }
 
 func TestRequestTransfer_OneToOne(t *testing.T) {
@@ -51,12 +84,14 @@ func TestRequestTransfer_OneToOne(t *testing.T) {
 	}
 	destTokenID := committed.GetDestinations()[0].GetToTokenId()
 
-	if balance, _, _ := lc.AccountBalance(ctx, destTokenID); balance != 400 {
+	if balance, _, _ := ledger.AccountBalance(ctx, lc, destTokenID); balance != 400 {
 		t.Errorf("dest balance = %d, want 400", balance)
 	}
-	if balance, _, _ := lc.AccountBalance(ctx, testutil.ID("t1")); balance != 600 {
+	if balance, _, _ := ledger.AccountBalance(ctx, lc, testutil.ID("t1")); balance != 600 {
 		t.Errorf("source balance = %d, want 600 (1000 - 400)", balance)
 	}
+	assertBalanceRecorded(t, store, destTokenID, 400, 0, 0)
+	assertBalanceRecorded(t, store, testutil.ID("t1"), 600, 0, 0)
 }
 
 func TestRequestTransfer_ManyToOneFIFO(t *testing.T) {
@@ -101,10 +136,10 @@ func TestRequestTransfer_ManyToOneFIFO(t *testing.T) {
 		t.Errorf("legs[1] = %+v, want t2 for the remainder (100)", legs[1])
 	}
 
-	if balance, _, _ := lc.AccountBalance(ctx, testutil.ID("t1")); balance != 0 {
+	if balance, _, _ := ledger.AccountBalance(ctx, lc, testutil.ID("t1")); balance != 0 {
 		t.Errorf("t1 balance = %d, want 0 (fully drained)", balance)
 	}
-	if balance, _, _ := lc.AccountBalance(ctx, testutil.ID("t2")); balance != 200 {
+	if balance, _, _ := ledger.AccountBalance(ctx, lc, testutil.ID("t2")); balance != 200 {
 		t.Errorf("t2 balance = %d, want 200 (300 - 100)", balance)
 	}
 }
@@ -162,7 +197,7 @@ func TestRequestTransfer_IsIdempotent(t *testing.T) {
 		t.Fatalf("second RequestTransfer() error = %v", err)
 	}
 
-	if balance, _, _ := lc.AccountBalance(ctx, testutil.ID("t1")); balance != 600 {
+	if balance, _, _ := ledger.AccountBalance(ctx, lc, testutil.ID("t1")); balance != 600 {
 		t.Errorf("source balance = %d, want 600 (no double-debit on replay)", balance)
 	}
 }
@@ -198,9 +233,11 @@ func TestStagedTransfer_HappyPath(t *testing.T) {
 		t.Fatalf("preparedLegs() error = %v", err)
 	}
 	destTokenID := legs[0].GetDestTokenId()
-	if balance, _, _ := lc.AccountBalance(ctx, destTokenID); balance != 0 {
+	if balance, _, _ := ledger.AccountBalance(ctx, lc, destTokenID); balance != 0 {
 		t.Errorf("dest posted balance = %d, want 0 (still only reserved, not posted)", balance)
 	}
+	assertBalanceRecorded(t, store, destTokenID, 0, 0, 400)
+	assertBalanceRecorded(t, store, testutil.ID("t1"), 1000, 400, 0)
 
 	confirmResp, err := server.ConfirmStagedTransfer(ctx, &pb.ConfirmStagedTransferRequest{Id: testutil.ID("xfer1")})
 	if err != nil {
@@ -216,7 +253,7 @@ func TestStagedTransfer_HappyPath(t *testing.T) {
 	if currentState(events) != statePending {
 		t.Fatalf("state = %v, want pending", currentState(events))
 	}
-	if balance, _, _ := lc.AccountBalance(ctx, destTokenID); balance != 0 {
+	if balance, _, _ := ledger.AccountBalance(ctx, lc, destTokenID); balance != 0 {
 		t.Errorf("dest posted balance after confirm = %d, want still 0 (no tigerbeetle call happens here)", balance)
 	}
 
@@ -227,12 +264,14 @@ func TestStagedTransfer_HappyPath(t *testing.T) {
 	if postResp.GetTransferCommitted() == nil {
 		t.Fatalf("result = %v, want TransferCommitted", postResp.GetResult())
 	}
-	if balance, _, _ := lc.AccountBalance(ctx, destTokenID); balance != 400 {
+	if balance, _, _ := ledger.AccountBalance(ctx, lc, destTokenID); balance != 400 {
 		t.Errorf("dest posted balance after post = %d, want 400", balance)
 	}
-	if balance, _, _ := lc.AccountBalance(ctx, testutil.ID("t1")); balance != 600 {
+	if balance, _, _ := ledger.AccountBalance(ctx, lc, testutil.ID("t1")); balance != 600 {
 		t.Errorf("source balance = %d, want 600", balance)
 	}
+	assertBalanceRecorded(t, store, destTokenID, 400, 0, 0)
+	assertBalanceRecorded(t, store, testutil.ID("t1"), 600, 0, 0)
 }
 
 func TestCancelStagedTransfer_FromStaged(t *testing.T) {
@@ -265,9 +304,10 @@ func TestCancelStagedTransfer_FromStaged(t *testing.T) {
 	if currentState(events) != stateCancelled {
 		t.Fatalf("state = %v, want cancelled", currentState(events))
 	}
-	if balance, _, _ := lc.AccountBalance(ctx, testutil.ID("t1")); balance != 1000 {
+	if balance, _, _ := ledger.AccountBalance(ctx, lc, testutil.ID("t1")); balance != 1000 {
 		t.Errorf("source balance = %d, want 1000 (reservation released, nothing ever posted)", balance)
 	}
+	assertBalanceRecorded(t, store, testutil.ID("t1"), 1000, 0, 0)
 
 	// Idempotent retry converges.
 	if _, err := server.CancelStagedTransfer(ctx, &pb.CancelStagedTransferRequest{Id: testutil.ID("xfer1"), Reason: "again"}); err != nil {
@@ -300,7 +340,7 @@ func TestCancelStagedTransfer_FromPending(t *testing.T) {
 	if resp.GetTransferCancelled() == nil {
 		t.Fatalf("result = %v, want TransferCancelled", resp.GetResult())
 	}
-	if balance, _, _ := lc.AccountBalance(ctx, testutil.ID("t1")); balance != 1000 {
+	if balance, _, _ := ledger.AccountBalance(ctx, lc, testutil.ID("t1")); balance != 1000 {
 		t.Errorf("source balance = %d, want 1000 (reservation released)", balance)
 	}
 }
@@ -354,10 +394,10 @@ func TestRequestReversal_OfCommittedTransfer(t *testing.T) {
 		t.Fatalf("reversal legs = %+v, want one leg from %s back to t1", revLegs, destTokenID)
 	}
 
-	if balance, _, _ := lc.AccountBalance(ctx, destTokenID); balance != 0 {
+	if balance, _, _ := ledger.AccountBalance(ctx, lc, destTokenID); balance != 0 {
 		t.Errorf("original destination balance after reversal = %d, want 0", balance)
 	}
-	if balance, _, _ := lc.AccountBalance(ctx, testutil.ID("t1")); balance != 1000 {
+	if balance, _, _ := ledger.AccountBalance(ctx, lc, testutil.ID("t1")); balance != 1000 {
 		t.Errorf("original source balance after reversal = %d, want 1000 (fully restored)", balance)
 	}
 }
@@ -395,10 +435,10 @@ func TestReversal_OfManyToOneProducesOneToMany(t *testing.T) {
 		t.Fatalf("reversal legs = %+v, want 2 (one-to-many, mirroring the original many-to-one)", revLegs)
 	}
 
-	if balance, _, _ := lc.AccountBalance(ctx, testutil.ID("t1")); balance != 300 {
+	if balance, _, _ := ledger.AccountBalance(ctx, lc, testutil.ID("t1")); balance != 300 {
 		t.Errorf("t1 balance = %d, want 300 (fully restored)", balance)
 	}
-	if balance, _, _ := lc.AccountBalance(ctx, testutil.ID("t2")); balance != 300 {
+	if balance, _, _ := ledger.AccountBalance(ctx, lc, testutil.ID("t2")); balance != 300 {
 		t.Errorf("t2 balance = %d, want 300 (fully restored)", balance)
 	}
 }

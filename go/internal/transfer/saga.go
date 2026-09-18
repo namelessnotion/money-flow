@@ -295,7 +295,8 @@ func (s *Server) loadLegs(ctx context.Context, transferID string) ([]*pb.Transfe
 }
 
 // submitBatch submits batch to TigerBeetle and checks every result, calling
-// onReject for the first leg that isn't OK or Exists — stage, commit, and
+// onReject for the first leg that isn't OK or Exists, then records the new
+// balance of every Token the batch touched (token.RecordBalances) — stage, commit, and
 // cancelStaged all submit a batch this same way and only differ in what
 // "rejected" means for them (stage/commit route it to compensate() as an
 // internal-invariant Failed; cancelStaged treats it as a plain internal
@@ -313,7 +314,14 @@ func (s *Server) submitBatch(
 			return onReject(i, r.Result)
 		}
 	}
-	return nil
+	// Publish every touched Token's new balance before the saga step's own
+	// event: if this fails, the step is retried, TigerBeetle answers Exists,
+	// and the recording runs again — at-least-once without a gap.
+	touched := make([]string, 0, 2*len(batch))
+	for _, t := range batch {
+		touched = append(touched, t.DebitAccountID, t.CreditAccountID)
+	}
+	return token.RecordBalances(ctx, s.store, s.ledger, touched)
 }
 
 // appendSagaStep appends event as the next fact on transferID's own stream,

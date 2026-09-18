@@ -2,6 +2,8 @@
 # typed: strict
 
 require_relative 'base_object'
+require_relative 'account_balance'
+require_relative '../../sources/account_balances'
 
 module Types
   # GraphQL type for the Account model
@@ -12,6 +14,10 @@ module Types
     field :type, String, null: false
     field :created_at, GraphQL::Types::ISO8601DateTime, null: false
     field :updated_at, GraphQL::Types::ISO8601DateTime, null: false
+    field :balances, [Types::AccountBalance],
+          null: false,
+          description: "What the Account holds, one entry per currency; empty until the Account's first ledger " \
+                       'activity has been consumed.'
 
     # DB column backing each scalar field, keyed by the field's Ruby name.
     COLUMNS_BY_FIELD = T.let({
@@ -30,10 +36,17 @@ module Types
       # identity and Sequel needs it to match rows back to their entity.
       sig { params(lookahead: GraphQL::Execution::Lookahead).returns(T::Array[Symbol]) }
       def selected_columns(lookahead)
-        COLUMNS_BY_FIELD.each_with_object([:id]) do |(field, column), columns|
-          columns << column if column != :id && lookahead.selects?(field)
+        columns = COLUMNS_BY_FIELD.each_with_object([:id]) do |(field, column), selected|
+          selected << column if column != :id && lookahead.selects?(field)
         end
+        # Balances are looked up by the Account's Wallet.
+        lookahead.selects?(:balances) ? columns | [:wallet_uuid] : columns
       end
+    end
+
+    sig { returns(T::Array[Models::AccountBalance]) }
+    def balances
+      dataloader.with(Sources::AccountBalances).load(object.wallet_uuid)
     end
   end
 end

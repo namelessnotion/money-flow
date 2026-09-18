@@ -6,6 +6,7 @@ require_relative '../mutations/onboard_entity'
 require_relative '../mutations/initiate_ach'
 require_relative '../mutations/settle_ach'
 require_relative '../mutations/return_ach'
+require_relative '../mutations/clear_ach'
 
 module Types
   # Root Mutation type
@@ -15,5 +16,6 @@ module Types
     field :initiate_ach_withdrawal, mutation: Mutations::InitiateAchWithdrawal
     field :settle_ach, mutation: Mutations::SettleAch
     field :return_ach, mutation: Mutations::ReturnAch
+    field :clear_ach, mutation: Mutations::ClearAch
   end
 end

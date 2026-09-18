@@ -14,5 +14,11 @@ module Services
     class NotFound < StandardError; end
 
     class InvalidAmount < StandardError; end
+
+    # Only a deposit mints uncleared cash; there is nothing else to clear.
+    class NotClearable < StandardError; end
+
+    # The entity lacks an account an ACH shape moves money through.
+    class MissingAccount < StandardError; end
   end
 end

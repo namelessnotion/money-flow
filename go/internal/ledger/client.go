@@ -5,7 +5,11 @@
 // valid UUIDs.
 package ledger
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"math"
+)
 
 // AccountFlags mirrors the subset of TigerBeetle account flags this domain
 // needs. Linked chains this account's creation to the next one in the same
@@ -138,7 +142,7 @@ type TransferResult struct {
 }
 
 // Client is TigerBeetle's boundary: the two batch-submission calls every
-// mint and every Transfer saga step goes through, plus a balance read.
+// mint and every Transfer saga step goes through, plus a batched balance read.
 // Implementations must be safe for concurrent use.
 type Client interface {
 	// CreateAccounts submits a batch of account-creation requests. Entries
@@ -151,10 +155,48 @@ type Client interface {
 	// are chained the same way as CreateAccounts.
 	CreateTransfers(ctx context.Context, transfers []Transfer) ([]TransferResult, error)
 
-	// AccountBalance returns the given account's net balance — posted
-	// credits minus posted debits, not including any pending reservation —
-	// or found=false if no such account exists. Signed because an account
-	// with neither flag set (free to move in either direction) can go
-	// negative.
-	AccountBalance(ctx context.Context, accountID string) (minorUnits int64, found bool, err error)
+	// Balances looks up every given account in one round trip (chunked
+	// internally at TigerBeetle's per-request limit) and returns each one's
+	// posted and pending totals, keyed by account id. An account that
+	// doesn't exist is simply absent from the map.
+	Balances(ctx context.Context, accountIDs []string) (map[string]Balance, error)
+}
+
+// Balance is one account's four running totals as TigerBeetle keeps them.
+// Pending amounts are reservations made by TransferKindPending that a later
+// PostPending moves into the posted totals or a VoidPending releases.
+type Balance struct {
+	Currency       string
+	DebitsPosted   uint64
+	CreditsPosted  uint64
+	DebitsPending  uint64
+	CreditsPending uint64
+}
+
+// PostedNet is posted credits minus posted debits, excluding any pending
+// reservation. Signed because an account with neither flag set (free to
+// move in either direction) can go negative.
+func (b Balance) PostedNet() (int64, error) {
+	if b.CreditsPosted > math.MaxInt64 || b.DebitsPosted > math.MaxInt64 {
+		return 0, fmt.Errorf("ledger: posted totals %d/%d overflow int64", b.CreditsPosted, b.DebitsPosted)
+	}
+	return int64(b.CreditsPosted) - int64(b.DebitsPosted), nil
+}
+
+// AccountBalance returns one account's PostedNet, or found=false if no such
+// account exists.
+func AccountBalance(ctx context.Context, c Client, accountID string) (minorUnits int64, found bool, err error) {
+	balances, err := c.Balances(ctx, []string{accountID})
+	if err != nil {
+		return 0, false, err
+	}
+	b, ok := balances[accountID]
+	if !ok {
+		return 0, false, nil
+	}
+	net, err := b.PostedNet()
+	if err != nil {
+		return 0, false, fmt.Errorf("ledger: account %q: %w", accountID, err)
+	}
+	return net, true, nil
 }

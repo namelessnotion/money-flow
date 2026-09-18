@@ -1,5 +1,22 @@
 # frozen_string_literal: true
 
+# `resque` first, so the redis gem loads whole before resque-scheduler's own
+# `require 'redis/errors'` runs: loaded ahead of redis-client, errors.rb skips
+# defining Redis::NoScriptError, and redis/client.rb then fails on it
+# (resque-scheduler 5.0 with redis 6.0).
+require 'resque'
+require 'resque/tasks'
+require 'resque/scheduler/tasks'
+
+namespace :resque do
+  # Runs before `rake resque:work` and `rake resque:scheduler`: loads the app,
+  # connects to Redis and installs the recurring schedule. See lib/resque_boot.rb.
+  task :setup do
+    require_relative 'lib/resque_boot'
+    ResqueBoot.load!
+  end
+end
+
 namespace :graphql do
   namespace :schema do
     desc 'Dump the GraphQL schema definition to app/graphql/schemas/money_flow_schema.graphql'

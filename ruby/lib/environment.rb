@@ -15,7 +15,7 @@ module Environment
 
   # Ordering is cosmetic — every file require_relatives its own dependencies — but
   # keeping models ahead of their consumers matches how the app is layered.
-  LAYERS = %w[types models services consumer graphql].freeze
+  LAYERS = %w[types models services consumer jobs graphql].freeze
 
   def self.load_app!
     LAYERS.each do |layer|

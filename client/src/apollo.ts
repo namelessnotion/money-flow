@@ -13,6 +13,8 @@ export const apolloClient = new ApolloClient({
           // filter args, so successive pages merge into one cached list
           // keyed only on the field name (`keyArgs: false`).
           entities: relayStylePagination(),
+          // One list per entity; pages of the same entity merge.
+          achTransactions: relayStylePagination(['entityId']),
         },
       },
     },

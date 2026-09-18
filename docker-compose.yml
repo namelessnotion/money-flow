@@ -61,8 +61,8 @@ services:
       - ./ruby:/app
 
   # Ruby's read-model consumer (ruby/bin/consumer, ruby/docs/adr/0001 and
-  # 0002): folds transfer-events and transaction-events into the projection
-  # tables in money_flow_dev. Same image as `ruby`, different command.
+  # 0002, 0005): folds transfer-events, transaction-events and token-events into
+  # the projection tables in money_flow_dev. Same image as `ruby`, different command.
   #
   # Under the `cdc` profile, so `docker compose up -d` does not start it: it
   # only sees anything once docker/cdc/setup.sh has registered the connector.
@@ -120,6 +120,64 @@ services:
       - "8080:8080"
     volumes:
       - ./go:/app
+
+  # Redis for Resque (ruby/lib/resque_boot.rb). In-network only — no host
+  # port, so it cannot clash with another local Redis on :6379 — and no
+  # volume: nothing durable lives here. The ACH clearing schedule is a
+  # recurring sweep, so losing Redis loses no clearing; the next run finds it.
+  redis:
+    profiles: ["cdc"]
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Resque worker for the `ach` queue: runs Jobs::ClearAchDeposits, which
+  # originates clearing Transactions in Go. Same image as `ruby`. Under the
+  # `cdc` profile because it clears from the read model the consumer builds.
+  resque-worker:
+    profiles: ["cdc"]
+    build:
+      context: .
+      dockerfile: docker/ruby/Dockerfile
+    environment:
+      DATABASE_URL: postgres://money_flow:money_flow@postgres:5432/money_flow_dev?sslmode=disable
+      DB_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+      QUEUE: ach
+      TRANSACTION_SERVICE_URL: http://go:8080/twirp
+      TRANSFER_SERVICE_URL: http://go:8080/twirp
+    command: ["bundle", "exec", "rake", "resque:work"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./ruby:/app
+
+  # resque-scheduler: enqueues the recurring jobs in
+  # ruby/config/resque_schedule.yml (the ACH clearing sweep, hourly on
+  # weekdays, Eastern time) for resque-worker to run.
+  resque-scheduler:
+    profiles: ["cdc"]
+    build:
+      context: .
+      dockerfile: docker/ruby/Dockerfile
+    environment:
+      DATABASE_URL: postgres://money_flow:money_flow@postgres:5432/money_flow_dev?sslmode=disable
+      DB_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+    command: ["bundle", "exec", "rake", "resque:scheduler"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./ruby:/app
 
   # --- CDC: Postgres -> Kafka (docs/adr/0001, docs/cdc-tracer-bullet.md) -----
   # Kafka and Kafka Connect carry the Postgres -> Kafka publication path from

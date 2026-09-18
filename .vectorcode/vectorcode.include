@@ -5,3 +5,6 @@ docs/**/*
 client/src/**/*
 /client/README.md
 /README.md
+docker/**/*
+/docker-compose.yml
+/Makefile

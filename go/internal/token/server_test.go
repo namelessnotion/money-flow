@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 
+	"google.golang.org/protobuf/proto"
+
 	sharedpb "github.com/namelessnotion/money_flow/go/gen/proto/shared/v1"
 	pb "github.com/namelessnotion/money_flow/go/gen/proto/token/v1"
 	walletpb "github.com/namelessnotion/money_flow/go/gen/proto/wallet/v1"
@@ -50,7 +52,7 @@ func TestMint_Succeeds(t *testing.T) {
 	}
 
 	// TigerBeetle account actually exists.
-	if _, found, err := lc.AccountBalance(context.Background(), testutil.ID("t1")); err != nil || !found {
+	if _, found, err := ledger.AccountBalance(context.Background(), lc, testutil.ID("t1")); err != nil || !found {
 		t.Errorf("AccountBalance: found=%v err=%v, want a TigerBeetle account to exist", found, err)
 	}
 
@@ -176,13 +178,24 @@ func TestMint_RetriesOnWalletStreamRace(t *testing.T) {
 	}
 }
 
-// conflictOnceStore forces the first AppendAtomic to lose an optimistic-
+// conflictOnceStore forces the first append to lose an optimistic-
 // concurrency race, running onConflict first so the winning event is
-// already in the log — mirrors holder's test double of the same name.
+// already in the log — mirrors holder's test double of the same name. Both
+// append methods are overridden: Mint goes through AppendAtomic and
+// RecordBalances through Append.
 type conflictOnceStore struct {
 	eventstore.Store
 	onConflict func()
 	conflicted bool
+}
+
+func (s *conflictOnceStore) Append(ctx context.Context, aggregateType, aggregateID string, expectedSeq int64, events ...proto.Message) error {
+	return s.AppendAtomic(ctx, eventstore.StreamWrite{
+		AggregateType: aggregateType,
+		AggregateID:   aggregateID,
+		ExpectedSeq:   expectedSeq,
+		Events:        events,
+	})
 }
 
 func (s *conflictOnceStore) AppendAtomic(ctx context.Context, writes ...eventstore.StreamWrite) error {

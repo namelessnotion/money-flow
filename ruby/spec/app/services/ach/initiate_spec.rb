@@ -51,6 +51,45 @@ RSpec.describe Services::Ach::Initiate do
     end
   end
 
+  context 'when Go rolls the Transaction back before submission' do
+    # A withdrawal moves cleared cash first; without enough, that leg is
+    # refused and Go rolls the Transaction back inside the start call.
+    let(:request) do
+      InitiateAchRequest.new(entity_id: entity.id, direction: Types::Enums::AchDirection::Withdrawal,
+                             amount_minor_units: 10_000)
+    end
+
+    before do
+      allow(provider).to receive(:submit).and_call_original
+      stub_go_happy_path
+      allow(transaction_client).to receive(:resume_transaction) do |req|
+        rolled_back(req.id, 'wallet "w" has insufficient Token capacity: 10000 USD short')
+      end
+    end
+
+    it 'raises the reason without submitting the entry, so no money leaves' do
+      expect { service.call(request: request) }
+        .to raise_error(Services::Ach::Refused, /before any money moved.*insufficient Token capacity/)
+
+      expect(provider).not_to have_received(:submit)
+      expect(transfer_client).not_to have_received(:confirm_staged_transfer)
+    end
+
+    it 'keeps the intent, whose projection will show it rolled back' do
+      expect { service.call(request: request) }.to raise_error(Services::Ach::Refused)
+
+      expect(Models::AchTransaction.where(entity_id: entity.id).count).to eq(1)
+    end
+  end
+
+  it 'asks Go how the Transaction stands before submitting the entry' do
+    stub_go_happy_path
+
+    ach = service.call(request: request)
+
+    expect(transaction_client).to have_received(:resume_transaction) { |req| expect(req.id).to eq(ach.id) }
+  end
+
   context 'when Go rejects the Transaction' do
     before do
       stub_go_happy_path
@@ -98,7 +137,8 @@ RSpec.describe Services::Ach::Initiate do
     it 'resumes the Transaction so Go rolls it back' do
       expect { service.call(request: request) }.to raise_error(Services::Ach::Refused)
 
-      expect(transaction_client).to have_received(:resume_transaction)
+      # Once to check it is running before submission, once after cancelling.
+      expect(transaction_client).to have_received(:resume_transaction).twice
     end
 
     it 'cancels the staged real leg instead of confirming it' do

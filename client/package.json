@@ -16,7 +16,8 @@
     "graphql": "^16.14.2",
     "rxjs": "^7.8.1",
     "tailwindcss": "^4.3.3",
-    "vue": "^3.5.41"
+    "vue": "^3.5.41",
+    "vue-router": "^4.6.4"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",

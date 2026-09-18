@@ -112,6 +112,7 @@ under the `cdc` compose profile:
 make cdc-up            # register the Debezium connector: money_flow_dev -> Kafka
 make orchestrator-up   # Go saga orchestrator (optional for the flow below)
 make consumer-up       # Ruby read-model consumer
+make jobs-up           # Redis + Resque worker + resque-scheduler (ACH clearing)
 ```
 
 | Piece             | What it does                                                                 | Logs                     |
@@ -119,6 +120,7 @@ make consumer-up       # Ruby read-model consumer
 | connector         | Publishes `money_flow_dev`'s `events` table to `<aggregate>-events` topics   | —                        |
 | `orchestrator`    | Resumes Transfer and Transaction sagas from `transfer-events` / `transaction-events` | `make orchestrator-logs` |
 | `ruby-consumer`   | Projects the same topics into `transaction_projections` / `transfer_projections` | `make consumer-logs`     |
+| `resque-scheduler` / `resque-worker` | Hourly on weekdays, clears ACH deposits 3 Fed business days after they complete (uncleared → cleared cash) | `make jobs-logs` |
 
 Publication starts at the current end of the log; events written before
 `make cdc-up` are never published. Both consumers **halt** (exit non-zero,
@@ -129,7 +131,7 @@ Tear down in this order, **before** `make down`. The connector's replication
 slot lives in the Postgres volume and pins WAL until it is dropped:
 
 ```bash
-make consumer-down orchestrator-down
+make jobs-down consumer-down orchestrator-down
 make cdc-down
 ```
 
@@ -200,15 +202,21 @@ gql 'mutation($ach: ID!) {
 sleep 3 && achs
 ```
 
-`make consumer-logs` shows each event as it is projected. Withdrawals
-(`initiateAchWithdrawal`) take the same steps, but for now they roll back after
-settlement on an entity funded only by deposits. See the known gap in
-[docs/ach-transactions.md](docs/ach-transactions.md).
+`make consumer-logs` shows each event as it is projected.
+
+**5. Clearing.** A settled deposit's money stays in uncleared cash until the
+start of its third Federal Reserve business day; `achs` shows that date as
+`clearingDueOn`. With `make jobs-up` running, the scheduled sweep then clears
+it and `clearingState` becomes `COMPLETED`. To see it without waiting, run the
+sweep with a later clock — see [docs/ach-transactions.md](docs/ach-transactions.md#clearing).
+
+Withdrawals (`initiateAchWithdrawal`) take the same steps and draw on cleared
+cash, so they complete once a deposit has cleared, and roll back before then.
 
 When you are done, tear the pipeline down before the stack:
 
 ```bash
-make consumer-down orchestrator-down
+make jobs-down consumer-down orchestrator-down
 make cdc-down
 make down
 ```

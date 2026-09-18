@@ -7,7 +7,7 @@ require 'google/protobuf'
 require 'shared/v1/money_pb'
 
 
-descriptor_data = "\n\x14token/v1/token.proto\x12\x08token.v1\x1a\x15shared/v1/money.proto\"P\n\x0bMintRequest\x12\n\n\x02id\x18\x01 \x01(\t\x12\x11\n\twallet_id\x18\x02 \x01(\t\x12\"\n\x08\x63\x61pacity\x18\x03 \x01(\x0b\x32\x10.shared.v1.Money\"P\n\x0bTokenMinted\x12\n\n\x02id\x18\x01 \x01(\t\x12\x11\n\twallet_id\x18\x02 \x01(\t\x12\"\n\x08\x63\x61pacity\x18\x03 \x01(\x0b\x32\x10.shared.v1.Money\"B\n\x11TokenMintRejected\x12\n\n\x02id\x18\x01 \x01(\t\x12\x11\n\twallet_id\x18\x02 \x01(\t\x12\x0e\n\x06reason\x18\x03 \x01(\t\"\x8f\x01\n\x0cMintResponse\x12\n\n\x02id\x18\x01 \x01(\t\x12-\n\x0ctoken_minted\x18\x02 \x01(\x0b\x32\x15.token.v1.TokenMintedH\x00\x12:\n\x13token_mint_rejected\x18\x03 \x01(\x0b\x32\x1b.token.v1.TokenMintRejectedH\x00\x42\x08\n\x06result2G\n\x0cTokenService\x12\x37\n\x04Mint\x12\x15.token.v1.MintRequest\x1a\x16.token.v1.MintResponse\"\x00\x42<Z:github.com/namelessnotion/money_flow/go/gen/proto/token/v1b\x06proto3"
+descriptor_data = "\n\x14token/v1/token.proto\x12\x08token.v1\x1a\x15shared/v1/money.proto\"P\n\x0bMintRequest\x12\n\n\x02id\x18\x01 \x01(\t\x12\x11\n\twallet_id\x18\x02 \x01(\t\x12\"\n\x08\x63\x61pacity\x18\x03 \x01(\x0b\x32\x10.shared.v1.Money\"P\n\x0bTokenMinted\x12\n\n\x02id\x18\x01 \x01(\t\x12\x11\n\twallet_id\x18\x02 \x01(\t\x12\"\n\x08\x63\x61pacity\x18\x03 \x01(\x0b\x32\x10.shared.v1.Money\"\xaf\x01\n\x14TokenBalanceRecorded\x12\n\n\x02id\x18\x01 \x01(\t\x12\x11\n\twallet_id\x18\x02 \x01(\t\x12\x10\n\x08\x63urrency\x18\x03 \x01(\t\x12\x1a\n\x12posted_minor_units\x18\x04 \x01(\x03\x12$\n\x1cpending_outgoing_minor_units\x18\x05 \x01(\x04\x12$\n\x1cpending_incoming_minor_units\x18\x06 \x01(\x04\"B\n\x11TokenMintRejected\x12\n\n\x02id\x18\x01 \x01(\t\x12\x11\n\twallet_id\x18\x02 \x01(\t\x12\x0e\n\x06reason\x18\x03 \x01(\t\"\x8f\x01\n\x0cMintResponse\x12\n\n\x02id\x18\x01 \x01(\t\x12-\n\x0ctoken_minted\x18\x02 \x01(\x0b\x32\x15.token.v1.TokenMintedH\x00\x12:\n\x13token_mint_rejected\x18\x03 \x01(\x0b\x32\x1b.token.v1.TokenMintRejectedH\x00\x42\x08\n\x06result2G\n\x0cTokenService\x12\x37\n\x04Mint\x12\x15.token.v1.MintRequest\x1a\x16.token.v1.MintResponse\"\x00\x42<Z:github.com/namelessnotion/money_flow/go/gen/proto/token/v1b\x06proto3"
 
 pool = ::Google::Protobuf::DescriptorPool.generated_pool
 pool.add_serialized_file(descriptor_data)
@@ -16,6 +16,7 @@ module Token
   module V1
     MintRequest = ::Google::Protobuf::DescriptorPool.generated_pool.lookup("token.v1.MintRequest").msgclass
     TokenMinted = ::Google::Protobuf::DescriptorPool.generated_pool.lookup("token.v1.TokenMinted").msgclass
+    TokenBalanceRecorded = ::Google::Protobuf::DescriptorPool.generated_pool.lookup("token.v1.TokenBalanceRecorded").msgclass
     TokenMintRejected = ::Google::Protobuf::DescriptorPool.generated_pool.lookup("token.v1.TokenMintRejected").msgclass
     MintResponse = ::Google::Protobuf::DescriptorPool.generated_pool.lookup("token.v1.MintResponse").msgclass
   end

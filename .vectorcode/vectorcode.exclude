@@ -7,3 +7,5 @@ go/go.sum
 ruby/app/graphql/schemas/money_flow_schema.graphql
 **/node_modules/**
 .claude/**
+**/.ruby-lsp/**
+.vectorcode/**

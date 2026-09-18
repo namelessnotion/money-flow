@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useQuery } from '@vue/apollo-composable'
 import { computed } from 'vue'
+import { formatDateTime as formatDate } from '../lib/dates'
 import { ENTITIES_QUERY, PAGE_SIZE, type EntitiesQueryResult, type EntitiesQueryVariables } from '../graphql/entities'
 
 const { result, loading, error, fetchMore } = useQuery<EntitiesQueryResult, EntitiesQueryVariables>(
@@ -12,11 +13,6 @@ const entities = computed(() => result.value?.entities.edges.map((edge) => edge.
 const pageInfo = computed(() => result.value?.entities.pageInfo)
 const isLoadingMore = computed(() => loading.value && entities.value.length > 0)
 
-const dateFormatter = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
-
-function formatDate(value: string): string {
-  return dateFormatter.format(new Date(value))
-}
 
 async function loadMore(): Promise<void> {
   const endCursor = pageInfo.value?.endCursor
@@ -53,7 +49,12 @@ async function loadMore(): Promise<void> {
           class="flex items-center justify-between gap-4 px-4 py-3"
         >
           <div class="min-w-0">
-            <p class="truncate font-semibold text-slate-900">{{ entity!.name }}</p>
+            <RouterLink
+              :to="{ name: 'entity', params: { entityId: entity!.id } }"
+              class="block truncate font-semibold text-blue-700 hover:underline"
+            >
+              {{ entity!.name }}
+            </RouterLink>
             <p class="truncate text-sm text-slate-500">{{ entity!.holderUuid }}</p>
           </div>
           <p class="shrink-0 text-sm text-slate-500">{{ formatDate(entity!.createdAt) }}</p>

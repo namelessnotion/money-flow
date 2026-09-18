@@ -19,6 +19,18 @@ class Models::AchTransaction
     sig { params(value: T.nilable(Integer)).returns(T.nilable(Integer)) }
     def amount_minor_units=(value); end
 
+    sig { returns(T.nilable(String)) }
+    def clearing_transaction_id; end
+
+    sig { params(value: T.nilable(String)).returns(T.nilable(String)) }
+    def clearing_transaction_id=(value); end
+
+    sig { returns(T.nilable(String)) }
+    def clearing_transfer_id; end
+
+    sig { params(value: T.nilable(String)).returns(T.nilable(String)) }
+    def clearing_transfer_id=(value); end
+
     sig { returns(Time) }
     def created_at; end
 

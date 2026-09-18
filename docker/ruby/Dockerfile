@@ -3,8 +3,9 @@
 # only needs ruby/.
 FROM ruby:3.4.10-slim
 
+# procps: Resque workers shell out to `ps` to find and prune dead workers.
 RUN apt-get update -qq \
-  && apt-get install -y --no-install-recommends build-essential libpq-dev libyaml-dev postgresql-client git \
+  && apt-get install -y --no-install-recommends build-essential libpq-dev libyaml-dev postgresql-client git procps \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

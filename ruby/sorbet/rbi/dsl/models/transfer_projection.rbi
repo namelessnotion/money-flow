@@ -49,6 +49,12 @@ class Models::TransferProjection
     sig { params(value: T.nilable(String)).returns(T.nilable(String)) }
     def state=(value); end
 
+    sig { returns(T.nilable(Time)) }
+    def state_changed_at; end
+
+    sig { params(value: T.nilable(Time)).returns(T.nilable(Time)) }
+    def state_changed_at=(value); end
+
     sig { returns(T.nilable(String)) }
     def transaction_id; end
 

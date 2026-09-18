@@ -41,7 +41,8 @@ RSpec.describe Services::Ach::TransactionShape do
     end
 
     it 'holds the shadow leg until the real leg completes' do
-      expect(request.transfer_dependency[shadow_id].transfer_id.to_a).to eq([real_id])
+      expect(request.transfer_dependency.to_h.transform_values { |ids| ids[:transfer_id] })
+        .to eq(shadow_id => [real_id])
     end
 
     it 'names the factory that built it' do
@@ -69,8 +70,13 @@ RSpec.describe Services::Ach::TransactionShape do
       expect([shadow.stage, shadow.mint_source]).to eq([false, false])
     end
 
-    it 'names the factory that built it' do
-      expect(request.factory_name).to eq('ach_withdrawal')
+    it 'funds the withdrawal from cleared cash before any money leaves: the real leg waits on the shadow leg' do
+      expect(request.transfer_dependency.to_h.transform_values { |ids| ids[:transfer_id] })
+        .to eq(real_id => [shadow_id])
+    end
+
+    it 'names the factory that built it, at the version that funds first' do
+      expect([request.factory_name, request.factory_version]).to eq(%w[ach_withdrawal 2])
     end
   end
 
@@ -80,6 +86,6 @@ RSpec.describe Services::Ach::TransactionShape do
     expect do
       described_class.for(direction: Types::Enums::AchDirection::Deposit, accounts: accounts,
                           real_transfer_id: real_id, shadow_transfer_id: shadow_id)
-    end.to raise_error(described_class::MissingAccount, /cash/)
+    end.to raise_error(Services::Ach::MissingAccount, /cash/)
   end
 end

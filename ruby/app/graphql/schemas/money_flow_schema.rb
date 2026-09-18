@@ -11,4 +11,7 @@ class MoneyFlowSchema < GraphQL::Schema
   mutation Types::MutationType
 
   connections.add(Sequel::Dataset, Connections::SequelDatasetConnection)
+
+  # Batches per-object lookups (Sources::*) across a whole query.
+  use GraphQL::Dataloader
 end

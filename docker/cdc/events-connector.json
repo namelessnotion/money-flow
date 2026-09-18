@@ -21,5 +21,5 @@
   "transforms.outbox.table.field.event.payload": "payload",
   "transforms.outbox.route.by.field": "aggregate_type",
   "transforms.outbox.route.topic.replacement": "${routedByValue}-events",
-  "transforms.outbox.table.fields.additional.placement": "aggregate_type:envelope,event_type:envelope,sequence:envelope,global_seq:envelope"
+  "transforms.outbox.table.fields.additional.placement": "aggregate_type:envelope,event_type:envelope,sequence:envelope,global_seq:envelope,occurred_at:envelope"
 }

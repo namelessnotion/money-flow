@@ -54,17 +54,26 @@ func selectSourceTokens(
 		return nil, nil, err
 	}
 
+	balances, err := lc.Balances(ctx, tokenIDs)
+	if err != nil {
+		return nil, nil, twirp.InternalErrorWith(fmt.Errorf("ledger: Balances: %w", err))
+	}
+
 	var legs []Leg
 	remaining := amount.GetMinorUnits()
 	for _, tokenID := range tokenIDs {
 		if remaining == 0 {
 			break
 		}
-		balance, found, err := lc.AccountBalance(ctx, tokenID)
-		if err != nil {
-			return nil, nil, twirp.InternalErrorWith(fmt.Errorf("ledger: AccountBalance: %w", err))
+		b, found := balances[tokenID]
+		if !found {
+			continue
 		}
-		if !found || balance <= 0 {
+		balance, err := b.PostedNet()
+		if err != nil {
+			return nil, nil, twirp.InternalErrorWith(fmt.Errorf("ledger: token %q: %w", tokenID, err))
+		}
+		if balance <= 0 {
 			continue
 		}
 		take := uint64(balance)

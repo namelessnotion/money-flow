@@ -1,0 +1,13 @@
+# Recurring jobs for resque-scheduler (rake resque:scheduler). Loaded by
+# lib/resque_boot.rb; spec/lib/resque_boot_spec.rb checks every class, queue
+# and cron here resolves.
+
+# Clears ACH deposits from the start of their third Federal Reserve business
+# day after completion (Services::Ach::ClearingPolicy). Hourly rather than
+# once a day: the sweep is idempotent, and a missed or failed run is picked up
+# within the hour. Weekdays only — nothing becomes due on a weekend.
+clear_ach_deposits:
+  cron: "0 * * * 1-5 America/New_York"
+  class: Jobs::ClearAchDeposits
+  queue: ach
+  description: Originate clearing Transactions for ACH deposits 3 business days after completion
