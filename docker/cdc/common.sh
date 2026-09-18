@@ -18,8 +18,9 @@ cdc_setting() {
 
 CDC_DATABASE="$(cdc_setting 'database\.dbname')"
 CDC_SLOT="$(cdc_setting 'slot\.name')"
+CDC_PUBLICATION="$(cdc_setting 'publication\.name')"
 
-if [ -z "$CDC_DATABASE" ] || [ -z "$CDC_SLOT" ]; then
-  echo "cdc: could not read database.dbname / slot.name from $CDC_CONNECTOR_FILE" >&2
+if [ -z "$CDC_DATABASE" ] || [ -z "$CDC_SLOT" ] || [ -z "$CDC_PUBLICATION" ]; then
+  echo "cdc: could not read database.dbname / slot.name / publication.name from $CDC_CONNECTOR_FILE" >&2
   exit 1
 fi

@@ -51,14 +51,10 @@ make orchestrator-up
 make orchestrator-logs
 ```
 
-It consumes the scratch `money_flow_cdc` database the tracer bullet publishes, never `money_flow_dev`: the
-connector is registered against that database (`docker/cdc/events-connector.json`), and nothing publishes
-development's event log. To exercise it end to end, run an RPC server against the same scratch database and
-drive it over Twirp's JSON transport:
-
-```bash
-docker compose run --rm --service-ports -e DATABASE_URL="postgres://money_flow:money_flow@postgres:5432/money_flow_cdc?sslmode=disable" go go run ./cmd/server
-```
+It consumes `money_flow_dev`, the database the connector publishes (`docker/cdc/events-connector.json`), so
+anything the running `go` server does reaches it — including an ACH Transaction started from GraphQL
+([`docs/ach-transactions.md`](ach-transactions.md)). To exercise it by hand, drive the `go` server over
+Twirp's JSON transport on `:8080`.
 
 The shape worth watching is a Transaction with a **staged** child, because that is the one the synchronous path
 cannot finish on its own:
@@ -78,8 +74,8 @@ would have moved it.
 make cdc-down
 ```
 
-Tear the connector down before `docker compose down`, exactly as [`docs/cdc-tracer-bullet.md`](cdc-tracer-bullet.md)
-describes: the replication slot outlives the stack and pins WAL until something drops it.
+Tear the connector down before `docker compose down`: the replication slot outlives the stack and pins WAL
+until something drops it.
 
 ## Watching it
 
@@ -96,7 +92,8 @@ describes: the replication slot outlives the stack and pins WAL until something 
 
 **Ran 2026-09-08, on the local development stack**, following the steps above exactly: connector registered,
 orchestrator started before anything had been published, then the ACH-shaped Transaction driven through an RPC
-server pointed at `money_flow_cdc`.
+server pointed at the scratch `money_flow_cdc` database that the connector published at the time. It has
+since been retired in favour of publishing `money_flow_dev`; the behaviour shown is unchanged.
 
 The Transaction parks after `StartInitializingTransaction`, with its staged child waiting on settlement:
 
@@ -150,12 +147,11 @@ orchestrator with an error naming every address it tried. Each poll asks the bro
 first answer — any broker serves metadata for the whole cluster, so a multi-broker `KAFKA_BROKERS` survives
 one of them being down or restarting rather than being no more available than a single-broker one.
 
-## A note on the tracer bullet's own messages
+## A note on synthetic events
 
-`go/cmd/cdctracer` appends synthetic events — a `TransferRequestAccepted` naming no wallets, for instance — to
-produce the evidence in [`docs/cdc-tracer-bullet.md`](cdc-tracer-bullet.md). Those are not drivable Transfers,
-so an orchestrator consuming a topic that still holds them halts on the first one. That is correct, and running
-the tracer against a live orchestrator is the cheapest way to see ADR 0003's policy actually fire:
+The CDC tracer bullet's `go/cmd/cdctracer` (since removed, with the scratch database it wrote to) appended
+synthetic events — a `TransferRequestAccepted` naming no wallets, for instance. Those are not drivable
+Transfers, and running them past a live orchestrator is how ADR 0003's policy was first seen to fire:
 
 ```
 saga: retrying transfer-events[1]@3 (transfer 01a080f5-… (transfer.v1.TransferRequestAccepted seq 1, global_seq 38)), attempt 2 of 3, after: twirp error internal: ERROR: invalid input syntax for type uuid: "" (SQLSTATE 22P02)
@@ -165,6 +161,6 @@ orchestrator: saga: halted on transfer-events[1]@3 after 3 attempt(s): …
 exit status 1
 ```
 
-Bounded retries, then a stop that names the exact message, commits nothing past it, and exits non-zero. A run
-of the tracer and a run of the orchestrator therefore want different topic contents; `docker compose down`
-discards the topics (the `kafka` service has no volume), which is the simplest way to start from a clean one.
+Bounded retries, then a stop that names the exact message, commits nothing past it, and exits non-zero. Never
+append hand-made events to `money_flow_dev`: the log is append-only, so they would halt the orchestrator and
+the Ruby consumer on every replay, permanently.

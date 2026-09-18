@@ -99,6 +99,9 @@ class Models::Account
     def first!(*args, &block); end
 
     sig { params(args: T.untyped, block: T.untyped).returns(::Models::Account::PrivateDataset) }
+    def for_update(*args, &block); end
+
+    sig { params(args: T.untyped, block: T.untyped).returns(::Models::Account::PrivateDataset) }
     def group(*args, &block); end
 
     sig { params(args: T.untyped, block: T.untyped).returns(::Models::Account::PrivateDataset) }
@@ -179,6 +182,9 @@ class Models::Account
         ).returns(T::Array[T.type_parameter(:U)])
     end
     def flat_map(&block); end
+
+    sig { params(args: T.untyped, block: T.untyped).returns(::Models::Account::PrivateDataset) }
+    def for_update(*args, &block); end
 
     sig { params(args: T.untyped, block: T.untyped).returns(::Models::Account::PrivateDataset) }
     def group(*args, &block); end

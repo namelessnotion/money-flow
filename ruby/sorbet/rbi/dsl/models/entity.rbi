@@ -87,6 +87,9 @@ class Models::Entity
     def first!(*args, &block); end
 
     sig { params(args: T.untyped, block: T.untyped).returns(::Models::Entity::PrivateDataset) }
+    def for_update(*args, &block); end
+
+    sig { params(args: T.untyped, block: T.untyped).returns(::Models::Entity::PrivateDataset) }
     def group(*args, &block); end
 
     sig { params(args: T.untyped, block: T.untyped).returns(::Models::Entity::PrivateDataset) }
@@ -167,6 +170,9 @@ class Models::Entity
         ).returns(T::Array[T.type_parameter(:U)])
     end
     def flat_map(&block); end
+
+    sig { params(args: T.untyped, block: T.untyped).returns(::Models::Entity::PrivateDataset) }
+    def for_update(*args, &block); end
 
     sig { params(args: T.untyped, block: T.untyped).returns(::Models::Entity::PrivateDataset) }
     def group(*args, &block); end

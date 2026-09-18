@@ -2,22 +2,16 @@
 # typed: strict
 
 require 'securerandom'
-require 'faraday'
 require_relative '../../gen/proto/holder/v1/holder_pb'
 require_relative '../../gen/proto/holder/v1/holder_twirp'
+require_relative 'twirp_call'
 
 module Services
   # onboards an entity into the system and provisions the necessary resources for it to operate
   class OnboardEntity < BaseService
     class ProvisioningFailed < StandardError; end
 
-    MAX_ATTEMPTS = 3
-
-    # Twirp codes worth another attempt: the call may never have reached the
-    # service, or reached it and lost the reply. Provisioning is idempotent per
-    # id, so retrying is safe. Anything else (invalid_argument, and the domain
-    # rejection path) will fail identically however many times it is sent.
-    RETRYABLE_CODES = T.let(%i[unavailable deadline_exceeded internal unknown].freeze, T::Array[Symbol])
+    MAX_ATTEMPTS = TwirpCall::MAX_ATTEMPTS
 
     # A Wallet's uuid alongside the account type it backs, held together so the
     # same pair is sent to the Holder service and written locally.
@@ -93,37 +87,12 @@ module Services
     def provision!(holder_uuid, wallet_plans)
       req = provision_request(holder_uuid, wallet_plans)
 
-      attempt = 0
-      loop do
-        attempt += 1
-
-        response = attempt_provision(req, attempt)
-        next if response.nil? # transport failure with attempts left
-
-        error = response.error
-        return check_accepted!(response) if error.nil?
-
-        raise ProvisioningFailed, error.msg unless retryable?(error, attempt)
-      end
-    end
-
-    # Returns nil when a transport failure should be retried.
-    #
-    # A transport failure never becomes a Twirp::Error — the client's Faraday
-    # call raises straight through. It is the same situation as a retryable
-    # twirp code, though: the request may never have arrived, or arrived and
-    # lost its reply, and provisioning is idempotent either way.
-    sig { params(req: T.untyped, attempt: Integer).returns(T.untyped) }
-    def attempt_provision(req, attempt)
       # #provision is defined via protoc-gen-twirp_ruby's `rpc` DSL at load time
       # (define_method), which Sorbet can't see statically — there's no RBI for
       # our own generated gen/proto code the way tapioca generates one for real
       # gems.
-      T.unsafe(@holder_client).provision(req)
-    rescue Faraday::Error => e
-      raise ProvisioningFailed, e.message unless attempt < MAX_ATTEMPTS
-
-      nil
+      response = TwirpCall.with_retries(failure: ProvisioningFailed) { T.unsafe(@holder_client).provision(req) }
+      check_accepted!(response)
     end
 
     # Returns a Holder::V1::ProvisionRequest, but that can't be named as a type:
@@ -151,11 +120,6 @@ module Services
     def check_accepted!(response)
       rejected = response.data&.holder_provision_rejected
       raise ProvisioningFailed, rejected.reason if rejected
-    end
-
-    sig { params(error: Twirp::Error, attempts: Integer).returns(T::Boolean) }
-    def retryable?(error, attempts)
-      attempts < MAX_ATTEMPTS && RETRYABLE_CODES.include?(error.code)
     end
   end
 end

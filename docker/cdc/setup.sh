@@ -1,27 +1,18 @@
 #!/bin/sh
-# Brings up the CDC tracer bullet: a scratch database, the events schema in it,
-# and the Debezium connector that publishes it to Kafka. See
-# docs/cdc-tracer-bullet.md.
+# Publishes the development database's event log to Kafka: registers the
+# Debezium connector (events-connector.json) that routes money_flow_dev's
+# events table onto <aggregate_type>-events topics. See docs/adr/0001 and
+# docs/cdc-tracer-bullet.md for the pipeline, docs/ach-transactions.md and
+# docs/saga-orchestrator.md for what reads it.
 #
-# Everything this creates is torn down by docker/cdc/teardown.sh. Run from the
-# repository root, with `docker compose up -d` already done.
+# It starts from the current end of the log (snapshot.mode no_data): events
+# written before it ran are never published.
+#
+# Reversed by docker/cdc/teardown.sh. Run from the repository root, with
+# `docker compose up -d` already done.
 set -eu
 
 . "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/common.sh"
-
-# The scratch database exists so the tracer bullet's events — which are
-# permanent, the table being append-only — never land in money_flow_dev.
-if [ "$(docker compose exec -T postgres psql -U money_flow -d postgres -tAc \
-      "SELECT 1 FROM pg_database WHERE datname = '$CDC_DATABASE'")" != "1" ]; then
-  docker compose exec -T postgres psql -U money_flow -d postgres -c "CREATE DATABASE \"$CDC_DATABASE\""
-  echo "cdc: created database $CDC_DATABASE"
-fi
-
-# The same migrations the real event store runs, so the pipeline sees the real
-# table definition — triggers, identity column and all.
-docker compose exec -T \
-  -e DATABASE_URL="postgres://money_flow:money_flow@postgres:5432/$CDC_DATABASE?sslmode=disable" \
-  go go run ./cmd/migrate up
 
 printf 'cdc: waiting for Kafka Connect at %s' "$CDC_CONNECT_URL"
 until curl -sf "$CDC_CONNECT_URL/connectors" >/dev/null 2>&1; do

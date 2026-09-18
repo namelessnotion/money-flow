@@ -1,0 +1,33 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+# typed: strict
+
+# Runs the read-model projection: consumes transfer-events and
+# transaction-events and folds them into transaction_projections and
+# transfer_projections (ruby/docs/adr/0001, 0002).
+#
+# Exits non-zero when the Runner halts on a message it cannot project, leaving
+# that message uncommitted, so a restart resumes exactly there. SIGTERM and
+# SIGINT stop it cleanly after the message in hand.
+
+require 'logger'
+require_relative '../lib/environment'
+
+# Unbuffered, so progress shows in `docker compose logs` as it happens.
+$stdout.sync = true
+logger = Logger.new($stdout, progname: 'consumer')
+source = Consumer::KafkaSource.connect(brokers: ENV.fetch('KAFKA_BROKERS', 'localhost:9092'), logger: logger)
+
+%w[TERM INT].each { |signal| Signal.trap(signal) { source.stop } }
+
+begin
+  source.start
+  Consumer::Runner.new(source: source, logger: logger).run
+  logger.info('stopped')
+rescue Consumer::Runner::Halted, Consumer::TopicWaiter::Unreachable => e
+  logger.error(e.message)
+  logger.error("caused by #{e.cause.class}: #{e.cause.message}") if e.cause
+  exit 1
+ensure
+  source.close
+end
