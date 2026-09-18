@@ -2,12 +2,16 @@
 
 **Status:** ran 2026-09-07, on the local development stack.
 **Verdict:** all four claims proven. [`docs/adr/0001`](adr/0001-async-event-driven-saga-and-postgres-to-kafka-publication.md) stands as written; no custom SMT is needed.
+**Retired 2026-09-18.** The rig below — the scratch `money_flow_cdc` database, its connector and
+`go/cmd/cdctracer` — has been removed; its code is in git history. The same connector configuration now
+publishes `money_flow_dev` (`make cdc-up`), read by the Go orchestrator and the Ruby consumer. This page is
+kept as the record of what was proven; its commands no longer run as written.
 
 This is the thin end-to-end slice [`docs/adr/0001`](adr/0001-async-event-driven-saga-and-postgres-to-kafka-publication.md)
 was decided without. It is infrastructure only — nothing in `go/`, `ruby/` or `client/` reads from Kafka, and
 `runSaga` is untouched. Its value is the finding, not the code.
 
-## Running it
+## Running it (as it was)
 
 ```
 docker compose up -d

@@ -1,4 +1,5 @@
-.PHONY: up down restart migrate ssl proto cdc-up cdc-down orchestrator-up orchestrator-down orchestrator-logs
+.PHONY: up down restart migrate ssl proto cdc-up cdc-down orchestrator-up orchestrator-down orchestrator-logs \
+	consumer-up consumer-down consumer-logs
 
 up:
 	docker compose up -d
@@ -52,11 +53,10 @@ proto:
 	    $$f || exit 1; \
 	done
 
-# CDC tracer bullet (docs/cdc-tracer-bullet.md). cdc-up creates the scratch
-# database, migrates the events schema into it and registers the Debezium
-# connector; cdc-down removes all three, including the replication slot that
-# `docker compose down` leaves behind. Run cdc-down BEFORE bringing the stack
-# down — it needs Connect and Postgres up to do its work.
+# Publish money_flow_dev to Kafka (docs/adr/0001): cdc-up registers the
+# Debezium connector; cdc-down removes it, its publication and the
+# replication slot that `docker compose down` leaves behind. Run cdc-down
+# BEFORE bringing the stack down — it needs Connect and Postgres up.
 cdc-up:
 	docker/cdc/setup.sh
 
@@ -74,3 +74,14 @@ orchestrator-down:
 
 orchestrator-logs:
 	docker compose logs -f orchestrator
+
+# Ruby read-model consumer (ruby/bin/consumer). Reads what cdc-up publishes
+# into the projection tables of money_flow_dev.
+consumer-up:
+	docker compose up -d ruby-consumer
+
+consumer-down:
+	docker compose stop ruby-consumer
+
+consumer-logs:
+	docker compose logs -f ruby-consumer

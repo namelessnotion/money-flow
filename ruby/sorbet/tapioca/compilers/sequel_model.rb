@@ -42,6 +42,10 @@ module Tapioca
         T::Hash[Symbol, String]
       )
 
+      # Postgres types Sequel has no `:type` for (it reports `type: nil`), keyed by
+      # the column's `db_type`. The pg adapter returns a uuid as its String form.
+      DB_TYPES = T.let({ 'uuid' => 'String' }.freeze, T::Hash[String, String])
+
       # Query methods that return a new dataset, so chaining stays typed.
       # `select` deliberately shadows `Enumerable#select` here — Sequel overrides it
       # with the SQL builder, so this matches runtime.
@@ -52,7 +56,7 @@ module Tapioca
       # unless listed here explicitly.
       CHAINABLE = T.let(
         %w[where exclude filter order order_by reverse limit offset select
-           select_append distinct group group_by having eager].freeze,
+           select_append distinct group group_by having eager for_update].freeze,
         T::Array[String]
       )
 
@@ -223,7 +227,7 @@ module Tapioca
                  # `Time` by default; `DateTime` if Sequel.datetime_class was reconfigured.
                  T.unsafe(::Sequel).datetime_class.name.to_s
                else
-                 RUBY_TYPES.fetch(info[:type], 'T.untyped')
+                 RUBY_TYPES.fetch(info[:type]) { DB_TYPES.fetch(info[:db_type].to_s, 'T.untyped') }
                end
 
         return base if base == 'T.untyped'

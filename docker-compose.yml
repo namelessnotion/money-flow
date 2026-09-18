@@ -50,11 +50,41 @@ services:
       DB_HOST: postgres
       CORS_ALLOWED_ORIGIN: https://app.local.namelessnotion.com
       HOLDER_SERVICE_URL: http://go:8080/twirp
+      TRANSACTION_SERVICE_URL: http://go:8080/twirp
+      TRANSFER_SERVICE_URL: http://go:8080/twirp
     depends_on:
       postgres:
         condition: service_healthy
     ports:
       - "9292:9292"
+    volumes:
+      - ./ruby:/app
+
+  # Ruby's read-model consumer (ruby/bin/consumer, ruby/docs/adr/0001 and
+  # 0002): folds transfer-events and transaction-events into the projection
+  # tables in money_flow_dev. Same image as `ruby`, different command.
+  #
+  # Under the `cdc` profile, so `docker compose up -d` does not start it: it
+  # only sees anything once docker/cdc/setup.sh has registered the connector.
+  # Start it with `make cdc-up consumer-up`; see docs/ach-transactions.md. It
+  # exits non-zero on a message it cannot project, leaving it uncommitted,
+  # and is deliberately not restarted: a restart would only halt on the same
+  # message again.
+  ruby-consumer:
+    profiles: ["cdc"]
+    build:
+      context: .
+      dockerfile: docker/ruby/Dockerfile
+    environment:
+      DATABASE_URL: postgres://money_flow:money_flow@postgres:5432/money_flow_dev?sslmode=disable
+      DB_HOST: postgres
+      KAFKA_BROKERS: kafka:9092
+    command: ["bin/consumer"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
     volumes:
       - ./ruby:/app
 
@@ -91,10 +121,10 @@ services:
     volumes:
       - ./go:/app
 
-  # --- CDC tracer bullet (docs/cdc-tracer-bullet.md) -------------------------
-  # Kafka and Kafka Connect exist to prove the Postgres -> Kafka publication
-  # path from docs/adr/0001. Nothing in go/, ruby/ or client/ reads from them
-  # yet. Single-node, no persistence volume, PLAINTEXT, in-network only: this
+  # --- CDC: Postgres -> Kafka (docs/adr/0001, docs/cdc-tracer-bullet.md) -----
+  # Kafka and Kafka Connect carry the Postgres -> Kafka publication path from
+  # docs/adr/0001, read by the Go orchestrator and the Ruby consumer.
+  # Single-node, no persistence volume, PLAINTEXT, in-network only: this
   # is a development rig, not a template for a deployed broker.
   kafka:
     image: apache/kafka:3.9.1
@@ -163,17 +193,16 @@ services:
   # than replacing it.
   #
   # Under the `cdc` profile, so `docker compose up -d` does not start it: it is
-  # only meaningful once docker/cdc/setup.sh has registered the connector, and
-  # it consumes the scratch money_flow_cdc database the tracer publishes —
-  # nothing publishes money_flow_dev. Start it with `make orchestrator-up`, and
-  # see docs/saga-orchestrator.md for the walkthrough.
+  # only meaningful once docker/cdc/setup.sh has registered the connector that
+  # publishes money_flow_dev. Start it with `make orchestrator-up`, and see
+  # docs/saga-orchestrator.md for the walkthrough.
   orchestrator:
     profiles: ["cdc"]
     build:
       context: .
       dockerfile: docker/go/Dockerfile
     environment:
-      DATABASE_URL: postgres://money_flow:money_flow@postgres:5432/money_flow_cdc?sslmode=disable
+      DATABASE_URL: postgres://money_flow:money_flow@postgres:5432/money_flow_dev?sslmode=disable
       DB_HOST: postgres
       KAFKA_BROKERS: kafka:9092
       TIGERBEETLE_ADDRESS: tigerbeetle:3000

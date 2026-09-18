@@ -83,6 +83,14 @@ GEM
       logger
     faraday-net_http (3.4.4)
       net-http (~> 0.5)
+    ffi (1.17.4-aarch64-linux-gnu)
+    ffi (1.17.4-aarch64-linux-musl)
+    ffi (1.17.4-arm64-darwin)
+    ffi (1.17.4-x86-linux-gnu)
+    ffi (1.17.4-x86-linux-musl)
+    ffi (1.17.4-x86_64-darwin)
+    ffi (1.17.4-x86_64-linux-gnu)
+    ffi (1.17.4-x86_64-linux-musl)
     fiber-annotation (0.2.0)
     fiber-local (1.1.0)
       fiber-storage
@@ -208,6 +216,42 @@ GEM
       logger
       prism (>= 1.6.0)
       tsort
+    rdkafka (0.29.2)
+      ffi (~> 1.17.1)
+      json (> 2.0)
+      logger
+      mini_portile2 (~> 2.6)
+      rake (> 12)
+    rdkafka (0.29.2-aarch64-linux-gnu)
+      ffi (~> 1.17.1)
+      json (> 2.0)
+      logger
+      mini_portile2 (~> 2.6)
+      rake (> 12)
+    rdkafka (0.29.2-aarch64-linux-musl)
+      ffi (~> 1.17.1)
+      json (> 2.0)
+      logger
+      mini_portile2 (~> 2.6)
+      rake (> 12)
+    rdkafka (0.29.2-arm64-darwin)
+      ffi (~> 1.17.1)
+      json (> 2.0)
+      logger
+      mini_portile2 (~> 2.6)
+      rake (> 12)
+    rdkafka (0.29.2-x86_64-linux-gnu)
+      ffi (~> 1.17.1)
+      json (> 2.0)
+      logger
+      mini_portile2 (~> 2.6)
+      rake (> 12)
+    rdkafka (0.29.2-x86_64-linux-musl)
+      ffi (~> 1.17.1)
+      json (> 2.0)
+      logger
+      mini_portile2 (~> 2.6)
+      rake (> 12)
     rdoc (7.2.0)
       erb
       psych (>= 4.0.0)
@@ -361,6 +405,7 @@ DEPENDENCIES
   pg
   rack
   rackup
+  rdkafka
   rspec
   rubocop
   rubocop-rspec

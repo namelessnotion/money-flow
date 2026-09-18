@@ -1,5 +1,7 @@
 #!/bin/sh
-# Reverses docker/cdc/setup.sh. Run from the repository root.
+# Reverses docker/cdc/setup.sh: drops the connector, its replication slot and
+# its publication. Never touches the database's data. Run from the repository
+# root, BEFORE bringing the stack down — it needs Connect and Postgres up.
 #
 # The replication slot is the one thing `docker compose down` does NOT clean
 # up: it lives in the long-lived postgres volume, and a slot left behind with
@@ -8,7 +10,7 @@
 #
 # The topics are deliberately left alone. Kafka has no volume, so `docker
 # compose down` takes them with it; within one session, re-running setup.sh
-# republishes into the topics that are already there.
+# publishes into the topics that are already there.
 set -eu
 
 . "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/common.sh"
@@ -30,5 +32,9 @@ docker compose exec -T postgres psql -U money_flow -d postgres -tAc \
   "SELECT pg_drop_replication_slot('$CDC_SLOT') FROM pg_replication_slots WHERE slot_name = '$CDC_SLOT'" >/dev/null
 echo "cdc: dropped replication slot $CDC_SLOT (if it existed)"
 
-docker compose exec -T postgres psql -U money_flow -d postgres -c "DROP DATABASE IF EXISTS \"$CDC_DATABASE\"" >/dev/null
-echo "cdc: dropped database $CDC_DATABASE"
+# Debezium created the publication (publication.autocreate.mode filtered). It
+# retains no WAL, but nothing else would ever remove it from a long-lived
+# database.
+docker compose exec -T postgres psql -U money_flow -d "$CDC_DATABASE" -tAc \
+  "DROP PUBLICATION IF EXISTS \"$CDC_PUBLICATION\"" >/dev/null
+echo "cdc: dropped publication $CDC_PUBLICATION (if it existed)"
