@@ -93,6 +93,16 @@ type Store interface {
 	// Load returns every event in (aggregateType, aggregateID)'s stream,
 	// oldest first. An aggregate that doesn't exist yet returns (nil, nil).
 	Load(ctx context.Context, aggregateType, aggregateID string) ([]Event, error)
+
+	// Now returns this store's own notion of the current time, on the same
+	// clock Event.OccurredAt is stamped with. Callers reasoning about an
+	// event's age (go/docs/adr/0005's stale-claim check, chiefly) must
+	// compare against this rather than time.Now(): PostgresStore's
+	// occurred_at is set server-side by Postgres's own now(), which can
+	// drift from the Go process's clock, and a caller comparing across the
+	// two clocks can find every event already "stale" the instant it's
+	// written, or never stale at all, depending on the direction of drift.
+	Now(ctx context.Context) (time.Time, error)
 }
 
 // liveWrites drops writes that would insert nothing. They are filtered before
@@ -133,4 +143,27 @@ func validateWrites(writes []StreamWrite) error {
 // event_type column and looked up by Event.Decode.
 func EventType(m proto.Message) string {
 	return string(m.ProtoReflect().Descriptor().FullName())
+}
+
+// Claim attempts to append marker as the very next event in
+// (aggregateType, aggregateID)'s stream, at expectedSeq. It is this
+// codebase's storage-agnostic primitive for "at most one caller performs the
+// following side effect at a time" (go/docs/adr/0005): a caller appends a
+// marker before doing anything externally visible (a call to another
+// service, a ledger submission), and only the caller whose append wins
+// proceeds.
+//
+// won=false, err=nil means a concurrent caller's marker landed first — the
+// caller should treat that as convergence, the same way prepare() treats a
+// conflicted AppendAtomic, not as failure. The marker is never read back by
+// currentState()-style folds; it exists only to be raced over.
+func Claim(ctx context.Context, store Store, aggregateType, aggregateID string, expectedSeq int64, marker proto.Message) (won bool, err error) {
+	switch err := store.Append(ctx, aggregateType, aggregateID, expectedSeq, marker); {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, ErrConcurrencyConflict):
+		return false, nil
+	default:
+		return false, err
+	}
 }

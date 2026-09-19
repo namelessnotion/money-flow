@@ -11,9 +11,9 @@ import (
 type source interface {
 	// head is the highest global_seq written so far, 0 for an empty log.
 	head(ctx context.Context) (int64, error)
-	// first is the global_seq of aggregateID's first event, or an error when
-	// it has none.
-	first(ctx context.Context, aggregateID string) (int64, error)
+	// first is the global_seq of the (aggregateType, aggregateID) stream's
+	// first event, or an error when it has none.
+	first(ctx context.Context, aggregateType, aggregateID string) (int64, error)
 	// read returns up to limit events after `after` or at one of `holes`, in
 	// global_seq order.
 	read(ctx context.Context, after int64, holes []int64, limit int) ([]row, error)
@@ -34,9 +34,11 @@ func (s pgSource) head(ctx context.Context) (int64, error) {
 	return head, nil
 }
 
-func (s pgSource) first(ctx context.Context, aggregateID string) (int64, error) {
+func (s pgSource) first(ctx context.Context, aggregateType, aggregateID string) (int64, error) {
 	var first *int64
-	if err := s.pool.QueryRow(ctx, `SELECT min(global_seq) FROM events WHERE aggregate_id::text = $1`, aggregateID).
+	if err := s.pool.QueryRow(ctx,
+		`SELECT min(global_seq) FROM events WHERE aggregate_type = $1 AND aggregate_id = $2::uuid`,
+		aggregateType, aggregateID).
 		Scan(&first); err != nil {
 		return 0, fmt.Errorf("find %s's first event: %w", aggregateID, err)
 	}

@@ -24,7 +24,7 @@ type query struct {
 
 func (s *fakeSource) head(context.Context) (int64, error) { return 100, nil }
 
-func (s *fakeSource) first(_ context.Context, aggregateID string) (int64, error) {
+func (s *fakeSource) first(_ context.Context, _, aggregateID string) (int64, error) {
 	if aggregateID != "tx" {
 		return 0, errors.New("no events")
 	}

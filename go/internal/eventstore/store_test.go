@@ -75,6 +75,85 @@ func TestEventDecodeCorruptPayload(t *testing.T) {
 	}
 }
 
+func TestClaimWinsAtTheExpectedSequence(t *testing.T) {
+	t.Parallel()
+
+	store := eventstore.NewMemoryStore()
+	ctx := context.Background()
+	id := uniqueID(t)
+
+	won, err := eventstore.Claim(ctx, store, "holder", id, 0, &pb.HolderEstablished{Id: id})
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	if !won {
+		t.Fatal("Claim() won = false, want true for the first claim on a fresh stream")
+	}
+
+	events, err := store.Load(ctx, "holder", id)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("Load() returned %d events, want 1", len(events))
+	}
+}
+
+// A second caller racing the same (aggregateType, aggregateID, expectedSeq)
+// loses without error: this is the convergence contract go/docs/adr/0005
+// relies on — the loser treats losing as "someone else is handling this",
+// not as failure.
+func TestClaimLoserConvergesWithoutError(t *testing.T) {
+	t.Parallel()
+
+	store := eventstore.NewMemoryStore()
+	ctx := context.Background()
+	id := uniqueID(t)
+
+	first, err := eventstore.Claim(ctx, store, "holder", id, 0, &pb.HolderEstablished{Id: id})
+	if err != nil || !first {
+		t.Fatalf("first Claim() = (%v, %v), want (true, nil)", first, err)
+	}
+
+	second, err := eventstore.Claim(ctx, store, "holder", id, 0, &pb.HolderEstablished{Id: id})
+	if err != nil {
+		t.Fatalf("second Claim() error = %v, want nil (convergence, not failure)", err)
+	}
+	if second {
+		t.Fatal("second Claim() won = true, want false: only one caller should win the same expectedSeq")
+	}
+
+	events, err := store.Load(ctx, "holder", id)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("Load() returned %d events after a lost claim, want 1 (the loser must not have appended anything)", len(events))
+	}
+}
+
+// A genuine store failure (not a concurrency conflict) must still surface as
+// an error rather than being swallowed as a loss.
+func TestClaimSurfacesNonConflictErrors(t *testing.T) {
+	t.Parallel()
+
+	store := eventstore.NewMemoryStore()
+	ctx := context.Background()
+
+	// A negative expectedSeq is rejected by validateWrites, not by the
+	// concurrency check — Claim must not mistake this for a lost race.
+	won, err := eventstore.Claim(ctx, store, "holder", uniqueID(t), -1, &pb.HolderEstablished{Id: "x"})
+	if err == nil {
+		t.Fatal("Claim() error = nil, want an error for a negative expectedSeq")
+	}
+	if errors.Is(err, eventstore.ErrConcurrencyConflict) {
+		t.Fatal("Claim() wrapped a validation error as ErrConcurrencyConflict")
+	}
+	if won {
+		t.Fatal("Claim() won = true alongside a non-nil error")
+	}
+}
+
 func TestMemoryStore(t *testing.T) {
 	t.Parallel()
 

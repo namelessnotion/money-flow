@@ -27,3 +27,11 @@ go/.tools/
 # container's self-signed placeholder fallback — both are machine-specific.
 docker/proxy/certs/*
 !docker/proxy/certs/.gitkeep
+
+# `go build ./cmd/<name>` run from go/ drops the binary in go/ itself.
+# Anchored so the go/cmd/<name>/ source directories stay tracked.
+/go/events
+/go/migrate
+/go/orchestrator
+/go/server
+/go/simulate

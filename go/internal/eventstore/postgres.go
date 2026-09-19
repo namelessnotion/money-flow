@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -118,4 +119,17 @@ func (s *PostgresStore) Load(ctx context.Context, aggregateType, aggregateID str
 		events = append(events, e)
 	}
 	return events, rows.Err()
+}
+
+// Now asks Postgres for its own now() rather than reading the Go process's
+// clock, so it stays on the same clock occurred_at (DEFAULT now(), see
+// go/db/migrations/00001_create_events.up.sql) was stamped with — the two
+// can drift otherwise, and a caller comparing an event's age across them
+// would be comparing two different clocks without knowing it.
+func (s *PostgresStore) Now(ctx context.Context) (time.Time, error) {
+	var now time.Time
+	if err := s.pool.QueryRow(ctx, `SELECT now()`).Scan(&now); err != nil {
+		return time.Time{}, fmt.Errorf("eventstore: now: %w", err)
+	}
+	return now, nil
 }

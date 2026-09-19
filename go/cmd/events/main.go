@@ -110,7 +110,7 @@ func startingPoint(ctx context.Context, src source, from, last int64, followID s
 		return from, nil
 	}
 	if last == 0 && followID != "" {
-		first, err := src.first(ctx, followID)
+		first, err := src.first(ctx, "transaction", followID)
 		return first - 1, err
 	}
 	head, err := src.head(ctx)

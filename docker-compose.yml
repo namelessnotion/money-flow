@@ -63,15 +63,7 @@ services:
   # Ruby's read-model consumer (ruby/bin/consumer, ruby/docs/adr/0001 and
   # 0002, 0005): folds transfer-events, transaction-events and token-events into
   # the projection tables in money_flow_dev. Same image as `ruby`, different command.
-  #
-  # Under the `cdc` profile, so `docker compose up -d` does not start it: it
-  # only sees anything once docker/cdc/setup.sh has registered the connector.
-  # Start it with `make cdc-up consumer-up`; see docs/ach-transactions.md. It
-  # exits non-zero on a message it cannot project, leaving it uncommitted,
-  # and is deliberately not restarted: a restart would only halt on the same
-  # message again.
   ruby-consumer:
-    profiles: ["cdc"]
     build:
       context: .
       dockerfile: docker/ruby/Dockerfile
@@ -126,7 +118,6 @@ services:
   # volume: nothing durable lives here. The ACH clearing schedule is a
   # recurring sweep, so losing Redis loses no clearing; the next run finds it.
   redis:
-    profiles: ["cdc"]
     image: redis:7-alpine
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -138,7 +129,6 @@ services:
   # originates clearing Transactions in Go. Same image as `ruby`. Under the
   # `cdc` profile because it clears from the read model the consumer builds.
   resque-worker:
-    profiles: ["cdc"]
     build:
       context: .
       dockerfile: docker/ruby/Dockerfile
@@ -162,7 +152,6 @@ services:
   # ruby/config/resque_schedule.yml (the ACH clearing sweep, hourly on
   # weekdays, Eastern time) for resque-worker to run.
   resque-scheduler:
-    profiles: ["cdc"]
     build:
       context: .
       dockerfile: docker/ruby/Dockerfile
@@ -202,10 +191,16 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
       # More than one partition on purpose: ADR 0001 decision 4 partitions by
       # aggregate_id, and a single-partition topic would make that claim
-      # unfalsifiable.
-      KAFKA_NUM_PARTITIONS: "3"
+      # unfalsifiable. Bumped 3->6 2026-09-19 as a throughput experiment
+      # (more partitions + more cmd/orchestrator replicas); revert to 3 if
+      # it doesn't earn its keep.
+      KAFKA_NUM_PARTITIONS: "6"
     healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1",
+        ]
       interval: 5s
       timeout: 10s
       retries: 20
@@ -249,13 +244,7 @@ services:
   # 0003). It consumes transfer-events and transaction-events and drives the
   # sagas forward, running alongside the synchronous dispatch in `go` rather
   # than replacing it.
-  #
-  # Under the `cdc` profile, so `docker compose up -d` does not start it: it is
-  # only meaningful once docker/cdc/setup.sh has registered the connector that
-  # publishes money_flow_dev. Start it with `make orchestrator-up`, and see
-  # docs/saga-orchestrator.md for the walkthrough.
   orchestrator:
-    profiles: ["cdc"]
     build:
       context: .
       dockerfile: docker/go/Dockerfile

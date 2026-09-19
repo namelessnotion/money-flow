@@ -135,6 +135,21 @@ RSpec.describe Consumer::Projector do
       expect(row.reason).to be_nil
       expect(row.last_sequence).to eq(2)
     end
+
+    # go/docs/adr/0005: a dispatch claim marker lands between TransferPrepared
+    # and the step's outcome, and Go's own fold ignores it.
+    it 'keeps the state across a dispatch claim marker, then follows the outcome' do
+      projector.apply(transfer_event(Transfer::V1::TransferRequestAccepted.new(id: transfer_id), 1))
+      projector.apply(transfer_event(Transfer::V1::TransferPrepared.new(id: transfer_id), 2))
+      projector.apply(transfer_event(Transfer::V1::StagingTransferStarted.new(id: transfer_id), 3))
+
+      row = Models::TransferProjection[transfer_id]
+      expect(row.state).to eq('prepared')
+      expect(row.last_sequence).to eq(3)
+
+      projector.apply(transfer_event(Transfer::V1::TransferStaged.new(id: transfer_id), 4))
+      expect(Models::TransferProjection[transfer_id].state).to eq('staged')
+    end
   end
 
   # With snapshot.mode=no_data, the first event Ruby sees for an aggregate that

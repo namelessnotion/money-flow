@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/twitchtv/twirp"
 	"google.golang.org/protobuf/proto"
@@ -314,4 +315,8 @@ func (s *failingStore) AppendAtomic(context.Context, ...eventstore.StreamWrite) 
 
 func (s *failingStore) Load(context.Context, string, string) ([]eventstore.Event, error) {
 	return nil, s.err
+}
+
+func (s *failingStore) Now(context.Context) (time.Time, error) {
+	return time.Time{}, s.err
 }

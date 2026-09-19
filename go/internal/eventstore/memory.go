@@ -106,6 +106,17 @@ func (s *MemoryStore) Load(ctx context.Context, aggregateType, aggregateID strin
 	return append([]Event(nil), stream...), nil
 }
 
+// Now returns the Go process's own clock: MemoryStore stamps Event.OccurredAt
+// with time.Now().UTC() in AppendAtomic, so comparing against the same clock
+// here is self-consistent by construction — unlike PostgresStore, there is no
+// second clock to drift against.
+func (s *MemoryStore) Now(ctx context.Context) (time.Time, error) {
+	if err := ctx.Err(); err != nil {
+		return time.Time{}, err
+	}
+	return time.Now().UTC(), nil
+}
+
 // streamKey uses a NUL separator so it can't collide with an aggregateType
 // containing the separator character.
 func streamKey(aggregateType, aggregateID string) string {

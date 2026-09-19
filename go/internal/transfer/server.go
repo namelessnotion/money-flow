@@ -80,6 +80,19 @@ func (s *Server) tryAppend(ctx context.Context, transferID string, expectedSeq i
 	}
 }
 
+// sagaStepError maps an error from a claimed saga step (commit,
+// cancelStaged, cancelPrepared) to the RPC response: a refused takeover of
+// another transition's abandoned claim (errAbandonedClaim, go/docs/adr/0005)
+// keeps its FailedPrecondition so the client knows the Transfer is waiting
+// on that other transition, not that the server failed; anything else is
+// Internal, as before.
+func sagaStepError(err error) error {
+	if errors.Is(err, errAbandonedClaim) {
+		return err
+	}
+	return twirp.InternalErrorWith(err)
+}
+
 // logSagaError reports a runSaga failure that was deliberately not surfaced
 // to the RPC caller (the Accepted/Rejected response is already decided by
 // the time runSaga runs — decision #5/#7). This is only ever a genuinely
@@ -237,29 +250,49 @@ func (s *Server) CancelAcceptedTransfer(ctx context.Context, req *pb.CancelAccep
 		return nil, err
 	}
 
-	events, err := s.store.Load(ctx, AggregateType, req.GetId())
-	if err != nil {
-		return nil, twirp.InternalErrorWith(err)
-	}
-	if len(events) == 0 {
-		return nil, twirp.NewError(twirp.NotFound, fmt.Sprintf("transfer %q not found", req.GetId()))
-	}
-	switch currentState(events) {
-	case stateAccepted, statePrepared, stateCancelled:
-	default:
-		return nil, twirp.NewError(twirp.FailedPrecondition,
-			fmt.Sprintf("transfer %q cannot be cancelled from its current state", req.GetId()))
-	}
+	for attempt := 0; attempt < maxConcurrencyAttempts; attempt++ {
+		events, err := s.store.Load(ctx, AggregateType, req.GetId())
+		if err != nil {
+			return nil, twirp.InternalErrorWith(err)
+		}
+		if len(events) == 0 {
+			return nil, twirp.NewError(twirp.NotFound, fmt.Sprintf("transfer %q not found", req.GetId()))
+		}
 
-	if err := s.cancelPrepared(ctx, req.GetId(), req.GetReason()); err != nil {
-		return nil, twirp.InternalErrorWith(err)
+		switch currentState(events) {
+		case stateCancelled:
+			return acceptedTransferCancelledResponse(req.GetId(), req.GetReason()), nil
+		case stateAccepted, statePrepared:
+			if err := s.cancelPrepared(ctx, req.GetId(), req.GetReason()); err != nil {
+				return nil, sagaStepError(err)
+			}
+			events, err = s.store.Load(ctx, AggregateType, req.GetId())
+			if err != nil {
+				return nil, twirp.InternalErrorWith(err)
+			}
+			if currentState(events) == stateCancelled {
+				return acceptedTransferCancelledResponse(req.GetId(), req.GetReason()), nil
+			}
+			// cancelPrepared()'s claim (go/docs/adr/0005) was lost to a
+			// concurrent caller — possibly one that staged or committed
+			// instead. Reload and re-decide rather than assuming
+			// cancellation landed.
+			continue
+		default:
+			return nil, twirp.NewError(twirp.FailedPrecondition,
+				fmt.Sprintf("transfer %q cannot be cancelled from its current state", req.GetId()))
+		}
 	}
+	return nil, abortedRetry(req.GetId())
+}
+
+func acceptedTransferCancelledResponse(transferID, reason string) *pb.CancelAcceptedTransferResponse {
 	return &pb.CancelAcceptedTransferResponse{
-		Id: req.GetId(),
+		Id: transferID,
 		Result: &pb.CancelAcceptedTransferResponse_AcceptedTransferCancelled{
-			AcceptedTransferCancelled: &pb.AcceptedTransferCancelled{Id: req.GetId(), Reason: req.GetReason()},
+			AcceptedTransferCancelled: &pb.AcceptedTransferCancelled{Id: transferID, Reason: reason},
 		},
-	}, nil
+	}
 }
 
 // RequestReversal accepts or rejects a reversal of transfer_id, recording
@@ -441,9 +474,19 @@ func (s *Server) CancelStagedTransfer(ctx context.Context, req *pb.CancelStagedT
 		switch state := currentState(events); state {
 		case stateStaged, statePending:
 			if err := s.cancelStaged(ctx, req.GetId(), req.GetReason()); err != nil {
+				return nil, sagaStepError(err)
+			}
+			events, err = s.store.Load(ctx, AggregateType, req.GetId())
+			if err != nil {
 				return nil, twirp.InternalErrorWith(err)
 			}
-			return transferCancelledResponse(req.GetId(), req.GetReason()), nil
+			if currentState(events) == stateCancelled {
+				return transferCancelledResponse(req.GetId(), req.GetReason()), nil
+			}
+			// cancelStaged()'s claim (go/docs/adr/0005) was lost to a
+			// concurrent caller — possibly one that committed instead.
+			// Reload and re-decide rather than assuming cancellation landed.
+			continue
 		case stateCancelled:
 			return transferCancelledResponse(req.GetId(), req.GetReason()), nil
 		default:
@@ -508,18 +551,25 @@ func (s *Server) PostPendingTransfer(ctx context.Context, req *pb.PostPendingTra
 		switch state := currentState(events); state {
 		case statePending:
 			if err := s.commit(ctx, req.GetId()); err != nil {
-				return nil, twirp.InternalErrorWith(err)
+				return nil, sagaStepError(err)
 			}
 			events, err = s.store.Load(ctx, AggregateType, req.GetId())
 			if err != nil {
 				return nil, twirp.InternalErrorWith(err)
 			}
-			if currentState(events) == stateFailed {
+			switch currentState(events) {
+			case stateCommitted:
+				return postPendingCommittedResponse(req.GetId(), events)
+			case stateFailed:
 				return nil, twirp.NewError(twirp.Internal, fmt.Sprintf(
 					"transfer %q: tigerbeetle rejected posting; see TransferFailed in the event log", req.GetId(),
 				))
+			default:
+				// Still pending: commit()'s claim (go/docs/adr/0005) was lost
+				// to a concurrent caller who hasn't finished yet. Reload and
+				// retry rather than assuming an outcome that hasn't landed.
+				continue
 			}
-			return postPendingCommittedResponse(req.GetId(), events)
 		case stateCommitted:
 			return postPendingCommittedResponse(req.GetId(), events)
 		default:

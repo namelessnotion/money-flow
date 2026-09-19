@@ -63,7 +63,15 @@ module Consumer
         # the stream, but leaves the Transfer where it was.
         'transfer.v1.ConfirmStagedTransferRejected' => nil,
         'transfer.v1.CancelStagedTransferRejected' => nil,
-        'transfer.v1.PostPendingTransferRejected' => nil
+        'transfer.v1.PostPendingTransferRejected' => nil,
+        # Dispatch claim markers (go/docs/adr/0005): appended before a
+        # side-effecting saga step so only one caller performs it. Go's own
+        # currentState ignores them; the outcome event that follows moves the
+        # state.
+        'transfer.v1.StagingTransferStarted' => nil,
+        'transfer.v1.TransferCommittingStarted' => nil,
+        'transfer.v1.CancellingStagedTransferStarted' => nil,
+        'transfer.v1.CancellingPreparedTransferStarted' => nil
       }.freeze,
       T::Hash[String, T.nilable(TransferState)]
     )

@@ -424,3 +424,84 @@ func TestOrchestrator_ConcurrentTriggersOnOneTransactionConverge(t *testing.T) {
 		t.Errorf("state = %v, want COMPLETED: concurrent appends must converge", got)
 	}
 }
+
+// TestOrchestrator_ConcurrentDispatchOfTheSameReadyChildConverges checks the
+// transaction-side half of go/docs/adr/0005's question: requestChildTransfer
+// (dispatchReady's per-child call) has no claim of its own, unlike
+// transfer.Server's stage()/commit()/etc. This is deliberate, not an
+// oversight — verified here rather than only argued in the ADR. Two
+// concurrent drivers reaching dispatchReady for the same freshly-initialized
+// Transaction both see the same ready child and both call
+// transfer.RequestTransfer for it, but that's safe by composition: transfer.
+// RequestTransfer is itself idempotent by transferID (and, after this
+// decision's transfer-side fix, its own stage()/commit() converge under
+// concurrent entry too), and transaction's own appendSagaStep dedupes by
+// (event type, transfer_id) across the whole stream, not just its tail — so
+// both callers recording the same child's outcome converge without a
+// separate claim being needed here.
+func TestOrchestrator_ConcurrentDispatchOfTheSameReadyChildConverges(t *testing.T) {
+	t.Parallel()
+	w, txnID, realID, _ := achDeposit(t)
+
+	barrier := newAppendBarrier(transaction.AggregateType, txnID, 2)
+	w.store.barrier = barrier
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = w.deliver(transaction.AggregateType, txnID)
+		}(i)
+	}
+	wg.Wait()
+	w.store.barrier = nil
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("concurrent delivery %d error = %v", i, err)
+		}
+	}
+	if !barrier.tripped() {
+		t.Fatal("the two handlers never wrote to the Transaction's stream at the same time; the race was not provoked")
+	}
+	if _, conflicts := w.store.counts(); conflicts == 0 {
+		t.Error("no optimistic-concurrency conflict occurred; the test proved nothing about the retry")
+	}
+
+	events, err := w.store.Load(context.Background(), transaction.AggregateType, txnID)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	recorded := 0
+	for _, e := range events {
+		if e.EventType != "transaction.v1.TransferRequestedWithinTransaction" && e.EventType != "transaction.v1.TransferFailedWithinTransaction" {
+			continue
+		}
+		msg, err := e.Decode()
+		if err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		var childID string
+		switch m := msg.(type) {
+		case *transactionpb.TransferRequestedWithinTransaction:
+			childID = m.GetTransferId()
+		case *transactionpb.TransferFailedWithinTransaction:
+			childID = m.GetTransferId()
+		}
+		if childID == realID {
+			recorded++
+		}
+	}
+	if recorded != 1 {
+		t.Errorf("%d events recorded %s's dispatch outcome, want exactly 1", recorded, realID)
+	}
+
+	// The underlying Transfer itself must also have converged cleanly
+	// (staged, per achDeposit's realID spec) rather than having hit the
+	// transfer-side contradiction this whole decision exists to prevent.
+	if outcome, err := transfer.Outcome(context.Background(), w.store, realID); err != nil || outcome != transfer.OutcomeStaged {
+		t.Errorf("transfer.Outcome(%s) = (%v, %v), want (OutcomeStaged, nil)", realID, outcome, err)
+	}
+}

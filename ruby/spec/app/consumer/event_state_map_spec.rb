@@ -4,10 +4,12 @@ require 'spec_helper'
 
 RSpec.describe Consumer::EventStateMap do
   # Messages in the proto packages that are never appended to an event stream:
-  # the Start*/*Started/Complete* triplets Go deliberately does not emit
+  # the Start*/Complete* commands and the *Started events Go does not emit
   # (go/internal/transfer/saga.go, currentState), and value types nested in
-  # other messages. Requests and responses are excluded by name below. Anything
-  # else in the package is an event, and must be mapped.
+  # other messages. The four *Started events Go does append, as dispatch claim
+  # markers (go/docs/adr/0005), are events and must be mapped. Requests and
+  # responses are excluded by name below. Anything else in the package is an
+  # event, and must be mapped.
   let(:not_events) do
     %w[
       transaction.v1.Transfer
@@ -19,19 +21,15 @@ RSpec.describe Consumer::EventStateMap do
       transfer.v1.PreparingTransferStarted
       transfer.v1.CompletePreparingTransfer
       transfer.v1.StartCancellingPreparedTransfer
-      transfer.v1.CancellingPreparedTransferStarted
       transfer.v1.CompleteCancellingPreparedTransfer
       transfer.v1.StartCompensatingFailedTransfer
       transfer.v1.FailedTransferCompensationStarted
       transfer.v1.CompleteCompensatingFailedTransfer
       transfer.v1.StartCommittingTransfer
-      transfer.v1.TransferCommittingStarted
       transfer.v1.CommitTransfer
       transfer.v1.StartStagingTransfer
-      transfer.v1.StagingTransferStarted
       transfer.v1.CompleteStagingTransfer
       transfer.v1.StartCancellingStagedTransfer
-      transfer.v1.CancellingStagedTransferStarted
       transfer.v1.CompleteCancellingStagedTransfer
     ]
   end
@@ -89,6 +87,19 @@ RSpec.describe Consumer::EventStateMap do
         described_class.transition(aggregate_type: 'transaction',
                                    event_type: 'transaction.v1.TransferRequestedWithinTransaction')
       ).to be_nil
+    end
+
+    it 'leaves the state unchanged on a dispatch claim marker' do
+      # go/docs/adr/0005: Go appends these before a side-effecting saga step;
+      # its own currentState ignores them, and so must the projection.
+      %w[
+        transfer.v1.StagingTransferStarted
+        transfer.v1.TransferCommittingStarted
+        transfer.v1.CancellingStagedTransferStarted
+        transfer.v1.CancellingPreparedTransferStarted
+      ].each do |event_type|
+        expect(described_class.transition(aggregate_type: 'transfer', event_type: event_type)).to be_nil
+      end
     end
 
     it 'fails loudly on an unmapped event type rather than skipping it' do
