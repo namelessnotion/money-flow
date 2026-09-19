@@ -35,6 +35,13 @@ RSpec.describe Services::Ach::Progress do
              'settlement' => 'skipped', 'completion' => 'skipped', 'rollback' => 'done')
   end
 
+  it 'fails initiation and skips everything else when Go rejects an underfunded withdrawal outright, ' \
+     'with no rollback step at all — nothing was ever started to roll back (go/docs/adr/0004)' do
+    expect(steps(direction: 'withdrawal', submitted: false, state: 'rejected'))
+      .to eq('initiation' => 'failed', 'funding' => 'skipped', 'submission' => 'skipped',
+             'settlement' => 'skipped', 'completion' => 'skipped')
+  end
+
   it 'waits on the rollback of a returned withdrawal until its funding is reversed' do
     expect(steps(direction: 'withdrawal', state: 'rollback_started', real_leg_state: 'cancelled',
                  shadow_leg_state: 'committed'))

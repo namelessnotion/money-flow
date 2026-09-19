@@ -24,8 +24,10 @@ once the real leg has posted. On a withdrawal it runs first: see *Funding*.
 
 **Funding**
 A withdrawal's shadow leg, which moves its amount out of cleared cash into bank control before the real leg
-is even staged. Without enough cleared cash it is refused, and the withdrawal is rolled back before anything
-reaches the provider ([ADR 0004](docs/adr/0004-ach-withdrawal-funds-before-it-leaves.md)).
+is even staged. Without enough cleared cash the whole Transaction is refused outright before anything reaches
+the provider — Go catches the common case in its own accept/reject decision, before writing anything, so
+nothing is ever started to roll back ([ADR 0004](docs/adr/0004-ach-withdrawal-funds-before-it-leaves.md);
+[go ADR 0004](../go/docs/adr/0004-transaction-accept-time-funding-preflight.md)).
 
 **Submission**
 Handing the entry to the ACH provider. Once the provider holds it, the staged real leg is confirmed, and it

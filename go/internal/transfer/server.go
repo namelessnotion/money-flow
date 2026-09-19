@@ -219,6 +219,16 @@ func rejectedTransferResponse(r *pb.TransferRequestRejected) *pb.RequestTransfer
 	return &pb.RequestTransferResponse{Id: r.GetId(), Result: &pb.RequestTransferResponse_TransferRequestRejected{TransferRequestRejected: r}}
 }
 
+// WouldAcceptTransfer exposes the package-level WouldAcceptTransfer as a
+// method, over this Server's own store/ledger/isOpen, so transaction.Server
+// can call it in-process exactly the way it already calls RequestTransfer —
+// without transaction.Server ever needing a ledger.Client of its own.
+func (s *Server) WouldAcceptTransfer(
+	ctx context.Context, walletID string, amount *sharedpb.Money, callingTransactionID string,
+) (*pb.TransferRequestRejected, error) {
+	return WouldAcceptTransfer(ctx, s.store, s.ledger, s.isOpen, walletID, amount, callingTransactionID)
+}
+
 // CancelAcceptedTransfer abandons a Transfer that hasn't been staged or
 // committed yet — legal from Accepted or Prepared. Already-cancelled is an
 // idempotent no-op; any later state is refused.

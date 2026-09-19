@@ -2,9 +2,13 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-18
-- **Scope:** `ruby/` context only. Go runs whatever transfer DAG it is sent and is unchanged.
+- **Scope:** `ruby/` context primarily — the DAG shape (decision 1) and the request/response contract Ruby relies
+  on (decision 2) are decided here. [go/docs/adr/0004](../../../go/docs/adr/0004-transaction-accept-time-funding-preflight.md)
+  (2026-09-19) later changed *how* Go arrives at that contract for the common case; it does not change what
+  Ruby depends on, and is scoped there rather than amended into this one.
 - **See also:** [ADR 0003](0003-ach-clearing-as-a-scheduled-sweep.md);
-  [go ADR 0002](../../../go/docs/adr/0002-asynchronous-rollback-and-reversal-reconciliation.md).
+  [go ADR 0002](../../../go/docs/adr/0002-asynchronous-rollback-and-reversal-reconciliation.md);
+  [go ADR 0004](../../../go/docs/adr/0004-transaction-accept-time-funding-preflight.md).
 
 ## Context
 
@@ -24,17 +28,26 @@ indefinitely. Two did in development (`ACH E2E`, `ItsAlive`).
    cash moves to bank control first; that step is called **funding**. A shortfall refuses the shadow leg, and
    Go rolls the Transaction back with nothing yet moved across the bank boundary. Deposits keep v1: their
    shadow leg still waits for the real leg, so uncleared cash is only minted for money that arrived.
-2. **`Initiate` asks Go how the Transaction stands before submitting to the provider.** Go runs non-staged legs
-   synchronously inside `StartInitializingTransaction`, so one `ResumeTransaction` afterwards is definitive:
-   `STARTED` means funded with the real leg staged; anything else is refused with Go's reason and the entry is
-   never submitted.
+2. **`Initiate` asks Go how the Transaction stands before submitting to the provider.** `start_transaction`
+   itself now catches the common shortfall — [go/docs/adr/0004](../../../go/docs/adr/0004-transaction-accept-time-funding-preflight.md)
+   has Go reject an unfundable withdrawal in its own accept/reject decision, before writing anything — but
+   `Initiate` still calls `ResumeTransaction` once afterward regardless, and that call remains the one thing
+   that is actually definitive: `STARTED` means funded with the real leg staged; anything else is refused with
+   Go's reason and the entry is never submitted. Both checks exist for the same guarantee; the second is what
+   makes it hold even in the residual case where the first passed but the real, unchanged dispatch that follows
+   it disagrees moments later.
 3. **A rolled-back withdrawal undoes its funding with an ordinary reversal.** The shadow leg is not staged, so
    neither is its reversal: after a return, the rollback completes in the same call.
 
 ## Consequences
 
-- A withdrawal an entity cannot cover fails at `initiateAchWithdrawal` with a GraphQL error, and its record
-  shows `FUNDING` failed and `ROLLBACK` done.
+- A withdrawal an entity cannot cover fails at `initiateAchWithdrawal` with a GraphQL error. Since
+  [go/docs/adr/0004](../../../go/docs/adr/0004-transaction-accept-time-funding-preflight.md), the common case
+  never starts at all: Go rejects the Transaction outright, and its record shows `INITIATION` failed with
+  everything after it — including `FUNDING` — `SKIPPED`, and no rollback step (nothing was ever started to roll
+  back). The original shape this decision shipped with — `FUNDING` failed, `ROLLBACK` done — is still reachable
+  for the residual race `ResumeTransaction` (decision 2) exists to catch, where Go's own pre-check passed but
+  the real dispatch that follows it disagrees moments later.
 - Cleared cash is held in bank control for as long as the ACH entry is outstanding, so it cannot fund a second
   withdrawal in the meantime.
 - A staged reversal can still arise, from reversing a *deposit's* committed real leg, which only happens if a

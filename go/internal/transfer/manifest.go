@@ -98,6 +98,28 @@ func selectSourceTokens(
 	return legs, nil, nil
 }
 
+// WouldAcceptTransfer reports whether an ordinary (non-mint_source)
+// RequestTransfer for walletID/amount, tagged with callingTransactionID,
+// would be accepted right now — without writing anything. It is exactly the
+// read-only decision RequestTransfer itself makes before ever appending
+// TransferRequestAccepted (see selectSourceTokens above), discarding only
+// the picked []Leg breakdown that RequestTransfer needs and this caller
+// doesn't.
+//
+// This is NOT a reservation: nothing here locks or consumes the balance it
+// reads, so a concurrent, unrelated debit against the same wallet between
+// this call and the real dispatch that follows can still change the
+// answer. Callers must treat a nil rejection here as "usually right," never
+// as a substitute for whatever check the real dispatch performs on its
+// own — see go/docs/adr/0004.
+func WouldAcceptTransfer(
+	ctx context.Context, store eventstore.Store, lc ledger.Client, isOpen wallet.TransactionOpenChecker,
+	walletID string, amount *sharedpb.Money, callingTransactionID string,
+) (*pb.TransferRequestRejected, error) {
+	_, rejection, err := selectSourceTokens(ctx, store, lc, walletID, amount, callingTransactionID, isOpen)
+	return rejection, err
+}
+
 // planDestinations decides how many new destination Tokens to mint for a
 // forward Transfer and how the amount splits across them, generating a
 // fresh id for each.

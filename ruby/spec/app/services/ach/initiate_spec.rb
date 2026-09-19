@@ -51,9 +51,11 @@ RSpec.describe Services::Ach::Initiate do
     end
   end
 
-  context 'when Go rolls the Transaction back before submission' do
-    # A withdrawal moves cleared cash first; without enough, that leg is
-    # refused and Go rolls the Transaction back inside the start call.
+  context 'when Go rejects the Transaction for an underfunded withdrawal' do
+    # A withdrawal funds itself from cleared cash first; without enough, Go's
+    # own accept/reject decision refuses the whole Transaction before any
+    # event exists (go/docs/adr/0004) — the same shape as any other
+    # structural rejection, just discovered a little later than a DAG error.
     let(:request) do
       InitiateAchRequest.new(entity_id: entity.id, direction: Types::Enums::AchDirection::Withdrawal,
                              amount_minor_units: 10_000)
@@ -62,8 +64,12 @@ RSpec.describe Services::Ach::Initiate do
     before do
       allow(provider).to receive(:submit).and_call_original
       stub_go_happy_path
-      allow(transaction_client).to receive(:resume_transaction) do |req|
-        rolled_back(req.id, 'wallet "w" has insufficient Token capacity: 10000 USD short')
+      allow(transaction_client).to receive(:start_initializing_transaction) do |req|
+        rejected = Transaction::V1::TransactionRejected.new(
+          id: req.id,
+          reason: 'transfer "shadow" (wallet "w"): wallet "w" has insufficient Token capacity: 10000 USD short'
+        )
+        twirp_ok(Transaction::V1::StartInitializingTransactionResponse.new(id: req.id, transaction_rejected: rejected))
       end
     end
 
@@ -75,7 +81,13 @@ RSpec.describe Services::Ach::Initiate do
       expect(transfer_client).not_to have_received(:confirm_staged_transfer)
     end
 
-    it 'keeps the intent, whose projection will show it rolled back' do
+    it 'never asks Go to resume — the rejection from start_transaction is already definitive' do
+      expect { service.call(request: request) }.to raise_error(Services::Ach::Refused)
+
+      expect(transaction_client).not_to have_received(:resume_transaction)
+    end
+
+    it 'keeps the intent, whose projection will show it rejected' do
       expect { service.call(request: request) }.to raise_error(Services::Ach::Refused)
 
       expect(Models::AchTransaction.where(entity_id: entity.id).count).to eq(1)
@@ -100,7 +112,11 @@ RSpec.describe Services::Ach::Initiate do
     end
 
     it 'raises the reason, keeping the intent the rejection belongs to' do
-      expect { service.call(request: request) }.to raise_error(Services::Ach::Refused, 'policy')
+      # Wrapped with the same "before any money moved" framing every
+      # start_transaction-time rejection gets — accurate for any reason,
+      # since nothing has moved yet regardless of why Go refused.
+      expect { service.call(request: request) }
+        .to raise_error(Services::Ach::Refused, 'refused before any money moved: policy')
 
       expect(Models::AchTransaction.where(entity_id: entity.id).count).to eq(1)
       expect(transfer_client).not_to have_received(:confirm_staged_transfer)

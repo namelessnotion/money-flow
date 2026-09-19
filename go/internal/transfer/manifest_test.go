@@ -247,3 +247,68 @@ func TestSelectSourceTokens_OneLookupForTheWholeWallet(t *testing.T) {
 		t.Errorf("Balances called %d times, want 1", lc.balanceCalls)
 	}
 }
+
+func TestWouldAcceptTransfer_AcceptsWhenFunded(t *testing.T) {
+	t.Parallel()
+	store := eventstore.NewMemoryStore()
+	lc := ledger.NewFakeClient()
+	openWallet(t, store, testutil.ID("w1"), sharedpb.Allows_ALLOWS_ONRAMP_AND_OFFRAMP)
+	mintToken(t, store, lc, testutil.ID("w1"), testutil.ID("t1"), usd(1000))
+	fundToken(t, lc, testutil.ID("t1"), 1000)
+
+	rejection, err := WouldAcceptTransfer(context.Background(), store, lc, nil, testutil.ID("w1"), usd(400), "")
+	if err != nil {
+		t.Fatalf("WouldAcceptTransfer() error = %v", err)
+	}
+	if rejection != nil {
+		t.Fatalf("rejection = %v, want none", rejection)
+	}
+}
+
+func TestWouldAcceptTransfer_RejectsWhenUnderfunded(t *testing.T) {
+	t.Parallel()
+	store := eventstore.NewMemoryStore()
+	lc := ledger.NewFakeClient()
+	openWallet(t, store, testutil.ID("w1"), sharedpb.Allows_ALLOWS_ONRAMP_AND_OFFRAMP)
+	mintToken(t, store, lc, testutil.ID("w1"), testutil.ID("t1"), usd(100))
+	fundToken(t, lc, testutil.ID("t1"), 100)
+
+	rejection, err := WouldAcceptTransfer(context.Background(), store, lc, nil, testutil.ID("w1"), usd(400), "")
+	if err != nil {
+		t.Fatalf("WouldAcceptTransfer() error = %v", err)
+	}
+	if rejection == nil {
+		t.Fatal("rejection = nil, want a rejection for an underfunded wallet")
+	}
+}
+
+// TestWouldAcceptTransfer_DoesNotMutateAnything is the load-bearing proof
+// this check is genuinely side-effect-free: calling it never consumes or
+// reserves anything, so a real RequestTransfer against the same wallet
+// immediately afterward behaves exactly as if the check had never run.
+func TestWouldAcceptTransfer_DoesNotMutateAnything(t *testing.T) {
+	t.Parallel()
+	store := eventstore.NewMemoryStore()
+	lc := ledger.NewFakeClient()
+	openWallet(t, store, testutil.ID("w1"), sharedpb.Allows_ALLOWS_ONRAMP_AND_OFFRAMP)
+	openWallet(t, store, testutil.ID("w2"), sharedpb.Allows_ALLOWS_ONRAMP_AND_OFFRAMP)
+	mintToken(t, store, lc, testutil.ID("w1"), testutil.ID("t1"), usd(1000))
+	fundToken(t, lc, testutil.ID("t1"), 1000)
+
+	for i := 0; i < 3; i++ {
+		if rejection, err := WouldAcceptTransfer(context.Background(), store, lc, nil, testutil.ID("w1"), usd(400), ""); err != nil || rejection != nil {
+			t.Fatalf("WouldAcceptTransfer() call %d = rejection=%v err=%v, want accepted every time", i, rejection, err)
+		}
+	}
+
+	s := NewServer(store, lc, nil, nil)
+	resp, err := s.RequestTransfer(context.Background(), &pb.RequestTransferRequest{
+		Id: testutil.ID("xfer1"), FromWalletId: testutil.ID("w1"), ToWalletId: testutil.ID("w2"), Amount: usd(400),
+	})
+	if err != nil {
+		t.Fatalf("RequestTransfer() error = %v", err)
+	}
+	if resp.GetTransferRequestAccepted() == nil {
+		t.Fatalf("result = %v, want TransferRequestAccepted — the repeated dry-run checks above must not have consumed anything", resp.GetResult())
+	}
+}

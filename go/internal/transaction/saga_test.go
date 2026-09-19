@@ -159,6 +159,17 @@ func TestTransaction2_SingleNodeClearingHappyPath(t *testing.T) {
 // that the deposit direction didn't exercise is Bank Control's own
 // ALLOWS_ONRAMP_AND_OFFRAMP policy (decision #11) accepting its first-ever
 // credit without a TigerBeetle rejection.
+//
+// This test's dependency direction (shadow depends on real) predates
+// ruby/docs/adr/0004: Ruby's TransactionShape now sends the opposite
+// wiring (real depends on shadow — funding happens first) so an
+// underfunded withdrawal is caught before the real leg ever reaches the
+// provider. server_test.go's achWithdrawalDAG/TestStartInitializingTransaction_*
+// tests use that current (v2) shape. This test is left as-is: it still
+// legitimately proves the DAG mechanism is symmetric regardless of
+// direction, it's just no longer literally what Ruby configures today.
+// The new accept-time pre-check (go/docs/adr/0004, transaction package) is
+// a no-op here either way, since both legs are funded.
 func TestACHWithdrawal_SymmetricFlowNeedsNoNewMechanism(t *testing.T) {
 	t.Parallel()
 	store := eventstore.NewMemoryStore()

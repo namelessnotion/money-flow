@@ -39,8 +39,7 @@ module Services
         shape = plan(request)
         ach = perform { record_intent(request, shape) }
 
-        @go.start_transaction(shape.start_request(transaction_id: ach.id,
-                                                  amount_minor_units: ach.amount_minor_units))
+        start_transaction!(shape, ach)
         require_running!(ach)
         submit(ach, shape)
         ach
@@ -48,8 +47,24 @@ module Services
 
       private
 
+      # Go's own accept/reject decision (go/docs/adr/0004) now catches the
+      # common underfunded-withdrawal case here, before any event exists —
+      # not just a malformed DAG. Re-wraps GoGateway's bare refusal with the
+      # same framing require_running!'s own, rarer catch uses below, so the
+      # message a caller sees doesn't depend on which of the two checks
+      # caught it.
+      sig { params(shape: TransactionShape, ach: Models::AchTransaction).void }
+      def start_transaction!(shape, ach)
+        @go.start_transaction(shape.start_request(transaction_id: ach.id, amount_minor_units: ach.amount_minor_units))
+      rescue Refused => e
+        raise Refused, "refused before any money moved: #{e.message}"
+      end
+
       # Nothing has left the platform yet, so a Transaction Go did not keep
-      # running is simply refused.
+      # running is simply refused. This is the only thing that ever learns
+      # the real dispatch's actual outcome — start_transaction!'s own
+      # response is built before Go's saga runs, so it can catch the common
+      # case early but can never be the last word (go/docs/adr/0004).
       sig { params(ach: Models::AchTransaction).void }
       def require_running!(ach)
         outcome = @go.resume(ach.id)

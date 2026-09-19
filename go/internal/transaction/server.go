@@ -13,6 +13,7 @@ import (
 	"github.com/twitchtv/twirp"
 	"google.golang.org/protobuf/proto"
 
+	sharedpb "github.com/namelessnotion/money_flow/go/gen/proto/shared/v1"
 	pb "github.com/namelessnotion/money_flow/go/gen/proto/transaction/v1"
 	transferpb "github.com/namelessnotion/money_flow/go/gen/proto/transfer/v1"
 	"github.com/namelessnotion/money_flow/go/internal/eventstore"
@@ -46,6 +47,10 @@ type transferClient interface {
 	CancelAcceptedTransfer(ctx context.Context, req *transferpb.CancelAcceptedTransferRequest) (*transferpb.CancelAcceptedTransferResponse, error)
 	RequestReversal(ctx context.Context, req *transferpb.RequestReversalRequest) (*transferpb.RequestReversalResponse, error)
 	CancelStagedTransfer(ctx context.Context, req *transferpb.CancelStagedTransferRequest) (*transferpb.CancelStagedTransferResponse, error)
+	// WouldAcceptTransfer pre-flight-checks a non-mint_source child before
+	// TransactionInitialized is ever written — see StartInitializingTransaction
+	// and wouldAcceptReadyChildren.
+	WouldAcceptTransfer(ctx context.Context, walletID string, amount *sharedpb.Money, callingTransactionID string) (*transferpb.TransferRequestRejected, error)
 }
 
 var _ pb.TransactionService = (*Server)(nil)
@@ -105,11 +110,15 @@ func Exists(ctx context.Context, store eventstore.Store, transactionID string) (
 // StartInitializingTransaction accepts or rejects req, in both cases
 // recording that decision as transactionID's first event — a rejection is
 // as much a fact about this id's history as an acceptance is, the same
-// reasoning transfer.RequestTransfer already uses. DAG validation happens
-// before TransactionInitialized is ever written: a failing DAG produces
-// TransactionRejected instead. Idempotent: a Transaction that was already
-// decided — initialized or rejected — has its recorded outcome returned
-// as-is.
+// reasoning transfer.RequestTransfer already uses. Two checks happen before
+// TransactionInitialized is ever written, either of which produces
+// TransactionRejected instead: DAG validation, and — new, see
+// wouldAcceptReadyChildren and go/docs/adr/0004 — a pre-flight check of
+// every non-mint_source child that would be dispatched immediately. The
+// latter is a fast, best-effort check; the real dispatch inside runSaga
+// below is unchanged and remains the sole authority regardless of what this
+// pre-check found. Idempotent: a Transaction that was already decided —
+// initialized or rejected — has its recorded outcome returned as-is.
 func (s *Server) StartInitializingTransaction(ctx context.Context, req *pb.StartInitializingTransactionRequest) (*pb.StartInitializingTransactionResponse, error) {
 	if err := id.Validate("id", req.GetId()); err != nil {
 		return nil, err
@@ -125,12 +134,21 @@ func (s *Server) StartInitializingTransaction(ctx context.Context, req *pb.Start
 		}
 
 		var event proto.Message
-		if dagErr := validateDAG(req.GetTransfers(), req.GetTransferDependency()); dagErr != nil {
+		switch dagErr := validateDAG(req.GetTransfers(), req.GetTransferDependency()); {
+		case dagErr != nil:
 			event = &pb.TransactionRejected{Id: req.GetId(), Reason: dagErr.Error()}
-		} else {
-			event = &pb.TransactionInitialized{
-				Id: req.GetId(), FactoryName: req.GetFactoryName(), FactoryVersion: req.GetFactoryVersion(),
-				Transfers: req.GetTransfers(), TransferDependency: req.GetTransferDependency(),
+		default:
+			reason, err := s.wouldAcceptReadyChildren(ctx, req.GetId(), req.GetTransfers(), req.GetTransferDependency())
+			if err != nil {
+				return nil, twirp.InternalErrorWith(err)
+			}
+			if reason != "" {
+				event = &pb.TransactionRejected{Id: req.GetId(), Reason: reason}
+			} else {
+				event = &pb.TransactionInitialized{
+					Id: req.GetId(), FactoryName: req.GetFactoryName(), FactoryVersion: req.GetFactoryVersion(),
+					Transfers: req.GetTransfers(), TransferDependency: req.GetTransferDependency(),
+				}
 			}
 		}
 

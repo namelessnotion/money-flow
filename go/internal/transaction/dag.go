@@ -1,6 +1,7 @@
 package transaction
 
 import (
+	"context"
 	"fmt"
 
 	pb "github.com/namelessnotion/money_flow/go/gen/proto/transaction/v1"
@@ -112,6 +113,37 @@ func readyToRun(transfers map[string]*pb.Transfer, deps map[string]*pb.TransferI
 		}
 	}
 	return ready
+}
+
+// wouldAcceptReadyChildren pre-flight-checks every child that would be
+// dispatched immediately were req accepted (auto_process=true, ready at time
+// zero per readyToRun, mint_source=false) against transfer's own accept-time
+// decision, before TransactionInitialized is ever written. mint_source
+// children are excluded: they have no balance constraint at all (they mint
+// their own source Token — see transfer.validateMintSource), and checking
+// one here would spuriously reject via TransactionExistsChecker, since this
+// Transaction doesn't exist yet — a real circular dependency, not just a
+// convenient exclusion. Returns the reason for the first ready child that
+// would be rejected right now, or "" if every ready child would be
+// accepted. Fast, best-effort: the real, unchanged dispatch inside runSaga
+// still runs afterward and remains the sole authority — see go/docs/adr/0004.
+func (s *Server) wouldAcceptReadyChildren(
+	ctx context.Context, transactionID string, transfers map[string]*pb.Transfer, deps map[string]*pb.TransferIdList,
+) (string, error) {
+	for _, childID := range readyToRun(transfers, deps, map[string]bool{}, map[string]bool{}) {
+		spec := transfers[childID]
+		if !spec.GetAutoProcess() || spec.GetMintSource() {
+			continue
+		}
+		rejection, err := s.transfer.WouldAcceptTransfer(ctx, spec.GetFromWalletId(), spec.GetAmount(), transactionID)
+		if err != nil {
+			return "", err
+		}
+		if rejection != nil {
+			return fmt.Sprintf("transfer %q: %s", childID, rejection.GetReason()), nil
+		}
+	}
+	return "", nil
 }
 
 // readyToRollback returns every started-or-gated child (touched, not yet
