@@ -1,6 +1,6 @@
 // Serves the Twirp APIs backed by the Postgres event store and TigerBeetle.
 //
-//	DATABASE_URL=postgres://... LISTEN_ADDR=:8080 \
+//	DATABASE_URL=postgres://... DATABASE_MAX_CONNS=20 LISTEN_ADDR=:8080 \
 //	TIGERBEETLE_ADDRESS=127.0.0.1:3000 TIGERBEETLE_CLUSTER_ID=0 \
 //	go run ./cmd/server
 package main
@@ -36,17 +36,53 @@ import (
 
 const (
 	defaultDatabaseURL          = "postgres://money_flow:money_flow@localhost:5432/money_flow_dev?sslmode=disable"
+	// defaultDatabaseMaxConns is deliberately an explicit, environment-
+	// independent number rather than pgxpool's own default (max(4,
+	// runtime.NumCPU())): that default ties this server's throughput ceiling
+	// to whatever core count the host or container happens to expose, not to
+	// anything chosen for this workload — see go/cmd/simulate's -mode=transfer
+	// vs -mode=transaction throughput comparison, which found it capping
+	// RPC-driven saga throughput well below what Postgres could otherwise
+	// sustain. 20 leaves headroom under Postgres's own default
+	// max_connections=100 for the orchestrator, ruby, ruby-consumer and the
+	// resque workers to share the same instance; raise it per environment via
+	// DATABASE_MAX_CONNS rather than editing this default.
+	defaultDatabaseMaxConns     = "20"
 	defaultListenAddr           = ":8080"
 	defaultTigerBeetleAddress   = "127.0.0.1:3000"
 	defaultTigerBeetleClusterID = "0"
 	shutdownGrace               = 10 * time.Second
 )
 
+// poolConfig parses databaseURL into a pgxpool.Config with MaxConns
+// overridden to maxConns. Kept as a separate override from databaseURL
+// itself — never a "?pool_max_conns=" query parameter appended to
+// DATABASE_URL — because docker/go/entrypoint.sh runs cmd/migrate against
+// the same DATABASE_URL first, over plain pgx rather than pgxpool; plain pgx
+// does not recognize that parameter and forwards it straight to Postgres as
+// a runtime GUC, which Postgres then rejects outright.
+func poolConfig(databaseURL string, maxConns int32) (*pgxpool.Config, error) {
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	config.MaxConns = maxConns
+	return config, nil
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := pgxpool.New(ctx, env("DATABASE_URL", defaultDatabaseURL))
+	maxConns, err := strconv.ParseInt(env("DATABASE_MAX_CONNS", defaultDatabaseMaxConns), 10, 32)
+	if err != nil {
+		log.Fatalf("server: DATABASE_MAX_CONNS: %v", err)
+	}
+	cfg, err := poolConfig(env("DATABASE_URL", defaultDatabaseURL), int32(maxConns))
+	if err != nil {
+		log.Fatalf("server: database url: %v", err)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		log.Fatalf("server: pool: %v", err)
 	}

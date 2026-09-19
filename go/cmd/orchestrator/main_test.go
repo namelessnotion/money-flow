@@ -293,3 +293,23 @@ func TestRunStopsEveryConsumerWhenOneHalts(t *testing.T) {
 		}
 	}
 }
+
+func TestPoolConfigSetsMaxConnsExplicitly(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := poolConfig(defaultDatabaseURL, 7)
+	if err != nil {
+		t.Fatalf("poolConfig() error = %v", err)
+	}
+	if cfg.MaxConns != 7 {
+		t.Errorf("MaxConns = %d, want 7 — not left at pgxpool's own default(4, NumCPU())", cfg.MaxConns)
+	}
+}
+
+func TestPoolConfigRejectsAnUnparsableURL(t *testing.T) {
+	t.Parallel()
+
+	if _, err := poolConfig("not-a-postgres-url", 10); err == nil {
+		t.Error("poolConfig() error = nil, want a parse error for a malformed DATABASE_URL")
+	}
+}

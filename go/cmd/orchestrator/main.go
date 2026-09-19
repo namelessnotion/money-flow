@@ -16,7 +16,7 @@
 // sagas, which is safe precisely because resuming an aggregate that has already
 // reached its next wait state does nothing.
 //
-//	DATABASE_URL=postgres://... KAFKA_BROKERS=kafka:9092 \
+//	DATABASE_URL=postgres://... DATABASE_MAX_CONNS=5 KAFKA_BROKERS=kafka:9092 \
 //	TIGERBEETLE_ADDRESS=127.0.0.1:3000 TIGERBEETLE_CLUSTER_ID=0 \
 //	go run ./cmd/orchestrator
 package main
@@ -42,7 +42,16 @@ import (
 )
 
 const (
-	defaultDatabaseURL          = "postgres://money_flow:money_flow@localhost:5432/money_flow_dev?sslmode=disable"
+	defaultDatabaseURL = "postgres://money_flow:money_flow@localhost:5432/money_flow_dev?sslmode=disable"
+	// defaultDatabaseMaxConns is deliberately explicit rather than pgxpool's
+	// own default (max(4, runtime.NumCPU())) — see cmd/server's own constant
+	// of the same name for why that matters. This orchestrator only ever runs
+	// two consumer goroutines (one per aggregate-type topic, per groupPrefix
+	// below), each processing one trigger at a time, so it needs far less
+	// headroom than the RPC server does; keep it modest to leave the rest of
+	// Postgres's max_connections=100 for cmd/server and everything else
+	// sharing the instance.
+	defaultDatabaseMaxConns     = "5"
 	defaultKafkaBrokers         = "localhost:9092"
 	defaultTigerBeetleAddress   = "127.0.0.1:3000"
 	defaultTigerBeetleClusterID = "0"
@@ -55,6 +64,19 @@ const (
 	groupPrefix = "money-flow-saga-"
 )
 
+// poolConfig parses databaseURL into a pgxpool.Config with MaxConns
+// overridden to maxConns — see cmd/server's own poolConfig for why this is
+// a separate override rather than a "?pool_max_conns=" query parameter on
+// DATABASE_URL itself.
+func poolConfig(databaseURL string, maxConns int32) (*pgxpool.Config, error) {
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	config.MaxConns = maxConns
+	return config, nil
+}
+
 // consumedAggregateTypes is what this orchestrator subscribes to. Both are
 // needed and neither is optional: a Transaction cannot decide whether its
 // children are done without hearing from the transfer topic, and a Transfer
@@ -65,7 +87,15 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := pgxpool.New(ctx, env("DATABASE_URL", defaultDatabaseURL))
+	maxConns, err := strconv.ParseInt(env("DATABASE_MAX_CONNS", defaultDatabaseMaxConns), 10, 32)
+	if err != nil {
+		log.Fatalf("orchestrator: DATABASE_MAX_CONNS: %v", err)
+	}
+	cfg, err := poolConfig(env("DATABASE_URL", defaultDatabaseURL), int32(maxConns))
+	if err != nil {
+		log.Fatalf("orchestrator: database url: %v", err)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		log.Fatalf("orchestrator: pool: %v", err)
 	}

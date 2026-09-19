@@ -14,9 +14,10 @@ import (
 const defaultTestTigerBeetleAddress = "127.0.0.1:3000"
 
 // testRealClient connects to the dockerized TigerBeetle, skipping the test
-// when it isn't reachable so `go test ./...` still works without Docker
-// running, mirroring eventstore's testPool.
-func testRealClient(t *testing.T) *ledger.RealClient {
+// (or benchmark — testing.TB covers both) when it isn't reachable so
+// `go test ./...` still works without Docker running, mirroring eventstore's
+// testPool.
+func testRealClient(t testing.TB) *ledger.RealClient {
 	t.Helper()
 
 	addr := os.Getenv("TIGERBEETLE_ADDRESS")
