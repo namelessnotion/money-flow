@@ -1,0 +1,114 @@
+# frozen_string_literal: true
+# typed: strict
+
+require_relative 'leg'
+require_relative 'wallets'
+
+module Services
+  module Securities
+    # How one Investor's fractional purchase is built: the two Transfers Go
+    # runs for it, and the order it runs them in.
+    #
+    # The **claim leg** moves claims out of the Security's Supply into the
+    # Investor's `investment` account. The **money leg** moves the Investor's
+    # cleared cash into the Security's Escrow, and waits for the claim leg.
+    #
+    # That order is the whole design (ruby/docs/adr/0006). `security_supply` is
+    # the hot wallet: every concurrent purchase of this Security draws on it,
+    # and it is exactly where Go's accept-time pre-flight can over-accept,
+    # since it evaluates every child ready at time zero against one unconsumed
+    # balance snapshot. Leaving the claim leg alone at the root buys two
+    # things:
+    #
+    # - normally the claim leg *is* pre-flighted, so an oversubscription is a
+    #   clean TransactionRejected before Go writes anything at all;
+    # - when the race does slip past, the claim leg fails at real dispatch with
+    #   the money leg never having run. There is nothing to reverse and no
+    #   Investor money has moved.
+    #
+    # Had the money leg been a root, every lost race would reverse a committed
+    # Investor payment instead.
+    #
+    # The cost, stated rather than hidden: a child behind a dependency edge
+    # gets no pre-flight at all, so an Investor short of cleared cash gets a
+    # Transaction that initializes and then rolls back rather than one refused
+    # outright. Services::Securities::Purchase asks ResumeTransaction how it
+    # actually went, because the response to starting it cannot be the last
+    # word for a gated leg.
+    class PurchaseShape < T::Struct
+      FACTORY_NAME = 'security_purchase'
+      # Bumped whenever the legs or their order change, so Go's record of each
+      # Transaction says which shape ran.
+      FACTORY_VERSION = '1'
+
+      AccountType = Types::Enums::AccountType
+
+      # Which wallet each side of the purchase contributes.
+      OF_SECURITY = T.let(
+        [AccountType::SecuritySupply, AccountType::SecurityEscrow].freeze, T::Array[AccountType]
+      )
+      OF_INVESTOR = T.let(
+        [AccountType::Investment, AccountType::ClearedCash].freeze, T::Array[AccountType]
+      )
+
+      const :claim_transfer_id, String
+      const :money_transfer_id, String
+      const :supply_wallet_id, String
+      const :escrow_wallet_id, String
+      const :investment_wallet_id, String
+      const :cleared_cash_wallet_id, String
+
+      # `accounts` is the Security's and the Investor's, concatenated — each
+      # scope is resolved separately, so neither can answer for the other.
+      sig do
+        params(
+          security: Models::Security,
+          investor_entity_id: Integer,
+          accounts: T::Array[Models::Account],
+          claim_transfer_id: String,
+          money_transfer_id: String
+        ).returns(PurchaseShape)
+      end
+      def self.for(security:, investor_entity_id:, accounts:, claim_transfer_id:, money_transfer_id:)
+        # Safe to merge the two scopes' answers: no type appears in both, and
+        # each was resolved against only the accounts that belong to it.
+        wallets = Wallets.of_security(security.id, OF_SECURITY, accounts)
+                         .merge(Wallets.of_entity(investor_entity_id, OF_INVESTOR, accounts))
+
+        new(claim_transfer_id: claim_transfer_id, money_transfer_id: money_transfer_id,
+            supply_wallet_id: wallets.fetch(AccountType::SecuritySupply),
+            escrow_wallet_id: wallets.fetch(AccountType::SecurityEscrow),
+            investment_wallet_id: wallets.fetch(AccountType::Investment),
+            cleared_cash_wallet_id: wallets.fetch(AccountType::ClearedCash))
+      end
+
+      sig { params(transaction_id: String, amount_minor_units: Integer).returns(T.untyped) }
+      def start_request(transaction_id:, amount_minor_units:)
+        Transaction::V1::StartInitializingTransactionRequest.new(
+          id: transaction_id,
+          factory_name: FACTORY_NAME,
+          factory_version: FACTORY_VERSION,
+          transfers: {
+            claim_transfer_id => claim_leg(amount_minor_units),
+            money_transfer_id => money_leg(amount_minor_units)
+          },
+          transfer_dependency: Leg.after(money_transfer_id, claim_transfer_id)
+        )
+      end
+
+      private
+
+      sig { params(amount_minor_units: Integer).returns(T.untyped) }
+      def claim_leg(amount_minor_units)
+        Leg.transfer(id: claim_transfer_id, amount_minor_units: amount_minor_units,
+                     from: supply_wallet_id, to: investment_wallet_id)
+      end
+
+      sig { params(amount_minor_units: Integer).returns(T.untyped) }
+      def money_leg(amount_minor_units)
+        Leg.transfer(id: money_transfer_id, amount_minor_units: amount_minor_units,
+                     from: cleared_cash_wallet_id, to: escrow_wallet_id)
+      end
+    end
+  end
+end

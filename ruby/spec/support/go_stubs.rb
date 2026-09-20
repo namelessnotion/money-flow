@@ -13,8 +13,16 @@ module GoStubs
     @transfer_client ||= Transfer::V1::TransferServiceClient.new('http://go.internal.test/twirp')
   end
 
+  def holder_client
+    @holder_client ||= Holder::V1::HolderServiceClient.new('http://go.internal.test/twirp')
+  end
+
   def go_gateway
     Services::Ach::GoGateway.new(transaction_client: transaction_client, transfer_client: transfer_client)
+  end
+
+  def securities_gateway
+    Services::Securities::GoGateway.new(transaction_client: transaction_client, holder_client: holder_client)
   end
 
   def twirp_ok(data) = Twirp::ClientResp.new(data: data)
@@ -47,6 +55,25 @@ module GoStubs
     twirp_ok(Transaction::V1::ResumeTransactionResponse.new(id: id, state: state))
   end
 
+  def resumed_completed(id) = resumed(id, :TRANSACTION_STATE_COMPLETED)
+
+  def resumed_rolled_back(id, reason)
+    twirp_ok(Transaction::V1::ResumeTransactionResponse.new(
+               id: id, state: :TRANSACTION_STATE_ROLLED_BACK, reason: reason
+             ))
+  end
+
+  # Go's accept-time refusal: a well-formed Transaction it declined, which
+  # arrives inside a successful response rather than as an error.
+  def transaction_rejected(id, reason)
+    twirp_ok(Transaction::V1::StartInitializingTransactionResponse.new(
+               id: id,
+               transaction_rejected: Transaction::V1::TransactionRejected.new(id: id, reason: reason)
+             ))
+  end
+
+  def holder_provisioned = twirp_ok(Holder::V1::ProvisionResponse.new)
+
   # Stubs every Go RPC an ACH Transaction's life touches with its happy-path
   # answer, echoing the id each request was sent with.
   def stub_go_happy_path
@@ -57,6 +84,15 @@ module GoStubs
   def stub_transaction_service_happy_path
     allow(transaction_client).to receive(:start_initializing_transaction) { |req| transaction_initialized(req.id) }
     allow(transaction_client).to receive(:resume_transaction) { |req| resumed(req.id, :TRANSACTION_STATE_STARTED) }
+  end
+
+  # The same, for a Security's Transactions. Nothing a Security originates
+  # stages, so the whole DAG normally runs to completion inside the call that
+  # started it — hence COMPLETED rather than ACH's STARTED.
+  def stub_go_securities_happy_path
+    stub_go_happy_path
+    allow(holder_client).to receive(:provision) { holder_provisioned }
+    allow(transaction_client).to receive(:resume_transaction) { |req| resumed_completed(req.id) }
   end
 
   def stub_transfer_service_happy_path
