@@ -6,14 +6,10 @@ RSpec.describe Services::Ach::Initiate do
   subject(:service) { described_class.new(gateway: go_gateway, provider: provider) }
 
   let(:provider) { Services::Ach::FakeProvider.new }
-  let(:entity) { create(:entity) }
+  let(:entity) { create_provisioned_entity }
   let(:request) do
     InitiateAchRequest.new(entity_id: entity.id, direction: Types::Enums::AchDirection::Deposit,
                            amount_minor_units: 10_000)
-  end
-
-  before do
-    Types::Enums::AccountType.each_value { |type| create(:account, entity: entity, type: type.serialize) }
   end
 
   context 'when Go and the provider accept it' do

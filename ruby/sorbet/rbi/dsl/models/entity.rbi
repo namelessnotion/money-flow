@@ -37,6 +37,12 @@ class Models::Entity
     sig { params(value: T.nilable(String)).returns(T.nilable(String)) }
     def name=(value); end
 
+    sig { returns(String) }
+    def role; end
+
+    sig { params(value: T.nilable(String)).returns(T.nilable(String)) }
+    def role=(value); end
+
     sig { returns(Time) }
     def updated_at; end
 

@@ -5,13 +5,10 @@ require 'spec_helper'
 RSpec.describe Services::Ach::ClearNow do
   subject(:service) { described_class.new(clear: Services::Ach::Clear.new(gateway: go_gateway)) }
 
-  let(:entity) { create(:entity) }
+  let(:entity) { create_provisioned_entity }
   let(:ach) { create(:ach_transaction, entity: entity) }
 
-  before do
-    Types::Enums::AccountType.values.map(&:serialize).each { |type| create(:account, entity: entity, type: type) }
-    stub_go_happy_path
-  end
+  before { stub_go_happy_path }
 
   def projected(state)
     create(:transaction_projection, aggregate_id: ach.id, state: state, state_changed_at: Time.now)

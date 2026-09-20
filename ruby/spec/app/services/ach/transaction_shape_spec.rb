@@ -3,12 +3,8 @@
 require 'spec_helper'
 
 RSpec.describe Services::Ach::TransactionShape do
-  let(:entity) { create(:entity) }
-  let(:wallets) do
-    Types::Enums::AccountType.values.to_h do |type|
-      [type.serialize, create(:account, entity: entity, type: type.serialize).wallet_uuid]
-    end
-  end
+  let(:entity) { create_provisioned_entity }
+  let(:wallets) { wallet_uuids_of(entity) }
   let(:real_id) { SecureRandom.uuid_v7 }
   let(:shadow_id) { SecureRandom.uuid_v7 }
 
@@ -81,10 +77,13 @@ RSpec.describe Services::Ach::TransactionShape do
   end
 
   it 'refuses an entity missing an account a leg needs' do
-    create(:account, entity: entity, type: 'bank')
+    # An entity onboarding never touched: one bank account and nothing else.
+    bare = create(:entity)
+    create(:account, entity: bare, type: 'bank')
 
     expect do
-      described_class.for(direction: Types::Enums::AchDirection::Deposit, accounts: accounts,
+      described_class.for(direction: Types::Enums::AchDirection::Deposit,
+                          accounts: Models::Account.where(entity_id: bare.id).all,
                           real_transfer_id: real_id, shadow_transfer_id: shadow_id)
     end.to raise_error(Services::Ach::MissingAccount, /cash/)
   end

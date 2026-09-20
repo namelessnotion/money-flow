@@ -37,6 +37,12 @@ class Models::Account
     sig { params(value: T.nilable(String)).returns(T.nilable(String)) }
     def name=(value); end
 
+    sig { returns(T.nilable(String)) }
+    def security_id; end
+
+    sig { params(value: T.nilable(String)).returns(T.nilable(String)) }
+    def security_id=(value); end
+
     sig { returns(String) }
     def type; end
 

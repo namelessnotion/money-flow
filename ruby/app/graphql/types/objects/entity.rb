@@ -3,6 +3,7 @@
 
 require_relative 'base_object'
 require_relative 'account'
+require_relative '../enums/entity_role_enum'
 
 module Types
   # GraphQL type for the Entity model
@@ -10,6 +11,8 @@ module Types
     field :id, ID, null: false
     field :name, String, null: false
     field :holder_uuid, ID, null: false
+    field :role, Types::EntityRoleEnum, null: false,
+                                        description: 'What part it plays in this market.'
     field :created_at, GraphQL::Types::ISO8601DateTime, null: false
     field :updated_at, GraphQL::Types::ISO8601DateTime, null: false
     field :accounts, [Types::Account], null: false,
@@ -20,6 +23,7 @@ module Types
       id: :id,
       name: :name,
       holder_uuid: :holder_uuid,
+      role: :role,
       created_at: :created_at,
       updated_at: :updated_at
     }.freeze, T::Hash[Symbol, Symbol])

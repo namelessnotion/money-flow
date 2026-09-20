@@ -5,18 +5,11 @@ require 'spec_helper'
 RSpec.describe Services::Ach::Clear do
   subject(:service) { described_class.new(gateway: go_gateway) }
 
-  let(:entity) { create(:entity) }
+  let(:entity) { create_provisioned_entity }
   let(:ach) { create(:ach_transaction, entity: entity, amount_minor_units: 12_500) }
-  let(:wallets) do
-    Types::Enums::AccountType.values.to_h do |type|
-      [type.serialize, create(:account, entity: entity, type: type.serialize).wallet_uuid]
-    end
-  end
+  let(:wallets) { wallet_uuids_of(entity) }
 
-  before do
-    wallets
-    stub_go_happy_path
-  end
+  before { stub_go_happy_path }
 
   def sent_request
     request = nil

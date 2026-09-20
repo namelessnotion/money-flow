@@ -10,8 +10,9 @@ RSpec.describe Services::OnboardEntity do
   subject(:service) { described_class.new(holder_client: holder_client) }
 
   let(:holder_client) { Holder::V1::HolderServiceClient.new('http://holder.internal.test') }
-  let(:request) { OnboardEntityRequest.new(name: 'Test Entity') }
-  let(:account_types) { Types::Enums::AccountType.values }
+  let(:role) { Types::Enums::EntityRole::Investor }
+  let(:request) { OnboardEntityRequest.new(name: 'Test Entity', role: role) }
+  let(:account_types) { Types::Enums::AccountType.for_role(role) }
 
   # The dev database is shared with the end-to-end smoke run, so absolute counts
   # are meaningless here — only what this example changed matters.
@@ -21,6 +22,12 @@ RSpec.describe Services::OnboardEntity do
 
   def provisioned_response
     Twirp::ClientResp.new(data: Holder::V1::ProvisionResponse.new)
+  end
+
+  # The account types onboarding actually opened for an entity of this role.
+  def account_types_onboarded(role)
+    response = service.call(request: OnboardEntityRequest.new(name: 'Test Entity', role: role))
+    Models::Account.where(entity_id: response.entity_id).all.map(&:type)
   end
 
   describe '#call' do
@@ -40,13 +47,33 @@ RSpec.describe Services::OnboardEntity do
         expect(entity.holder_uuid).to eq(response.holder_uuid)
       end
 
-      it 'creates one account per account type' do
+      it 'creates one account per account type the role opens' do
         response = service.call(request: request)
 
         accounts = Models::Account.where(entity_id: response.entity_id).all
         expect(accounts.size).to eq(account_types.size)
         expect(accounts.map(&:type)).to match_array(account_types.map(&:serialize))
         expect(accounts.map(&:wallet_uuid).uniq.size).to eq(account_types.size)
+      end
+
+      it 'records the role it opened those accounts for' do
+        response = service.call(request: request)
+
+        expect(Models::Entity[response.entity_id].role).to eq('investor')
+      end
+
+      it 'opens an issuer somewhere to mint claim supply from, and nowhere to hold claims' do
+        types = account_types_onboarded(Types::Enums::EntityRole::Issuer)
+
+        expect(types).to include('issuer_control')
+        expect(types).not_to include('investment')
+      end
+
+      it "never opens a Security's own wallets, which belong to an offering rather than an entity" do
+        Types::Enums::EntityRole.each_value do |role|
+          expect(account_types_onboarded(role))
+            .not_to include('security_supply', 'security_escrow', 'security_repayment')
+        end
       end
 
       it 'backs every account with the wallet uuid it sent for provisioning' do

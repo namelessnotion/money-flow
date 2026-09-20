@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 # typed: strict
 
+require_relative 'entity_role'
+
 module Types
   module Enums
     # Different types of accounts that can be created.
@@ -21,12 +23,32 @@ module Types
         Cash = new('cash')                     # Cash that can be used for purchases
         Gain = new('gain')                     # Gain account for tracking profits
         Loss = new('loss')                     # Loss account for tracking losses
+
+        # Securities. The first two belong to an entity; the last three belong
+        # to a Security and are opened per offering, never by onboarding.
+        Investment = new('investment')                  # An Investor's claims
+        IssuerControl = new('issuer_control')           # Where an Issuer mints claim supply from
+        SecuritySupply = new('security_supply')         # A Security's unsold claims
+        SecurityEscrow = new('security_escrow')         # Investor money held until the Draw
+        SecurityRepayment = new('security_repayment')   # Borrower money held until disbursement
       end
 
       # What the backing Wallet may do at the platform boundary: onramp brings
       # money in from outside, offramp sends it out. Only funding instruments
       # touch that boundary — everything else moves money that is already
       # inside the platform, so it permits neither.
+      #
+      # IssuerControl is the one exception, and it is not about the boundary at
+      # all: Go's validateMintSource refuses mint_source from any Wallet
+      # narrower than ALLOWS_ONRAMP, and minting supply is the only way claims
+      # enter the ledger. Its Token carries no flag as a result, so it may run
+      # permanently negative — which is exactly right, because that negative is
+      # total claims outstanding, and it returns to zero as claims are retired
+      # back into it. The same shape as BankControl.
+      #
+      # ALLOWS_NONE gives a Token debits_must_not_exceed_credits, and that is
+      # what makes SecuritySupply an oversubscription control and Investment a
+      # guarantee that no holder has more principal retired than they hold.
       #
       # ALLOWS_NONE rather than ALLOWS_UNSPECIFIED: the Wallet service rejects
       # an unset policy, so "neither direction" has to be said out loud.
@@ -38,10 +60,35 @@ module Types
       sig { returns(Symbol) }
       def allows
         case self
-        when Bank, BankControl then :ALLOWS_ONRAMP_AND_OFFRAMP
+        when Bank, BankControl, IssuerControl then :ALLOWS_ONRAMP_AND_OFFRAMP
         when DebitCard then :ALLOWS_ONRAMP
         else :ALLOWS_NONE
         end
+      end
+
+      # Every role banks, so every role gets the accounts an ACH shape moves
+      # money through (Services::Ach::TransactionShape, ClearingShape). Beyond
+      # that a role gets only what its own part in the market uses: an account
+      # an entity can never move money through is a Wallet nobody will be able
+      # to explain later.
+      BANKING = T.let([Bank, BankControl, UnclearedCash, ClearedCash, Cash].freeze, T::Array[AccountType])
+
+      # A Security's own three types appear in no role's list. They are opened
+      # per offering by Services::Securities::IssueOffering, and the
+      # accounts_security_scoped_types CHECK refuses one with no security_id.
+      BY_ROLE = T.let(
+        {
+          Types::Enums::EntityRole::Investor => [*BANKING, DebitCard, Investment].freeze,
+          Types::Enums::EntityRole::Borrower => BANKING,
+          Types::Enums::EntityRole::Issuer => [*BANKING, IssuerControl, Gain, Loss].freeze
+        }.freeze,
+        T::Hash[Types::Enums::EntityRole, T::Array[AccountType]]
+      )
+
+      # Which accounts onboarding opens for an entity playing `role`.
+      sig { params(role: Types::Enums::EntityRole).returns(T::Array[AccountType]) }
+      def self.for_role(role)
+        BY_ROLE.fetch(role)
       end
     end
   end

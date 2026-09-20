@@ -33,7 +33,7 @@ module Services
     sig { params(request: OnboardEntityRequest).returns(OnboardEntityResponse) }
     def call(request:)
       holder_uuid = SecureRandom.uuid_v7
-      wallet_plans = plan_wallets
+      wallet_plans = plan_wallets(request.role)
 
       # Provisioning happens before anything is written locally, and it is one
       # all-or-nothing call: the holder and every wallet exist in the event log,
@@ -48,10 +48,16 @@ module Services
 
     private
 
-    # One Wallet per account type, each with the uuid it will be opened under.
-    sig { returns(T::Array[WalletPlan]) }
-    def plan_wallets
-      Types::Enums::AccountType.values.map do |type|
+    # One Wallet per account type the role opens, each with the uuid it will be
+    # opened under.
+    #
+    # Scoped to the role rather than every type there is: an account an entity
+    # can never move money through is a Wallet nobody will be able to explain
+    # later, and three of the types belong to a Security rather than to an
+    # entity at all.
+    sig { params(role: Types::Enums::EntityRole).returns(T::Array[WalletPlan]) }
+    def plan_wallets(role)
+      Types::Enums::AccountType.for_role(role).map do |type|
         WalletPlan.new(type: type, wallet_uuid: SecureRandom.uuid_v7)
       end
     end
@@ -63,8 +69,19 @@ module Services
         .returns(OnboardEntityResponse)
     end
     def persist(request, holder_uuid, wallet_plans)
-      entity = Models::Entity.create(name: request.name, holder_uuid: holder_uuid)
+      entity = Models::Entity.create(name: request.name, holder_uuid: holder_uuid,
+                                     role: request.role.serialize)
+      open_accounts(entity, wallet_plans)
 
+      OnboardEntityResponse.new(success: true, entity_id: entity.id, holder_uuid: holder_uuid)
+    end
+
+    # One account per planned Wallet, each backed by the uuid that Wallet was
+    # opened under. The account's name is its type: nothing here needs a
+    # friendlier one, and a type that reads as a name is one less thing to keep
+    # in step.
+    sig { params(entity: Models::Entity, wallet_plans: T::Array[WalletPlan]).void }
+    def open_accounts(entity, wallet_plans)
       wallet_plans.each do |plan|
         Models::Account.create(
           entity_id: entity.id,
@@ -73,8 +90,6 @@ module Services
           wallet_uuid: plan.wallet_uuid
         )
       end
-
-      OnboardEntityResponse.new(success: true, entity_id: entity.id, holder_uuid: holder_uuid)
     end
 
     # Establishes the holder and opens one wallet per account type.

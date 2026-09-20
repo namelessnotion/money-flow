@@ -21,15 +21,15 @@ RSpec.describe App do
   describe 'POST /graphql' do
     let(:onboard_entity_query) do
       <<~GRAPHQL
-        mutation($name: String!) {
-          onboardEntity(name: $name) {
+        mutation($name: String!, $role: EntityRole!) {
+          onboardEntity(name: $name, role: $role) {
             entity { id name }
           }
         }
       GRAPHQL
     end
 
-    let(:onboard_entity_variables) { { name: 'Test Entity' } }
+    let(:onboard_entity_variables) { { name: 'Test Entity', role: 'INVESTOR' } }
 
     let(:holder_uuid) { SecureRandom.uuid_v7 }
     let(:entity) { create(:entity, name: 'Test Entity', holder_uuid: holder_uuid) }

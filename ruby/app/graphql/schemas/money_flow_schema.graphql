@@ -175,6 +175,11 @@ type Entity {
   holderUuid: ID!
   id: ID!
   name: String!
+
+  """
+  What part it plays in this market.
+  """
+  role: EntityRole!
   updatedAt: ISO8601DateTime!
 }
 
@@ -211,6 +216,15 @@ type EntityEdge {
   The item at the end of the edge.
   """
   node: Entity
+}
+
+"""
+What part an entity plays in this market. It decides which accounts it holds.
+"""
+enum EntityRole {
+  BORROWER
+  INVESTOR
+  ISSUER
 }
 
 """
@@ -264,7 +278,14 @@ type Mutation {
     amountMinorUnits: BigInt!
     entityId: ID!
   ): InitiateAchWithdrawalPayload
-  onboardEntity(name: String!): OnboardEntityPayload
+  onboardEntity(
+    name: String!
+
+    """
+    Which accounts to open for it.
+    """
+    role: EntityRole!
+  ): OnboardEntityPayload
 
   """
   Record that the ACH network returned the entry; the Transaction is rolled back.
