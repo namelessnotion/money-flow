@@ -111,5 +111,19 @@ RSpec.describe Consumer::EventStateMap do
       expect { described_class.transition(aggregate_type: 'wallet', event_type: 'wallet.v1.WalletOpened') }
         .to raise_error(described_class::UnmappedEvent, /wallet/)
     end
+
+    it 'needs no entry of its own for a Security, which is an ordinary Transaction' do
+      # Every Securities operation — an offering's mint, a purchase, a draw, a
+      # repayment, a disbursement — is a `transaction` aggregate over ordinary
+      # `transfer` children. factory_name is an opaque string Go records on
+      # TransactionInitialized and never publishes as a distinct event type, so
+      # the projection folds them all by the uuids Ruby chose before calling Go.
+      #
+      # Here rather than nowhere because this is where the next person will
+      # look when they add a capability and wonder what they owe this map.
+      expect(described_class.transition(aggregate_type: 'transaction',
+                                        event_type: 'transaction.v1.TransactionCompleted'))
+        .to eq(Types::Enums::TransactionState::Completed)
+    end
   end
 end
