@@ -2,6 +2,7 @@
 # typed: strict
 
 require_relative 'base_object'
+require_relative '../projections'
 require_relative 'ach_step'
 require_relative '../enums/ach_direction_enum'
 require_relative '../enums/transaction_state_enum'
@@ -11,6 +12,8 @@ module Types
   # GraphQL type for an ACH Transaction: Ruby's record of what it asked for,
   # alongside the Transaction's state as the projection last saw it.
   class AchTransaction < BaseObject
+    extend Projections
+
     description 'An ACH deposit or withdrawal. State fields come from a read model that may lag the ledger; ' \
                 'they are null until the first event for the Transaction has been consumed.'
 
@@ -70,10 +73,8 @@ module Types
     # has not reached yet come back with null state columns.
     T::Sig::WithoutRuntime.sig { returns(Models::AchTransaction::PrivateDataset) }
     def self.dataset
-      joined = PROJECTION_JOINS.reduce(Models::AchTransaction.dataset) do |dataset, (as, (table, key))|
-        dataset.left_join(Sequel[table].as(as), aggregate_id: Sequel[:ach_transactions][key])
-      end
-      joined.select_all(:ach_transactions).select_append(*PROJECTED_COLUMNS)
+      projected(model: Models::AchTransaction, table: :ach_transactions,
+                joins: PROJECTION_JOINS, columns: PROJECTED_COLUMNS)
     end
 
     # One ACH Transaction by id, with its projected state, or nil — including

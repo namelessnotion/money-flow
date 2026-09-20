@@ -4,6 +4,9 @@
 require_relative 'objects/base_object'
 require_relative 'objects/entity'
 require_relative 'objects/ach_transaction'
+require_relative 'objects/security'
+require_relative 'objects/subscription'
+require_relative 'objects/repayment'
 
 module Types
   # Root Query type.
@@ -29,6 +32,30 @@ module Types
           null: false, default_page_size: 100, max_page_size: 100,
           description: "An entity's ACH Transactions, oldest first, paginated at 100 per page." do |field|
       field.argument :entity_id, ID, required: true
+    end
+
+    field :security, Types::Security,
+          null: true, description: 'One Security by id, or null when there is none.' do |field|
+      field.argument :id, ID, required: true
+    end
+
+    field :securities, Types::Security.connection_type,
+          null: false, default_page_size: 100, max_page_size: 100,
+          description: 'Securities, newest first, paginated at 100 per page.' do |field|
+      field.argument :issuer_entity_id, ID, required: false
+      field.argument :borrower_entity_id, ID, required: false
+    end
+
+    field :subscriptions, Types::Subscription.connection_type,
+          null: false, default_page_size: 100, max_page_size: 100,
+          description: 'A Security’s Subscriptions, oldest first, paginated at 100 per page.' do |field|
+      field.argument :security_id, ID, required: true
+    end
+
+    field :repayments, Types::Repayment.connection_type,
+          null: false, default_page_size: 100, max_page_size: 100,
+          description: 'A Security’s Repayments, oldest first, paginated at 100 per page.' do |field|
+      field.argument :security_id, ID, required: true
     end
 
     sig { returns(T::Boolean) }
@@ -66,6 +93,53 @@ module Types
       Types::AchTransaction.dataset
                            .where(Sequel[:ach_transactions][:entity_id] => Integer(entity_id, 10))
                            .order(Sequel[:ach_transactions][:created_at], Sequel[:ach_transactions][:id])
+    end
+
+    sig { params(id: String).returns(T.nilable(Models::Security)) }
+    def security(id:)
+      Types::Security.find(id)
+    end
+
+    # Newest first: an offering still open is what a caller is usually after.
+    # The id breaks ties, so pages stay stable when rows share a created_at.
+    T::Sig::WithoutRuntime.sig do
+      params(issuer_entity_id: T.nilable(String), borrower_entity_id: T.nilable(String))
+        .returns(Models::Security::PrivateDataset)
+    end
+    def securities(issuer_entity_id: nil, borrower_entity_id: nil)
+      scoped = Types::Security.dataset
+      scoped = by_party(scoped, :issuer_entity_id, issuer_entity_id)
+      scoped = by_party(scoped, :borrower_entity_id, borrower_entity_id)
+      scoped.order(Sequel.desc(Sequel[:securities][:created_at]), Sequel.desc(Sequel[:securities][:id]))
+    end
+
+    T::Sig::WithoutRuntime.sig { params(security_id: String).returns(Models::Subscription::PrivateDataset) }
+    def subscriptions(security_id:)
+      Types::Subscription.dataset
+                         .where(Sequel[:subscriptions][:security_id] => security_id)
+                         .order(Sequel[:subscriptions][:created_at], Sequel[:subscriptions][:id])
+    end
+
+    T::Sig::WithoutRuntime.sig { params(security_id: String).returns(Models::Repayment::PrivateDataset) }
+    def repayments(security_id:)
+      Types::Repayment.dataset
+                      .where(Sequel[:repayments][:security_id] => security_id)
+                      .order(Sequel[:repayments][:created_at], Sequel[:repayments][:id])
+    end
+
+    private
+
+    # An entity id that is not a bigint matches nothing, rather than being an
+    # error — the same rule `entity` follows.
+    T::Sig::WithoutRuntime.sig do
+      params(dataset: Models::Security::PrivateDataset, column: Symbol, entity_id: T.nilable(String))
+        .returns(Models::Security::PrivateDataset)
+    end
+    def by_party(dataset, column, entity_id)
+      return dataset if entity_id.nil?
+      return dataset.where(false) unless /\A\d{1,18}\z/.match?(entity_id)
+
+      dataset.where(Sequel[:securities][column] => Integer(entity_id, 10))
     end
   end
 end

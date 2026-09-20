@@ -6,3 +6,10 @@
 # rdoc's generated RBI reparents RDoc::Markup::Heading to Struct, conflicting with
 # Sorbet's bundled payload definition. Unrelated to this project's own code.
 --suppress-payload-superclass-redefinition-for=RDoc::Markup::Heading
+
+# Lets a module declare the class it is mixed into (`requires_ancestor`), so a
+# concern like Types::SecurityHoldings can call the methods graphql-ruby gives
+# its host object and still be checked at `typed: strict`. This turns checking
+# on rather than off: without it those calls are errors, and the alternative is
+# an untyped escape hatch at each one.
+--enable-experimental-requires-ancestor

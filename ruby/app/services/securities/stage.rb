@@ -156,12 +156,26 @@ module Services
       # above is a pure function of what it returns.
       sig { params(security: Models::Security).returns(Snapshot) }
       def self.snapshot_of(security)
+        from(security, Positions.of(security),
+             offering: projected(security.offering_transaction_id),
+             draw: projected(security.draw_transaction_id))
+      end
+
+      # The same, from what a caller already has: a row that arrived with its
+      # projections joined on, and the Positions it already loaded. Lets a
+      # GraphQL type answer `stage` without re-reading either, and keeps
+      # Snapshot's fields the business layer's business rather than the type's.
+      sig do
+        params(security: Models::Security, positions: T::Array[Positions::Position],
+               offering: T.nilable(TransactionState), draw: T.nilable(TransactionState)).returns(Snapshot)
+      end
+      def self.from(security, positions, offering:, draw:)
         Snapshot.new(
-          offering_state: projected(security.offering_transaction_id),
-          draw_state: projected(security.draw_transaction_id),
+          offering_state: offering,
+          draw_state: draw,
           principal_minor_units: security.principal_minor_units,
-          subscribed_minor_units: Positions.subscribed(security),
-          outstanding_principal_minor_units: Positions.outstanding_principal(security),
+          subscribed_minor_units: positions.sum(&:principal_minor_units),
+          outstanding_principal_minor_units: positions.sum(&:outstanding_principal_minor_units),
           repaid_anything: Models::Repayment.where(security_id: security.id).any?
         )
       end
