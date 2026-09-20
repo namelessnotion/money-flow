@@ -11,3 +11,14 @@ clear_ach_deposits:
   class: Jobs::ClearAchDeposits
   queue: ach
   description: Originate clearing Transactions for ACH deposits 3 business days after completion
+
+# Pays every completed Repayment out to the holders of its Security, one
+# Transaction per holder (ruby/docs/adr/0007). Every five minutes rather than
+# hourly: unlike ACH clearing, nothing here waits on a calendar, so the only
+# delay a holder sees is the sweep's own. Idempotent, so a missed or failed
+# run is picked up by the next. Every day — a Borrower may repay on a weekend.
+disburse_repayments:
+  cron: "*/5 * * * * America/New_York"
+  class: Jobs::DisburseRepayments
+  queue: securities
+  description: Originate Disbursement Transactions for each holder of every completed Repayment
