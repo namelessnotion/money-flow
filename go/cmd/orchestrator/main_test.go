@@ -37,7 +37,7 @@ func (r *fakeReader) Fetch(ctx context.Context) (saga.Message, error) {
 	}
 }
 
-func (r *fakeReader) Commit(context.Context, saga.Message) error { return nil }
+func (r *fakeReader) Commit(context.Context, ...saga.Message) error { return nil }
 
 func (r *fakeReader) Close() error {
 	r.mu.Lock()

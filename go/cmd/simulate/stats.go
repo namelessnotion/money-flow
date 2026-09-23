@@ -10,21 +10,22 @@ import (
 // -mode=transaction — the outcome it was steered toward, the label Go
 // actually settled it under, and how long the whole exchange took. final is
 // a human-readable state label for reporting only (a transactionpb.
-// TransactionState's own String(), or an equivalent label driveOneTransfer
-// invents for a bare Transfer, which has no such enum of its own); moved and
+// TransactionState's own String(), or for a bare Transfer the label
+// fromTransferOutcome builds from transfer.OutcomeKind's own name); moved and
 // open are what the rest of this package actually decides on. summarize
 // turns a slice of these into a load report; computeExpected and reconcile
 // use the completed ones to check the ledger.
 type txResult struct {
 	transactionID string // "" in -mode=transfer: no Transaction wraps it
-	transferID    string // needed to retry settling if this ends up stuck; see retryStuck
+	transferID    string // the leg: what advance watches, and settles once it stages
 	fromWallet    string
 	toWallet      string
 	amountMinor   int64
 	planned       outcome
 	final         string
 	moved         bool // this result actually moved its money — the only fact the balance reconciliation cares about
-	open          bool // still not terminal when last checked — the retry target for retryStuck
+	open          bool // still not terminal when last checked — what awaitStuck keeps looking at
+	settled       bool // planned has been acted on (or the leg resolved without it); only the outcome is left to see
 	reason        string
 	err           error
 	latency       time.Duration
@@ -37,7 +38,7 @@ func (r txResult) completed() bool {
 }
 
 // stuck reports whether this transaction was still open when last checked —
-// the retry target for retryStuck.
+// what awaitStuck keeps looking at.
 func (r txResult) stuck() bool {
 	return r.err == nil && r.open
 }

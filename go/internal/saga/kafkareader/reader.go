@@ -260,12 +260,14 @@ func (r *Reader) Fetch(ctx context.Context) (saga.Message, error) {
 	}, nil
 }
 
-func (r *Reader) Commit(ctx context.Context, m saga.Message) error {
-	return r.reader.CommitMessages(ctx, kafka.Message{
-		Topic:     m.Topic,
-		Partition: m.Partition,
-		Offset:    m.Offset,
-	})
+// Commit records every message in ms in a single CommitMessages call, which
+// kafka-go sends to the group coordinator as one offset commit.
+func (r *Reader) Commit(ctx context.Context, ms ...saga.Message) error {
+	msgs := make([]kafka.Message, len(ms))
+	for i, m := range ms {
+		msgs[i] = kafka.Message{Topic: m.Topic, Partition: m.Partition, Offset: m.Offset}
+	}
+	return r.reader.CommitMessages(ctx, msgs...)
 }
 
 // Close releases the group membership. Skipping it leaves the group waiting

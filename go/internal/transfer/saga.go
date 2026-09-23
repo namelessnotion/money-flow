@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"uuid"
@@ -89,6 +90,26 @@ var stateByEventType = map[string]transferState{
 	eventstore.EventType(&pb.TransferCancelled{}):           stateCancelled,
 	eventstore.EventType(&pb.AcceptedTransferCancelled{}):  stateCancelled,
 	eventstore.EventType(&pb.PreparedTransferCancelled{}):  stateCancelled,
+}
+
+// TerminalEventTypes lists the event types after which a Transfer (or
+// Reversal) never moves again: a rejected request, or any transition to
+// committed, failed or cancelled. A reader of the whole log (cmd/resume -open)
+// uses it to skip finished Transfers without folding each one. It is derived
+// from stateByEventType, so the two cannot drift.
+func TerminalEventTypes() []string {
+	types := []string{
+		eventstore.EventType(&pb.TransferRequestRejected{}),
+		eventstore.EventType(&pb.ReversalRequestRejected{}),
+	}
+	for eventType, state := range stateByEventType {
+		switch state {
+		case stateCommitted, stateFailed, stateCancelled:
+			types = append(types, eventType)
+		}
+	}
+	sort.Strings(types)
+	return types
 }
 
 // currentState folds a Transfer's (or Reversal's — same aggregate type and
@@ -590,13 +611,42 @@ func (s *Server) requireClaim(ctx context.Context, transferID string, claimedSeq
 	return nil
 }
 
+// maxPrepareAttempts bounds how many times prepare re-plans after losing a
+// Wallet to a concurrent write. Each loss means some other write landed, so
+// contention always makes progress somewhere; the bound only stops one
+// Transfer being starved indefinitely, handing it back to its driver instead.
+// It sits comfortably above the orchestrator's partition count, the most
+// Transfers that can be preparing side by side in one process.
+const maxPrepareAttempts = 10
+
+// errWalletMoved is tryPrepare losing a race for a Wallet's stream to a
+// different write: its plan was built on a position that no longer holds.
+var errWalletMoved = errors.New("wallet moved while preparing")
+
 // prepare mints the destination Token(s) (skipped for a reversal — its
 // destinations are always the original Transfer's own, pre-existing source
 // Tokens) and initiates every leg's Operations, all in one AppendAtomic —
 // the Transfer's own stream, any new Token stream(s), and every new
 // Operation stream are all *created together*, the same shape as
 // Holder.Provision.
+//
+// Minting appends to the Wallet at the position it was loaded at, so two
+// Transfers into one Wallet preparing at once collide there. That is
+// contention, not a fault — the same race token.Server.Mint retries — so
+// the loser re-plans against the Wallet as it now stands, reloading
+// everything, exactly as a fresh prepare would.
 func (s *Server) prepare(ctx context.Context, transferID string) error {
+	for attempt := 0; attempt < maxPrepareAttempts; attempt++ {
+		if err := s.tryPrepare(ctx, transferID); !errors.Is(err, errWalletMoved) {
+			return err
+		}
+	}
+	return fmt.Errorf("transfer %q: prepare conflicted and did not converge after %d attempts", transferID, maxPrepareAttempts)
+}
+
+// tryPrepare is one planning of prepare against the store as it stands now.
+// It reports errWalletMoved when its write lost to a different one.
+func (s *Server) tryPrepare(ctx context.Context, transferID string) error {
 	events, err := s.store.Load(ctx, AggregateType, transferID)
 	if err != nil {
 		return twirp.InternalErrorWith(err)
@@ -754,7 +804,7 @@ func (s *Server) prepare(ctx context.Context, transferID string) error {
 				return nil // a concurrent prepare already landed
 			}
 		}
-		return fmt.Errorf("transfer %q: prepare conflicted and did not converge", transferID)
+		return errWalletMoved
 	default:
 		return twirp.InternalErrorWith(err)
 	}
@@ -768,9 +818,10 @@ func (s *Server) prepare(ctx context.Context, transferID string) error {
 // #13.
 //
 // Claims StagingTransferStarted before touching TigerBeetle (go/docs/adr/0005):
-// the synchronous RPC path and the async orchestrator's Resume both reach
-// here from the same statePrepared read, with nothing else stopping them
-// from both submitting to TigerBeetle at once. A caller that loses the claim
+// two drivers of the same Transfer — a redelivered trigger handled beside the
+// original, or cmd/resume running alongside cmd/orchestrator — can both reach
+// here from the same statePrepared read, with nothing else stopping them from
+// both submitting to TigerBeetle at once. A caller that loses the claim
 // (claimForDispatch) has nothing left to do — the transition already
 // happened, by this call or another. A caller that won it re-checks
 // requireClaim before each externally visible action, since a claim can be
@@ -1108,8 +1159,10 @@ func (s *Server) cancelPrepared(ctx context.Context, transferID, reason string) 
 // Transfer: a delivered message names an aggregate, and this re-folds that
 // aggregate's authoritative state and dispatches whatever comes next
 // (go/docs/adr/0001). It is exactly runSaga, exported — deliberately not a
-// second implementation — so a trigger and an RPC drive the Transfer through
-// the same code and converge on the same result when both do it at once.
+// second implementation — and since the async cutover (go/docs/adr/0006) it is
+// the only way a Transfer's saga runs: no RPC drives one. Two concurrent calls
+// for the same id (a redelivery, or cmd/resume beside the orchestrator)
+// converge on the same result.
 //
 // Safe to call any number of times: a Transfer already parked on the outside
 // world or already terminal is left exactly as it is. An id with no stream is

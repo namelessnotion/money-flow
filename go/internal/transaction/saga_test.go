@@ -275,13 +275,13 @@ func TestGenericManualGating_GatedChildWaitsForStartProcessingTransfer(t *testin
 	}
 
 	// Resuming without triggering it changes nothing — still gated.
-	if _, err := txnServer.GetTransactionState(ctx, &pb.GetTransactionStateRequest{Id: txnID}); err != nil {
-		t.Fatalf("GetTransactionState() error = %v", err)
+	if err := txnServer.Resume(ctx, txnID); err != nil {
+		t.Fatalf("Resume() error = %v", err)
 	}
 	events, _ = store.Load(ctx, AggregateType, txnID)
 	children, _ = foldChildStates(events)
 	if children[gatedID] != childGated {
-		t.Fatalf("gated child state after GetTransactionState = %v, want still gated", children[gatedID])
+		t.Fatalf("gated child state after Resume = %v, want still gated", children[gatedID])
 	}
 
 	processResp, err := txnServer.StartProcessingTransfer(ctx, &pb.StartProcessingTransferRequest{Id: txnID, TransferId: gatedID})

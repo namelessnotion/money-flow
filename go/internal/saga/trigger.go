@@ -3,10 +3,9 @@
 // sagas forward in response.
 //
 // It exists because a saga step that waits on the outside world — a staged
-// Transfer settling, a Reversal committing — has, until now, only ever been
-// resumed by whichever RPC happened to touch the same id next. Consuming the
-// published events gives every aggregate a durable, resumable wake-up of its
-// own.
+// Transfer settling, a Reversal committing — was once only ever resumed by
+// whichever RPC happened to touch the same id next. Consuming the published
+// events gives every aggregate a durable, resumable wake-up of its own.
 //
 // # A delivered message is a trigger, never data
 //
@@ -26,13 +25,17 @@
 //   - At-least-once delivery is sufficient. Offsets are committed after the
 //     side effects, so a crash redelivers, and redelivery re-folds.
 //
-// # It runs alongside the synchronous saga, not instead of it
+// # It is the only thing that advances a saga
 //
-// Every RPC handler in transfer and transaction still runs its saga in
-// process. This package adds a second driver of the same sagas rather than
-// replacing the first, which is only safe because resuming an aggregate that
-// has already reached its next wait state does nothing at all. That property
-// is what the cutover will eventually rest on, so it is tested here directly.
+// Since the async cutover (go/docs/adr/0006) no RPC handler in transfer or
+// transaction drives a saga: each records its decision and returns, and that
+// decision is itself the event this package folds. Stopping the orchestrator,
+// or stalling publication, therefore leaves accepted work exactly where it
+// was accepted; cmd/resume is the out-of-band way to move an aggregate whose
+// trigger never arrives. Resuming an aggregate that has already reached its
+// next wait state still does nothing at all, which is what makes redelivery —
+// and cmd/resume running beside this — safe, so that property is tested here
+// directly.
 package saga
 
 import (

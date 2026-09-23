@@ -155,7 +155,7 @@ func (s *Server) RequestTransfer(ctx context.Context, req *pb.RequestTransferReq
 			return nil, twirp.InternalErrorWith(err)
 		}
 		if len(events) > 0 {
-			return s.decidedRequestTransfer(ctx, req.GetId(), events)
+			return s.decidedRequestTransfer(req.GetId(), events)
 		}
 
 		var rejection *pb.TransferRequestRejected
@@ -198,7 +198,7 @@ func (s *Server) RequestTransfer(ctx context.Context, req *pb.RequestTransferReq
 // decidedRequestTransfer returns the response for a Transfer that's already
 // been decided — accepted or rejected — reading whichever fact actually
 // landed rather than assuming which one this caller expected.
-func (s *Server) decidedRequestTransfer(ctx context.Context, transferID string, events []eventstore.Event) (*pb.RequestTransferResponse, error) {
+func (s *Server) decidedRequestTransfer(transferID string, events []eventstore.Event) (*pb.RequestTransferResponse, error) {
 	msg, err := events[0].Decode()
 	if err != nil {
 		return nil, twirp.InternalErrorWith(err)
@@ -306,7 +306,7 @@ func (s *Server) RequestReversal(ctx context.Context, req *pb.RequestReversalReq
 			return nil, twirp.InternalErrorWith(err)
 		}
 		if len(events) > 0 {
-			return s.decidedRequestReversal(ctx, req.GetId(), events)
+			return s.decidedRequestReversal(req.GetId(), events)
 		}
 
 		legs, rejection, err := reversalManifest(ctx, s.store, req.GetTransferId())
@@ -347,7 +347,7 @@ func (s *Server) RequestReversal(ctx context.Context, req *pb.RequestReversalReq
 	return nil, abortedRetry(req.GetId())
 }
 
-func (s *Server) decidedRequestReversal(ctx context.Context, transferID string, events []eventstore.Event) (*pb.RequestReversalResponse, error) {
+func (s *Server) decidedRequestReversal(transferID string, events []eventstore.Event) (*pb.RequestReversalResponse, error) {
 	msg, err := events[0].Decode()
 	if err != nil {
 		return nil, twirp.InternalErrorWith(err)

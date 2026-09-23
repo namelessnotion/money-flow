@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 )
 
@@ -28,14 +29,17 @@ func (m Message) String() string {
 // Fetch and Commit are deliberately separate calls: committing only after the
 // handler has returned is what makes delivery at-least-once, which
 // go/docs/adr/0001 decision 3 permits and go/docs/adr/0003 relies on.
+//
+// Fetch is only ever called from one goroutine, but Commit is called from one
+// per partition at once, so it must be safe for concurrent use.
 type Reader interface {
 	// Fetch blocks until the next message is available, ctx is cancelled, or
 	// the reader fails. It does not advance any committed position.
 	Fetch(ctx context.Context) (Message, error)
 
-	// Commit records m, and everything before it on m's partition, as
-	// processed.
-	Commit(ctx context.Context, m Message) error
+	// Commit records each of ms, and everything before it on its partition,
+	// as processed, in one call.
+	Commit(ctx context.Context, ms ...Message) error
 }
 
 // Handler drives whatever a trigger names. *Orchestrator is the implementation.
@@ -54,6 +58,25 @@ const (
 	// defaultBackoff is the pause before the first retry; each subsequent
 	// retry doubles it.
 	defaultBackoff = 250 * time.Millisecond
+
+	// commitBacklog is how many handled messages may wait for the committer
+	// before a worker blocks handing it another. The committer drains the
+	// whole backlog into each commit, so this bounds one commit's size and the
+	// redelivery a crash can cause, not the commit rate.
+	commitBacklog = 1024
+
+	// flushTimeout bounds the last commit on the way out, which runs after
+	// shutdown has cancelled ctx: long enough for one round trip to the group
+	// coordinator, short enough not to hold up a SIGTERM.
+	flushTimeout = 5 * time.Second
+
+	// partitionBacklog is how many fetched messages may wait on one partition
+	// while its worker is busy. Fetching is a single stream across every
+	// partition, so a partition whose backlog is full stalls the fetch for all
+	// of them; a small queue absorbs an ordinary run of messages on one key
+	// without that. It bounds memory, not correctness: a waiting message is
+	// uncommitted, and a halt or shutdown leaves it for the next start.
+	partitionBacklog = 64
 )
 
 // HaltError reports that a consumer stopped on a message it could neither
@@ -130,32 +153,211 @@ func NewConsumer(reader Reader, handler Handler, opts ...ConsumerOption) *Consum
 // it. A cancelled context is an ordinary shutdown and returns nil; anything
 // else is returned, with a *HaltError distinguishing "this message stopped us"
 // from "the transport did".
+//
+// Each partition is consumed by its own worker, one message at a time and in
+// offset order, and the workers run concurrently. That is exactly as much order
+// as the publication promises: messages are keyed by aggregate id, so one
+// aggregate's triggers share a partition and stay in sequence (root
+// docs/adr/0001 decisions 4 and 5), and nothing orders one partition against
+// another. Handling across aggregates was already concurrent — the transfer and
+// transaction topics are consumed side by side, and go/docs/adr/0005 made
+// concurrent dispatch converge — so this adds no interleaving a single-partition
+// topic could not already produce.
+//
+// A halt on any partition stops every partition taking new work, as
+// go/docs/adr/0003 decides. Work already in flight elsewhere is not abandoned:
+// it finishes and commits. On any exit, Run returns only after every worker has
+// stopped, because cmd/orchestrator releases the pool and ledger client the
+// handlers use as soon as it does.
 func (c *Consumer) Run(ctx context.Context) error {
+	// Fetching stops on shutdown or on the first failure, whichever comes
+	// first; a failure cancels only the fetch, never ctx, so handlers in
+	// flight on other partitions run to completion.
+	fetchCtx, stopFetching := context.WithCancel(ctx)
+	defer stopFetching()
+
+	var (
+		wg       sync.WaitGroup
+		failOnce sync.Once
+		failure  error
+		failed   = make(chan struct{})
+		backlogs = map[int]chan Message{}
+	)
+	fail := func(err error) {
+		failOnce.Do(func() {
+			failure = err
+			close(failed)
+			stopFetching()
+		})
+	}
+
+	handled := make(chan Message, commitBacklog)
+	committerDone := make(chan struct{})
+	go func() {
+		defer close(committerDone)
+		c.commitHandled(ctx, handled, fail)
+	}()
+
+	var fetchErr error
 	for {
-		msg, err := c.reader.Fetch(ctx)
-		if err != nil {
-			if isShutdown(ctx) {
-				return nil
-			}
-			return fmt.Errorf("saga: fetch: %w", err)
+		var msg Message
+		if msg, fetchErr = c.reader.Fetch(fetchCtx); fetchErr != nil {
+			break
+		}
+
+		backlog, ok := backlogs[msg.Partition]
+		if !ok {
+			backlog = make(chan Message, partitionBacklog)
+			backlogs[msg.Partition] = backlog
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				c.consumePartition(ctx, backlog, handled, failed, fail)
+			}()
+		}
+		select {
+		case backlog <- msg:
+		case <-failed:
+		case <-ctx.Done():
+		}
+	}
+
+	// Closing every backlog is what lets an idle worker return. Once all of
+	// them have, nothing more can be handled, so the committer is told to
+	// flush what it holds and stop; only after that is failure settled, since
+	// until then a worker or the committer could still set it.
+	for _, backlog := range backlogs {
+		close(backlog)
+	}
+	wg.Wait()
+	close(handled)
+	<-committerDone
+
+	switch {
+	case failure != nil:
+		return failure
+	case isShutdown(ctx):
+		return nil
+	default:
+		return fmt.Errorf("saga: fetch: %w", fetchErr)
+	}
+}
+
+// consumePartition handles one partition's messages in the order they were
+// fetched, handing each to the committer only after its side effects: a crash
+// before the commit redelivers the message, and redelivery re-folds to the
+// same place. It does not wait for the commit itself — the next trigger needs
+// the last one's side effects, not its offset — so a commit's round trip is
+// off every partition's critical path. It stops at the first message it
+// cannot process, and before taking any further message once another
+// partition, or the committer, has failed.
+func (c *Consumer) consumePartition(
+	ctx context.Context, backlog <-chan Message, handled chan<- Message, failed <-chan struct{}, fail func(error),
+) {
+	for msg := range backlog {
+		select {
+		case <-failed:
+			return
+		default:
+		}
+		if isShutdown(ctx) {
+			return
 		}
 
 		if err := c.process(ctx, msg); err != nil {
 			if isShutdown(ctx) {
-				return nil
+				return
 			}
+			// Stop the other partitions first, then say so: once the halt is
+			// visible, nothing else should still be starting.
+			fail(err)
 			c.logger.Printf("saga: HALTED on %s; nothing further will be consumed from this reader: %v", msg, err)
-			return err
+			return
 		}
 
-		// After the side effects, never before: a crash between the two
-		// redelivers the message, and redelivery re-folds to the same place.
-		if err := c.reader.Commit(ctx, msg); err != nil {
-			if isShutdown(ctx) {
-				return nil
+		// Handed over first, even mid-halt: this message's side effects have
+		// happened, so its offset is owed. Only a full backlog — which means
+		// the committer itself has stopped — is a reason to give up on it.
+		select {
+		case handled <- msg:
+		default:
+			select {
+			case handled <- msg:
+			case <-failed:
+				return
 			}
-			return fmt.Errorf("saga: commit %s: %w", msg, err)
 		}
+	}
+}
+
+// commitHandled records handled messages' offsets until handled is closed,
+// then flushes what is left.
+//
+// Each commit carries everything that queued up while the previous one was out
+// — one high-water mark per partition, since a commit covers everything before
+// it on its partition — so under load commits grow rather than multiply, and
+// a single round trip is shared by every partition. Offsets on a partition
+// arrive in the order its worker handled them, so the high-water mark never
+// passes a message that has not been handled.
+//
+// A commit that fails stops the consumer (go/docs/adr/0003 decision 5): a
+// consumer that cannot record progress would replay from its last commit on
+// every restart. The final flush runs after shutdown has cancelled ctx, so it
+// gets a context of its own; if even that fails, the offsets it held are
+// simply redelivered on the next start.
+func (c *Consumer) commitHandled(ctx context.Context, handled <-chan Message, fail func(error)) {
+	pending := map[int]Message{}
+	take := func(m Message) {
+		if prev, ok := pending[m.Partition]; !ok || m.Offset > prev.Offset {
+			pending[m.Partition] = m
+		}
+	}
+	commit := func(ctx context.Context) error {
+		if len(pending) == 0 {
+			return nil
+		}
+		batch := make([]Message, 0, len(pending))
+		for _, m := range pending {
+			batch = append(batch, m)
+		}
+		if err := c.reader.Commit(ctx, batch...); err != nil {
+			return fmt.Errorf("saga: commit %v: %w", batch, err)
+		}
+		clear(pending)
+		return nil
+	}
+
+	for m := range handled {
+		take(m)
+		for drained := false; !drained; {
+			select {
+			case more, ok := <-handled:
+				if !ok {
+					drained = true
+					break
+				}
+				take(more)
+			default:
+				drained = true
+			}
+		}
+		if err := commit(ctx); err != nil {
+			if isShutdown(ctx) {
+				break // left for the final flush below
+			}
+			// Workers see the failure rather than block handing over more.
+			fail(err)
+			return
+		}
+	}
+
+	flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), flushTimeout)
+	defer cancel()
+	for m := range handled {
+		take(m)
+	}
+	if err := commit(flushCtx); err != nil {
+		c.logger.Printf("saga: final commit failed; these offsets will be redelivered: %v", err)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"strings"
 	"sync"
 	"time"
 	"uuid"
@@ -11,6 +12,7 @@ import (
 	sharedpb "github.com/namelessnotion/money_flow/go/gen/proto/shared/v1"
 	transactionpb "github.com/namelessnotion/money_flow/go/gen/proto/transaction/v1"
 	transferpb "github.com/namelessnotion/money_flow/go/gen/proto/transfer/v1"
+	"github.com/namelessnotion/money_flow/go/internal/transfer"
 )
 
 // runConfig is everything one simulated transaction needs to pick its
@@ -22,12 +24,57 @@ type runConfig struct {
 	rollbackRate float64
 }
 
-// seedEntity mints amount fresh into target's wallet from reserve, via a
-// single mint_source Transfer — the simulated equivalent of an ACH
-// deposit's shadow leg recognizing new cash in. stage=false, auto_process=
-// true commits synchronously within the one StartInitializingTransaction
-// call, so the seed is in place before this returns.
-func seedEntity(ctx context.Context, transactions transactionpb.TransactionService, reserve, target entity, amount uint64, currency string) error {
+// simulatedRollover is the reason every planned rollback gives, so a report
+// can tell a steered rollback from one the ledger decided on its own.
+const simulatedRollover = "simulated rollover"
+
+// seedAll mints amount fresh into every entity's wallet from reserve, one
+// mint_source Transaction each — the simulated equivalent of an ACH deposit's
+// shadow leg recognizing new cash in — and returns only once every one has
+// committed. Accepting a seed funds nothing, and the load that follows spends
+// what the seeds put there.
+//
+// Every seed is started before any is waited on, so they settle side by side
+// rather than one orchestrator round trip at a time.
+func seedAll(
+	ctx context.Context, transactions transactionpb.TransactionService,
+	reserve entity, entities []entity, amount uint64, currency string, wait settleWait,
+) error {
+	seeds := make([]txResult, len(entities))
+	for i, target := range entities {
+		transactionID, err := startSeed(ctx, transactions, reserve, target, amount, currency)
+		if err != nil {
+			return err
+		}
+		seeds[i] = txResult{transactionID: transactionID}
+	}
+
+	observe := func(ctx context.Context, r *txResult) { observeTransaction(ctx, transactions, r) }
+	for i, target := range entities {
+		seed := &seeds[i]
+		awaitResult(ctx, seed, wait, observe)
+		switch {
+		case seed.err != nil:
+			return fmt.Errorf("seed %s: %w", target.name, seed.err)
+		case seed.moved:
+			continue
+		case seed.open:
+			return fmt.Errorf("seed %s: still %s after waiting; nothing is folding it — check go/cmd/orchestrator is "+
+				"running with a CDC connector to consume from (`make cdc-up && make orchestrator-up`, then "+
+				"`make orchestrator-logs`)", target.name, seed.final)
+		default:
+			return fmt.Errorf("seed %s: ended %s rather than completing: %s", target.name, seed.final, seed.reason)
+		}
+	}
+	return nil
+}
+
+// startSeed asks for target's seed and reports the Transaction it started. A
+// seed has no staging and no business decision to wait on, so once the
+// orchestrator folds it, it commits on its own.
+func startSeed(
+	ctx context.Context, transactions transactionpb.TransactionService, reserve, target entity, amount uint64, currency string,
+) (string, error) {
 	transactionID, transferID := uuid.NewV7().String(), uuid.NewV7().String()
 	resp, err := transactions.StartInitializingTransaction(ctx, &transactionpb.StartInitializingTransactionRequest{
 		Id: transactionID, FactoryName: "simulate_seed", FactoryVersion: "v1",
@@ -40,12 +87,12 @@ func seedEntity(ctx context.Context, transactions transactionpb.TransactionServi
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("seed %s: %w", target.name, err)
+		return "", fmt.Errorf("seed %s: %w", target.name, err)
 	}
 	if rejected := resp.GetTransactionRejected(); rejected != nil {
-		return fmt.Errorf("seed %s: rejected: %s", target.name, rejected.GetReason())
+		return "", fmt.Errorf("seed %s: rejected: %s", target.name, rejected.GetReason())
 	}
-	return nil
+	return transactionID, nil
 }
 
 // driveFunc drives one simulated transfer between from and to end to end,
@@ -55,34 +102,72 @@ func seedEntity(ctx context.Context, transactions transactionpb.TransactionServi
 type driveFunc func(ctx context.Context, from, to entity, amount uint64, currency string, planned outcome) txResult
 
 // fromTransactionState translates a Transaction's proto state into this
-// package's own moved/open vocabulary: COMPLETED is the only state that
-// actually moved money, and STARTED is the only one still open (waiting on
-// this tool's own next call, or on go/cmd/orchestrator).
+// package's own moved/open vocabulary. COMPLETED is the only state that moved
+// money. Every state the saga has yet to finish with is open — INITIALIZED and
+// ROLLBACK_STARTED as much as STARTED, since each is waiting on
+// go/cmd/orchestrator rather than on anything this tool will decide.
 func fromTransactionState(state transactionpb.TransactionState) (final string, moved, open bool) {
-	return state.String(),
-		state == transactionpb.TransactionState_TRANSACTION_STATE_COMPLETED,
-		state == transactionpb.TransactionState_TRANSACTION_STATE_STARTED
+	switch state {
+	case transactionpb.TransactionState_TRANSACTION_STATE_INITIALIZED,
+		transactionpb.TransactionState_TRANSACTION_STATE_STARTED,
+		transactionpb.TransactionState_TRANSACTION_STATE_ROLLBACK_STARTED:
+		open = true
+	}
+	return state.String(), state == transactionpb.TransactionState_TRANSACTION_STATE_COMPLETED, open
 }
 
-// driveOne runs one simulated transaction end to end: stage a Transfer
-// between from and to, wrapped in a single-child Transaction (the
-// production ACH shape), then steer it toward planned, and report whatever
-// state Go actually settled it in — which may differ from planned when the
-// Transfer fails organically (e.g. insufficient funds) before ever reaching
-// Staged.
-func driveOne(
-	ctx context.Context,
-	transactions transactionpb.TransactionService, transfers transferpb.TransferService,
-	from, to entity, amount uint64, currency string, planned outcome,
-) txResult {
+// fromTransferOutcome is fromTransactionState's counterpart for a bare
+// Transfer, labelled after transfer.OutcomeKind's own names so the report and
+// the Transfer aggregate never disagree on what a state is called. Anything
+// short of a terminal is open: in flight is the orchestrator's to move, and
+// staged or pending is this tool's to settle.
+func fromTransferOutcome(o transfer.OutcomeKind) (final string, moved, open bool) {
+	switch o {
+	case transfer.OutcomeNotFound, transfer.OutcomeInFlight, transfer.OutcomeStaged, transfer.OutcomePending:
+		open = true
+	}
+	return "TRANSFER_" + strings.ToUpper(o.String()), o == transfer.OutcomeCommitted, open
+}
+
+// observeTransaction records where r's Transaction stands. Its reason, when
+// it has one, replaces whatever r last held: the Transaction's own account of
+// how it ended is the one worth reporting.
+func observeTransaction(ctx context.Context, transactions transactionpb.TransactionService, r *txResult) {
+	resp, err := transactions.GetTransactionState(ctx, &transactionpb.GetTransactionStateRequest{Id: r.transactionID})
+	if err != nil {
+		r.err = err
+		return
+	}
+	r.final, r.moved, r.open = fromTransactionState(resp.GetState())
+	if reason := resp.GetReason(); reason != "" {
+		r.reason = reason
+	}
+}
+
+// transactionDriver runs -mode=transaction: every simulated Transfer wrapped
+// in a single-child Transaction, the production ACH shape.
+type transactionDriver struct {
+	transactions transactionpb.TransactionService
+	transfers    transferpb.TransferService
+	leg          legReader
+	wait         settleWait
+}
+
+// drive runs one simulated transaction end to end: a staged Transfer between
+// from and to, wrapped in a Transaction, steered toward planned once it has
+// staged — the window a real staged Transfer waits in for its provider — and
+// reported in whatever state Go actually left it. That may differ from
+// planned when the Transfer fails organically (e.g. insufficient funds)
+// before it ever stages.
+func (d transactionDriver) drive(ctx context.Context, from, to entity, amount uint64, currency string, planned outcome) txResult {
 	start := time.Now()
 	transactionID, transferID := uuid.NewV7().String(), uuid.NewV7().String()
-	result := txResult{
+	r := txResult{
 		transactionID: transactionID, transferID: transferID, fromWallet: from.walletID, toWallet: to.walletID,
 		amountMinor: int64(amount), planned: planned,
 	}
 
-	_, err := transactions.StartInitializingTransaction(ctx, &transactionpb.StartInitializingTransactionRequest{
+	resp, err := d.transactions.StartInitializingTransaction(ctx, &transactionpb.StartInitializingTransactionRequest{
 		Id: transactionID, FactoryName: "simulate", FactoryVersion: "v1",
 		Transfers: map[string]*transactionpb.Transfer{
 			transferID: {
@@ -92,169 +177,167 @@ func driveOne(
 			},
 		},
 	})
-	if err != nil {
-		result.err = err
-		result.latency = time.Since(start)
-		return result
+	switch {
+	case err != nil:
+		r.err = err
+	case resp.GetTransactionRejected() != nil:
+		// Refused at the door, funding pre-flight most likely: terminal, and
+		// there is no leg to wait for.
+		r.final, r.moved, r.open = fromTransactionState(transactionpb.TransactionState_TRANSACTION_STATE_REJECTED)
+		r.reason = resp.GetTransactionRejected().GetReason()
+	default:
+		awaitResult(ctx, &r, d.wait, d.advance)
 	}
-
-	state, reason, err := resumeTransaction(ctx, transactions, transactionID)
-	if err == nil && state == transactionpb.TransactionState_TRANSACTION_STATE_STARTED {
-		// Still Started means the Transfer leg staged cleanly and is
-		// waiting on us, exactly the window a real staged Transfer waits in
-		// for the provider — steer it toward planned. Any other state here
-		// is already terminal (an organic failure rolled it back on its
-		// own before we got a say).
-		state, reason, err = settle(ctx, transactions, transfers, transactionID, transferID, planned)
-	}
-
-	result.final, result.moved, result.open = fromTransactionState(state)
-	result.reason, result.err = reason, err
-	result.latency = time.Since(start)
-	return result
+	r.latency = time.Since(start)
+	return r
 }
 
-func resumeTransaction(ctx context.Context, transactions transactionpb.TransactionService, id string) (transactionpb.TransactionState, string, error) {
-	resp, err := transactions.GetTransactionState(ctx, &transactionpb.GetTransactionStateRequest{Id: id})
-	if err != nil {
-		return transactionpb.TransactionState_TRANSACTION_STATE_UNSPECIFIED, "", err
-	}
-	return resp.GetState(), resp.GetReason(), nil
-}
-
-// settle steers a Transaction whose sole Transfer leg is Staged toward
-// planned: complete confirms and posts the staged leg (the provider
-// reporting the entry settled) then resumes the Transaction to notice;
-// rollback asks the Transaction itself to cancel it (the provider returning
-// the entry instead).
-func settle(
-	ctx context.Context,
-	transactions transactionpb.TransactionService, transfers transferpb.TransferService,
-	transactionID, transferID string, planned outcome,
-) (transactionpb.TransactionState, string, error) {
-	if planned == outcomeRollback {
-		resp, err := transactions.StartTransactionRollback(ctx, &transactionpb.StartTransactionRollbackRequest{
-			Id: transactionID, Reason: "simulated rollover",
-		})
+// advance settles r's leg the first time a look finds it staged, then records
+// the Transaction's own state. Until then the leg is the orchestrator's to
+// move: not yet requested, or still preparing. A leg that resolves without
+// ever staging — an organic failure — leaves nothing for the tool to decide;
+// the Transaction rolls itself back, and all that is left is to see it land.
+func (d transactionDriver) advance(ctx context.Context, r *txResult) {
+	if !r.settled {
+		leg, err := d.leg(ctx, r.transferID)
 		if err != nil {
-			return transactionpb.TransactionState_TRANSACTION_STATE_UNSPECIFIED, "", err
+			r.err = err
+			return
 		}
-		return resp.GetState(), "simulated rollover", nil
+		switch leg {
+		case transfer.OutcomeNotFound, transfer.OutcomeInFlight:
+			// Not staged yet, and not this tool's to hurry.
+		case transfer.OutcomeStaged, transfer.OutcomePending:
+			reason, err := d.settle(ctx, r, leg)
+			if err != nil {
+				r.err = err
+				return
+			}
+			r.settled, r.reason = true, reason
+		default:
+			r.settled = true
+		}
 	}
-
-	confirmResp, err := transfers.ConfirmStagedTransfer(ctx, &transferpb.ConfirmStagedTransferRequest{Id: transferID})
-	if err != nil {
-		return transactionpb.TransactionState_TRANSACTION_STATE_UNSPECIFIED, "", err
-	}
-	if rejected := confirmResp.GetConfirmStagedTransferRejected(); rejected != nil {
-		// The Transfer's own saga never reached Staged — most likely it lost
-		// a concurrency race while preparing its source Tokens under load
-		// (transfer.Server bounds those retries) and is parked mid-flight.
-		// Nothing this tool calls drives that saga forward again; only
-		// go/cmd/orchestrator's event-triggered Resume does. Report it as
-		// still Started with the rejection's reason rather than as a
-		// transport error: that is genuinely the Transaction's state right
-		// now, and it is worth surfacing rather than hiding behind err.
-		return transactionpb.TransactionState_TRANSACTION_STATE_STARTED, rejected.GetReason(), nil
-	}
-
-	postResp, err := transfers.PostPendingTransfer(ctx, &transferpb.PostPendingTransferRequest{Id: transferID})
-	if err != nil {
-		return transactionpb.TransactionState_TRANSACTION_STATE_UNSPECIFIED, "", err
-	}
-	if rejected := postResp.GetPostPendingTransferRejected(); rejected != nil {
-		return transactionpb.TransactionState_TRANSACTION_STATE_STARTED, rejected.GetReason(), nil
-	}
-
-	return resumeTransaction(ctx, transactions, transactionID)
+	observeTransaction(ctx, d.transactions, r)
 }
 
-// driveOneTransfer runs one simulated Transfer end to end with no owning
-// Transaction at all — RequestTransfer directly, then steer it toward
-// planned — to isolate TransferService's own throughput from Transaction's
-// DAG-dispatch overhead. It is the -mode=transfer counterpart to driveOne,
-// and mirrors its shape exactly except for the missing Transaction wrapper:
-// stage=true parks a cleanly-accepted Transfer at Staged within the same
-// RequestTransfer call, the same way driveOne's child Transfer does, and
-// settleTransfer steers it from there exactly as settle does.
-func driveOneTransfer(
-	ctx context.Context, transfers transferpb.TransferService,
-	from, to entity, amount uint64, currency string, planned outcome,
-) txResult {
+// settle steers r's staged leg toward planned: the provider reporting the
+// entry settled, or returned. Rolling back is the Transaction's to do, so it
+// is asked of the Transaction — legal now, since a staged leg means the
+// Transaction has started. Completing is the leg's own confirmation and
+// posting. Reports a refusal's reason, if one came back.
+func (d transactionDriver) settle(ctx context.Context, r *txResult, leg transfer.OutcomeKind) (string, error) {
+	if r.planned == outcomeRollback {
+		_, err := d.transactions.StartTransactionRollback(ctx, &transactionpb.StartTransactionRollbackRequest{
+			Id: r.transactionID, Reason: simulatedRollover,
+		})
+		return "", err
+	}
+	return confirmAndPost(ctx, d.transfers, r.transferID, leg)
+}
+
+// transferDriver runs -mode=transfer: bare Transfers with no owning
+// Transaction, to isolate TransferService's own throughput from
+// Transaction's DAG-dispatch overhead. It mirrors transactionDriver except for
+// the missing wrapper.
+type transferDriver struct {
+	transfers transferpb.TransferService
+	leg       legReader
+	wait      settleWait
+}
+
+func (d transferDriver) drive(ctx context.Context, from, to entity, amount uint64, currency string, planned outcome) txResult {
 	start := time.Now()
-	transferID := uuid.NewV7().String()
-	result := txResult{
-		transferID: transferID, fromWallet: from.walletID, toWallet: to.walletID,
+	r := txResult{
+		transferID: uuid.NewV7().String(), fromWallet: from.walletID, toWallet: to.walletID,
 		amountMinor: int64(amount), planned: planned,
 	}
 
-	resp, err := transfers.RequestTransfer(ctx, &transferpb.RequestTransferRequest{
-		Id: transferID, FromWalletId: from.walletID, ToWalletId: to.walletID,
+	resp, err := d.transfers.RequestTransfer(ctx, &transferpb.RequestTransferRequest{
+		Id: r.transferID, FromWalletId: from.walletID, ToWalletId: to.walletID,
 		Amount: &sharedpb.Money{MinorUnits: amount, Currency: currency}, Stage: true,
 	})
-	if err != nil {
-		result.err = err
-		result.latency = time.Since(start)
-		return result
-	}
-	if rejected := resp.GetTransferRequestRejected(); rejected != nil {
+	switch {
+	case err != nil:
+		r.err = err
+	case resp.GetTransferRequestRejected() != nil:
 		// An organic failure (e.g. insufficient funds) decided at request
-		// time, before ever reaching Staged — terminal, and never moved
-		// anything, the same as driveOne's own request-time rejections.
-		result.final, result.reason = "TRANSFER_REQUEST_REJECTED", rejected.GetReason()
-		result.latency = time.Since(start)
-		return result
+		// time: terminal, and it never moved anything.
+		r.final, r.moved, r.open = fromTransferOutcome(transfer.OutcomeRejected)
+		r.reason = resp.GetTransferRequestRejected().GetReason()
+	default:
+		awaitResult(ctx, &r, d.wait, d.advance)
 	}
-
-	result.final, result.moved, result.open, result.reason, result.err = settleTransfer(ctx, transfers, transferID, planned)
-	result.latency = time.Since(start)
-	return result
+	r.latency = time.Since(start)
+	return r
 }
 
-// settleTransfer steers a bare, Staged Transfer toward planned: complete
-// confirms and posts it (the provider reporting the entry settled);
-// rollback cancels it directly (the provider returning the entry instead).
-// It is settle's -mode=transfer counterpart — same shape, minus the
-// Transaction-level rollback/resume indirection a bare Transfer has no use
-// for — and reports the same "still open" signal settle does when the
-// Transfer never reached Staged in the first place.
-func settleTransfer(
-	ctx context.Context, transfers transferpb.TransferService, transferID string, planned outcome,
-) (final string, moved, open bool, reason string, err error) {
-	if planned == outcomeRollback {
-		resp, err := transfers.CancelStagedTransfer(ctx, &transferpb.CancelStagedTransferRequest{
-			Id: transferID, Reason: "simulated rollover",
+// advance settles r the first time a look finds it staged, then records where
+// it landed. The settlement RPCs are each one claimed transition answered in
+// full, so a bare Transfer is terminal the moment its settlement returns —
+// there is nothing downstream of it to wait for.
+func (d transferDriver) advance(ctx context.Context, r *txResult) {
+	leg, err := d.leg(ctx, r.transferID)
+	if err != nil {
+		r.err = err
+		return
+	}
+	if !r.settled && (leg == transfer.OutcomeStaged || leg == transfer.OutcomePending) {
+		reason, err := d.settle(ctx, r, leg)
+		if err != nil {
+			r.err = err
+			return
+		}
+		r.settled, r.reason = true, reason
+		if leg, err = d.leg(ctx, r.transferID); err != nil {
+			r.err = err
+			return
+		}
+	}
+	r.final, r.moved, r.open = fromTransferOutcome(leg)
+}
+
+// settle steers r's staged Transfer toward planned: cancelled directly (the
+// provider returning the entry), or confirmed and posted.
+func (d transferDriver) settle(ctx context.Context, r *txResult, leg transfer.OutcomeKind) (string, error) {
+	if r.planned == outcomeRollback {
+		resp, err := d.transfers.CancelStagedTransfer(ctx, &transferpb.CancelStagedTransferRequest{
+			Id: r.transferID, Reason: simulatedRollover,
 		})
 		if err != nil {
-			return "", false, false, "", err
+			return "", err
 		}
 		if rejected := resp.GetCancelStagedTransferRejected(); rejected != nil {
-			// Not (yet) Staged — most likely lost a concurrency race while
-			// preparing, the same condition settle's own
-			// ConfirmStagedTransferRejected case reports. Still open: only
-			// go/cmd/orchestrator's event-triggered Resume (or a later call
-			// touching this id) drives it forward from here.
-			return "TRANSFER_ACCEPTED", false, true, rejected.GetReason(), nil
+			return rejected.GetReason(), nil
 		}
-		return "TRANSFER_CANCELLED", false, false, "simulated rollover", nil
+		return simulatedRollover, nil
+	}
+	return confirmAndPost(ctx, d.transfers, r.transferID, leg)
+}
+
+// confirmAndPost completes a staged or pending leg: confirmed (the provider
+// accepted the entry), then posted (the funds settled). A pending leg was
+// already confirmed and only needs posting. Reports a refusal's reason, if
+// either step refused.
+func confirmAndPost(ctx context.Context, transfers transferpb.TransferService, transferID string, leg transfer.OutcomeKind) (string, error) {
+	if leg == transfer.OutcomeStaged {
+		resp, err := transfers.ConfirmStagedTransfer(ctx, &transferpb.ConfirmStagedTransferRequest{Id: transferID})
+		if err != nil {
+			return "", err
+		}
+		if rejected := resp.GetConfirmStagedTransferRejected(); rejected != nil {
+			return rejected.GetReason(), nil
+		}
 	}
 
-	confirmResp, err := transfers.ConfirmStagedTransfer(ctx, &transferpb.ConfirmStagedTransferRequest{Id: transferID})
+	resp, err := transfers.PostPendingTransfer(ctx, &transferpb.PostPendingTransferRequest{Id: transferID})
 	if err != nil {
-		return "", false, false, "", err
+		return "", err
 	}
-	if rejected := confirmResp.GetConfirmStagedTransferRejected(); rejected != nil {
-		return "TRANSFER_ACCEPTED", false, true, rejected.GetReason(), nil
+	if rejected := resp.GetPostPendingTransferRejected(); rejected != nil {
+		return rejected.GetReason(), nil
 	}
-
-	postResp, err := transfers.PostPendingTransfer(ctx, &transferpb.PostPendingTransferRequest{Id: transferID})
-	if err != nil {
-		return "", false, false, "", err
-	}
-	if rejected := postResp.GetPostPendingTransferRejected(); rejected != nil {
-		return "TRANSFER_PENDING", false, true, rejected.GetReason(), nil
-	}
-	return "TRANSFER_COMMITTED", true, false, "", nil
+	return "", nil
 }
 
 // runLoad drives n simulated transfers across entities with concurrency
@@ -290,43 +373,4 @@ func runLoad(
 	}
 	wg.Wait()
 	return results, time.Since(start)
-}
-
-// retryFunc re-attempts settling one stuck result in place — mutating its
-// final/moved/open/reason/err — however -mode chooses to shape a retry.
-type retryFunc func(ctx context.Context, r *txResult)
-
-// retryStuck gives every stuck result another chance to settle, waiting
-// delay before each attempt to let go/cmd/orchestrator's event-triggered
-// Resume have a chance to advance any Transfer parked at Accepted (see
-// settle's/settleTransfer's ConfirmStagedTransferRejected case) to Staged —
-// the furthest an external, business-decision-free retry can take it.
-// Nothing else drives that saga forward: this tool's own first settling
-// attempt is the only other caller, and it already ran once inside drive.
-// Mutates results in place and returns however many are still stuck once
-// attempts run out.
-func retryStuck(ctx context.Context, results []txResult, attempts int, delay time.Duration, retry retryFunc) int {
-	for attempt := 0; attempt < attempts; attempt++ {
-		idx := stuckIndices(results)
-		if len(idx) == 0 {
-			return 0
-		}
-		time.Sleep(delay)
-		for _, i := range idx {
-			start := time.Now()
-			retry(ctx, &results[i])
-			results[i].latency += time.Since(start)
-		}
-	}
-	return len(stuckIndices(results))
-}
-
-func stuckIndices(results []txResult) []int {
-	var idx []int
-	for i, r := range results {
-		if r.stuck() {
-			idx = append(idx, i)
-		}
-	}
-	return idx
 }

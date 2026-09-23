@@ -18,7 +18,7 @@
 // accepted. cmd/resume is the out-of-band way to move one aggregate by hand
 // when no trigger will ever arrive for it.
 //
-//	DATABASE_URL=postgres://... DATABASE_MAX_CONNS=5 KAFKA_BROKERS=kafka:9092 \
+//	DATABASE_URL=postgres://... DATABASE_MAX_CONNS=16 KAFKA_BROKERS=kafka:9092 \
 //	TIGERBEETLE_ADDRESS=127.0.0.1:3000 TIGERBEETLE_CLUSTER_ID=0 \
 //	go run ./cmd/orchestrator
 package main
@@ -47,13 +47,15 @@ const (
 	defaultDatabaseURL = "postgres://money_flow:money_flow@localhost:5432/money_flow_dev?sslmode=disable"
 	// defaultDatabaseMaxConns is deliberately explicit rather than pgxpool's
 	// own default (max(4, runtime.NumCPU())) — see cmd/server's own constant
-	// of the same name for why that matters. This orchestrator only ever runs
-	// two consumer goroutines (one per aggregate-type topic, per groupPrefix
-	// below), each processing one trigger at a time, so it needs far less
-	// headroom than the RPC server does; keep it modest to leave the rest of
-	// Postgres's max_connections=100 for cmd/server and everything else
-	// sharing the instance.
-	defaultDatabaseMaxConns     = "5"
+	// of the same name for why that matters. This orchestrator handles one
+	// trigger at a time per partition, every partition at once (saga.Consumer),
+	// across both aggregate-type topics — 2 × 6 partitions on the dev topics —
+	// so the pool is sized to let each of those hold a connection with a
+	// little headroom, rather than queueing them behind one another. It stays
+	// below cmd/server's to leave the rest of Postgres's max_connections=100
+	// for it and everything else sharing the instance; raise it with the
+	// partition count.
+	defaultDatabaseMaxConns     = "16"
 	defaultKafkaBrokers         = "localhost:9092"
 	defaultTigerBeetleAddress   = "127.0.0.1:3000"
 	defaultTigerBeetleClusterID = "0"

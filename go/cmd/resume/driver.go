@@ -43,27 +43,93 @@ func (d driver) inFlight(ctx context.Context, t target) (bool, error) {
 	}
 }
 
-// drive redelivers t's trigger until the aggregate's own stream stops growing,
-// and reports how many wake-ups that took. Redelivery is what at-least-once
-// already permits (go/docs/adr/0001), so the last, inert one costs nothing.
+// drive wakes t, and everything t's progress depends on, until none of it
+// grows any more, and reports how many rounds that took. Redelivery is what
+// at-least-once already permits (go/docs/adr/0001), so the last, inert round
+// costs nothing.
+//
+// Waking t alone is not enough. Driving a Transaction requests its children,
+// and the trigger that would run each one is exactly the kind this tool exists
+// because nobody received; without waking them here too, every hop of the DAG
+// would cost another run.
 func (d driver) drive(ctx context.Context, t target) (int, error) {
-	trigger := saga.Trigger{AggregateType: t.aggregateType, AggregateID: t.aggregateID}
-
 	for round := 1; round <= maxWakeUps; round++ {
-		before, err := d.store.Load(ctx, t.aggregateType, t.aggregateID)
+		scope, err := d.scope(ctx, t)
 		if err != nil {
 			return round, err
 		}
-		if err := d.orchestrator.Handle(ctx, trigger); err != nil {
-			return round, err
-		}
-		after, err := d.store.Load(ctx, t.aggregateType, t.aggregateID)
+		before, err := d.footprint(ctx, scope)
 		if err != nil {
 			return round, err
 		}
-		if len(after) == len(before) {
+		for _, s := range scope {
+			if err := d.orchestrator.Handle(ctx, saga.Trigger{AggregateType: s.aggregateType, AggregateID: s.aggregateID}); err != nil {
+				return round, fmt.Errorf("%s: %w", s, err)
+			}
+		}
+
+		// Re-derived rather than reused: this round may have requested
+		// children that did not exist when it began.
+		if scope, err = d.scope(ctx, t); err != nil {
+			return round, err
+		}
+		after, err := d.footprint(ctx, scope)
+		if err != nil {
+			return round, err
+		}
+		if after == before {
 			return round, nil
 		}
 	}
 	return maxWakeUps, fmt.Errorf("still moving after %d wake-ups; look at it rather than driving it further", maxWakeUps)
+}
+
+// scope is every aggregate one round of driving t wakes: t itself and, when t
+// is or belongs to a Transaction, that Transaction and every Transfer it has
+// requested. Driving a child Transfer is driving its Transaction's progress,
+// so the Transaction moving counts as t advancing.
+func (d driver) scope(ctx context.Context, t target) ([]target, error) {
+	transactionID := ""
+	switch t.aggregateType {
+	case transaction.AggregateType:
+		transactionID = t.aggregateID
+	case transfer.AggregateType:
+		owner, err := transfer.OwningTransaction(ctx, d.store, t.aggregateID)
+		if err != nil {
+			return nil, err
+		}
+		transactionID = owner
+	}
+
+	scope := []target{t}
+	if transactionID == "" {
+		return scope, nil
+	}
+	if transactionID != t.aggregateID {
+		scope = append(scope, target{aggregateType: transaction.AggregateType, aggregateID: transactionID})
+	}
+	children, err := transaction.ChildTransferIDs(ctx, d.store, transactionID)
+	if err != nil {
+		return nil, err
+	}
+	for _, child := range children {
+		if child != t.aggregateID {
+			scope = append(scope, target{aggregateType: transfer.AggregateType, aggregateID: child})
+		}
+	}
+	return scope, nil
+}
+
+// footprint totals every stream in scope: the measure of whether a round moved
+// anything at all.
+func (d driver) footprint(ctx context.Context, scope []target) (int, error) {
+	total := 0
+	for _, s := range scope {
+		events, err := d.store.Load(ctx, s.aggregateType, s.aggregateID)
+		if err != nil {
+			return 0, err
+		}
+		total += len(events)
+	}
+	return total, nil
 }

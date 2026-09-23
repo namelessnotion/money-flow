@@ -132,16 +132,25 @@ func TestValidateDAG_AcceptsExactlyTheLimit(t *testing.T) {
 // the caller and never reaches the stream.
 func TestValidateDAG_RejectsAmountsNoTransferWouldAccept(t *testing.T) {
 	t.Parallel()
-	for name, amount := range map[string]*sharedpb.Money{
-		"zero minor units": {MinorUnits: 0, Currency: "USD"},
-		"no currency":      {MinorUnits: 100, Currency: ""},
-		"no amount at all": nil,
+	// The error becomes the recorded rejection reason, so its wording is the
+	// contract: the leg's own path to the bad field, named once.
+	for name, tc := range map[string]struct {
+		amount *sharedpb.Money
+		want   string
+	}{
+		"zero minor units": {&sharedpb.Money{MinorUnits: 0, Currency: "USD"}, `transaction: transfers["A"].amount.minor_units must be greater than zero`},
+		"no currency":      {&sharedpb.Money{MinorUnits: 100, Currency: ""}, `transaction: transfers["A"].amount.currency is required`},
+		"no amount at all": {nil, `transaction: transfers["A"].amount is required`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			xfers := map[string]*pb.Transfer{"A": {Id: "A", Amount: amount, AutoProcess: true}}
-			if err := validateDAG(xfers, nil); err == nil {
+			xfers := map[string]*pb.Transfer{"A": {Id: "A", Amount: tc.amount, AutoProcess: true}}
+			err := validateDAG(xfers, nil)
+			if err == nil {
 				t.Fatalf("validateDAG() error = nil for a leg with %s, want a rejection", name)
+			}
+			if err.Error() != tc.want {
+				t.Errorf("validateDAG() error = %q, want %q", err, tc.want)
 			}
 		})
 	}

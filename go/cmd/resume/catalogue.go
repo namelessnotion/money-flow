@@ -47,16 +47,23 @@ func (c catalogue) typesOf(ctx context.Context, id string) ([]string, error) {
 	return types, rows.Err()
 }
 
-// sagaStreams lists every Transaction and Transfer stream in the log. Which of
-// them is actually still going anywhere is a fold of each aggregate's own
-// stream, so it is driver.inFlight's question rather than this one's — the
-// database knows what exists, and only the aggregates know what that means.
+// sagaStreams lists every Transaction and Transfer stream in the log that has
+// not finished — none of its events is one the aggregate names as terminal.
+// Terminals are absorbing, so a stream holding one can be skipped without
+// folding it, whatever noise was recorded after it; on a long-lived log that is
+// almost every stream. Whether what is left is actually still going anywhere
+// is a fold of each aggregate's own stream, so it stays driver.inFlight's
+// question — the database narrows what exists, and only the aggregates know
+// what it means.
 func (c catalogue) sagaStreams(ctx context.Context) ([]target, error) {
+	terminals := append(transaction.TerminalEventTypes(), transfer.TerminalEventTypes()...)
 	rows, err := c.pool.Query(ctx,
-		`SELECT DISTINCT aggregate_type, aggregate_id::text FROM events
+		`SELECT aggregate_type, aggregate_id::text FROM events
 		  WHERE aggregate_type = ANY($1)
+		  GROUP BY aggregate_type, aggregate_id
+		 HAVING NOT bool_or(event_type = ANY($2))
 		  ORDER BY aggregate_type, aggregate_id`,
-		[]string{transaction.AggregateType, transfer.AggregateType})
+		[]string{transaction.AggregateType, transfer.AggregateType}, terminals)
 	if err != nil {
 		return nil, fmt.Errorf("list aggregates: %w", err)
 	}

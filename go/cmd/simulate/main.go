@@ -14,9 +14,11 @@
 //
 // It talks to two boundaries: the running server over Twirp for every write
 // (Holder/Wallet provisioning, Transaction/Transfer driving — the same
-// surface Ruby drives in production), and Postgres directly, read-only,
-// for the post-run correctness check — the same access cmd/events already
-// uses to watch the log, since no Twirp RPC exposes a Wallet's balance.
+// surface Ruby drives in production), and Postgres directly, read-only — the
+// same access cmd/events already uses to watch the log. It reads Postgres for
+// two facts no Twirp RPC exposes: whether a Transfer leg has staged yet, which
+// it must know before settling one, and each Wallet's balance, for the
+// post-run correctness check. So Postgres is needed even with -skip-verify.
 //
 //	go run ./cmd/simulate -entities 50 -transactions 2000 -concurrency 16
 //	go run ./cmd/simulate -mode transfer -entities 50 -transactions 2000 -concurrency 16
@@ -30,14 +32,18 @@
 // records a decision and returns, and the orchestrator folds the events that
 // publishes. Without it nothing settles and every transaction reports open —
 // so `make cdc-up && make orchestrator-up` before running this, and check
-// `make orchestrator-logs` first if everything comes back STARTED.
+// `make orchestrator-logs` first if everything comes back still open.
 //
-// Every transaction therefore starts out open, and the wait is the normal
-// path rather than a rescue: each one is looked at up to
-// -settle-wait-attempts times, -settle-wait-delay apart, which is one CDC
-// round trip each. A TRANSACTION_STATE_STARTED transaction still in the final
-// report ran out of attempts, not out of hope — looking again later, or with a
-// longer delay, may still resolve it.
+// Every transaction therefore starts out open, and waiting is the normal path
+// rather than a rescue. Each one is looked at up to -settle-wait-attempts more
+// times, -settle-wait-delay apart, first until its leg stages — only then is
+// it steered to settle or roll back, the way a provider only answers for an
+// entry it has actually been sent — and then until the orchestrator has
+// folded that answer. Anything still open after the load gets the same wait
+// again. A transaction still open in the final report ran out of looks, not
+// out of hope: looking again later may still resolve it. Seeding waits the
+// same way, and fails the run if any seed does not commit, since the load
+// would otherwise spend money that is not there yet.
 //
 // One genuine stall remains: a Transfer whose prepare step loses a concurrency
 // race on a hot Wallet is left mid-flight, and only a later trigger moves it.
@@ -84,10 +90,10 @@ func main() {
 		serverURL      = flag.String("server-url", env("SERVER_URL", defaultServerURL), "base URL of a running go/cmd/server (no /twirp suffix)")
 		databaseURL    = flag.String("database-url", env("DATABASE_URL", defaultDatabaseURL), "Postgres event log, for the post-run correctness check")
 		seed           = flag.Uint64("seed", uint64(time.Now().UnixNano()), "RNG seed; fix it for a reproducible run")
-		skipVerify     = flag.Bool("skip-verify", false, "skip the post-run ledger correctness check (no Postgres access needed)")
+		skipVerify     = flag.Bool("skip-verify", false, "skip the post-run ledger correctness check (Postgres is still read, to see when each leg stages)")
 		timeout        = flag.Duration("timeout", 30*time.Second, "per-RPC timeout")
-		retryAttempts  = flag.Int("settle-wait-attempts", 10, "how many more times to look at a still-open transaction, giving go/cmd/orchestrator time to reach it (0 disables waiting)")
-		retryDelay     = flag.Duration("settle-wait-delay", time.Second, "how long to wait before each look at a still-open transaction")
+		waitAttempts   = flag.Int("settle-wait-attempts", 200, "how many more times to look at a still-open transaction, giving go/cmd/orchestrator time to reach it")
+		waitDelay      = flag.Duration("settle-wait-delay", 50*time.Millisecond, "how long to wait before each look at a still-open transaction")
 	)
 	flag.Parse()
 
@@ -100,6 +106,12 @@ func main() {
 	if *mode != "transaction" && *mode != "transfer" {
 		log.Fatalf(`simulate: -mode must be "transaction" or "transfer", got %q`, *mode)
 	}
+	if *waitAttempts < 1 {
+		// Nothing settles inside a call any more, so a tool that never looks
+		// twice never sees anything finish.
+		log.Fatal("simulate: -settle-wait-attempts must be at least 1")
+	}
+	wait := settleWait{attempts: *waitAttempts, delay: *waitDelay}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -109,30 +121,37 @@ func main() {
 	transactions := transactionpb.NewTransactionServiceProtobufClient(*serverURL, httpClient)
 	transfers := transferpb.NewTransferServiceProtobufClient(*serverURL, httpClient)
 
+	pool, err := openPool(ctx, *databaseURL, *concurrency)
+	if err != nil {
+		log.Fatalf("simulate: %v", err)
+	}
+	defer pool.Close()
+	store := eventstore.NewPostgresStore(pool)
+
 	log.Printf("simulate: seed=%d provisioning reserve + %d entities against %s", *seed, *entitiesN, *serverURL)
 	reserve, entities, err := provisionAll(ctx, holders, *entitiesN)
 	if err != nil {
 		log.Fatalf("simulate: %v", err)
 	}
 
+	if err := seedAll(ctx, transactions, reserve, entities, *initialBalance, *currency, wait); err != nil {
+		log.Fatalf("simulate: %v", err)
+	}
 	initial := make(map[string]int64, len(entities))
 	for _, e := range entities {
-		if err := seedEntity(ctx, transactions, reserve, e, *initialBalance, *currency); err != nil {
-			log.Fatalf("simulate: %v", err)
-		}
 		initial[e.walletID] = int64(*initialBalance)
 	}
 	log.Printf("simulate: seeded every entity with %d %s", *initialBalance, *currency)
 
-	drive, retry := driverFor(*mode, transactions, transfers)
+	drive, advance := driverFor(*mode, transactions, transfers, storeLegReader(store), wait)
 
 	cfg := runConfig{currency: *currency, minAmount: *minAmount, maxAmount: *maxAmount, rollbackRate: *rollbackRate}
 	log.Printf("simulate: mode=%s running %d transactions, concurrency %d, rollback-rate %.2f", *mode, *transactionsN, *concurrency, *rollbackRate)
 	results, wallClock := runLoad(ctx, entities, cfg, *transactionsN, *concurrency, *seed, drive)
 
-	if stuck := len(stuckIndices(results)); stuck > 0 && *retryAttempts > 0 {
-		log.Printf("simulate: %d transactions still open; waiting for the orchestrator, up to %d times, %s apart", stuck, *retryAttempts, *retryDelay)
-		if remaining := retryStuck(ctx, results, *retryAttempts, *retryDelay, retry); remaining > 0 {
+	if stuck := len(stuckIndices(results)); stuck > 0 {
+		log.Printf("simulate: %d transactions still open; waiting for the orchestrator, up to %d more looks, %s apart", stuck, wait.attempts, wait.delay)
+		if remaining := awaitStuck(ctx, results, wait, advance); remaining > 0 {
 			log.Printf("simulate: %d transactions still open after waiting", remaining)
 		} else {
 			log.Print("simulate: every transaction reached a terminal state")
@@ -145,13 +164,6 @@ func main() {
 		log.Print("simulate: -skip-verify set, not checking the ledger")
 		return
 	}
-
-	pool, err := pgxpool.New(ctx, *databaseURL)
-	if err != nil {
-		log.Fatalf("simulate: connect to %s: %v", *databaseURL, err)
-	}
-	defer pool.Close()
-	store := eventstore.NewPostgresStore(pool)
 
 	expected := computeExpected(initial, results)
 	reconciliations, err := reconcile(ctx, store, entities, expected)
@@ -168,31 +180,41 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-// driverFor builds the drive/retry pair -mode calls for: "transaction" wraps
-// every simulated Transfer in a single-child Transaction (driveOne/settle,
-// translated through fromTransactionState); "transfer" drives
-// TransferService directly (driveOneTransfer/settleTransfer). mode is
+// driverFor builds the drive/advance pair -mode calls for: "transaction" wraps
+// every simulated Transfer in a single-child Transaction (transactionDriver);
+// "transfer" drives TransferService directly (transferDriver). mode is
 // assumed already validated.
-func driverFor(mode string, transactions transactionpb.TransactionService, transfers transferpb.TransferService) (driveFunc, retryFunc) {
+func driverFor(
+	mode string, transactions transactionpb.TransactionService, transfers transferpb.TransferService, leg legReader, wait settleWait,
+) (driveFunc, advanceFunc) {
 	if mode == "transfer" {
-		drive := func(ctx context.Context, from, to entity, amount uint64, currency string, planned outcome) txResult {
-			return driveOneTransfer(ctx, transfers, from, to, amount, currency, planned)
-		}
-		retry := func(ctx context.Context, r *txResult) {
-			r.final, r.moved, r.open, r.reason, r.err = settleTransfer(ctx, transfers, r.transferID, r.planned)
-		}
-		return drive, retry
+		d := transferDriver{transfers: transfers, leg: leg, wait: wait}
+		return d.drive, d.advance
 	}
+	d := transactionDriver{transactions: transactions, transfers: transfers, leg: leg, wait: wait}
+	return d.drive, d.advance
+}
 
-	drive := func(ctx context.Context, from, to entity, amount uint64, currency string, planned outcome) txResult {
-		return driveOne(ctx, transactions, transfers, from, to, amount, currency, planned)
+// openPool connects to the event log. Every worker reads it while waiting for
+// its leg to stage, so the pool is sized to the load's concurrency rather than
+// pgxpool's CPU-count default, which would queue those reads behind each
+// other and show up as latency that is the tool's, not the system's.
+func openPool(ctx context.Context, databaseURL string, concurrency int) (*pgxpool.Pool, error) {
+	cfg, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("database url: %w", err)
 	}
-	retry := func(ctx context.Context, r *txResult) {
-		state, reason, err := settle(ctx, transactions, transfers, r.transactionID, r.transferID, r.planned)
-		r.final, r.moved, r.open = fromTransactionState(state)
-		r.reason, r.err = reason, err
+	cfg.MaxConns = int32(max(concurrency, 4))
+
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("connect to %s: %w", databaseURL, err)
 	}
-	return drive, retry
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("ping %s: %w", databaseURL, err)
+	}
+	return pool, nil
 }
 
 func printSummary(s summary) {

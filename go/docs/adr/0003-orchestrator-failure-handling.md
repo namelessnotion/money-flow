@@ -66,6 +66,23 @@ availability for the aggregates that share a topic with a broken one — and not
 has happened, and a persistently failing handler in a money system is an incident rather than a background
 condition. Revisit when a halt has actually cost something.
 
+> **Partitions are consumed concurrently since 2026-09-23.** `saga.Consumer` runs one worker per partition, each
+> still handling and committing one message at a time in offset order, so decision 4 holds per partition — which
+> is all the publication ever ordered (root ADR 0001 decisions 4 and 5). A halt still stops the whole consumer:
+> no partition takes new work once one has failed. What changed is that a trigger already in flight on another
+> partition finishes and commits rather than being cut off, and the consumer returns only once it has. Messages
+> fetched but not yet started stay uncommitted for the next start, as before. Measured motive: the serial loop
+> capped the transfer topic at ~800 events/sec (~125 Transfers/sec) with the orchestrator's CPU mostly idle.
+
+> **Offsets are committed in batches since 2026-09-23, amending decision 4.** Still only after the side effects:
+> a worker hands a message to a single committer once its handler has returned, and carries on without waiting
+> for the round trip. The committer sends everything queued behind the commit in flight as one high-water mark
+> per partition. A partition's offsets arrive in the order it handled them, so the mark never passes an
+> unhandled message. Decision 5 is unchanged: a failed commit halts. What this gives up is granularity: a crash
+> redelivers every message handled since the last commit returned, not just the one in flight. That is ordinary
+> redelivery under ADR 0001, only more of it. On shutdown and on a halt, what was handled is flushed before the
+> consumer returns.
+
 **One topic halting cancels the other.** `cmd/orchestrator` stops both consumers when either gives up. A
 Transaction that cannot hear from the transfer topic is not usefully still working, and one visible failure is
 easier to act on than a half-running system that looks healthy.

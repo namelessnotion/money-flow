@@ -361,8 +361,16 @@ func (s *Server) runSaga(ctx context.Context, transactionID string) error {
 
 		switch top := topLevelState(events); top {
 		case stateInitialized:
-			if err := s.appendSagaStep(ctx, transactionID, &pb.TransactionStarted{Id: transactionID}); err != nil {
-				return err
+			// Appended against the fold that decided it, not through
+			// appendSagaStep's dedupe-and-retry. StartTransactionRollback may
+			// land while a Transaction is still Initialized, and a Started
+			// written after that would put it back to Started, undoing the
+			// rollback and dispatching what it abandoned. On a conflict the
+			// loop re-folds and decides again from whatever landed.
+			switch err := s.store.Append(ctx, AggregateType, transactionID, int64(len(events)), &pb.TransactionStarted{Id: transactionID}); {
+			case err == nil, errors.Is(err, eventstore.ErrConcurrencyConflict):
+			default:
+				return twirp.InternalErrorWith(err)
 			}
 
 		case stateStarted:

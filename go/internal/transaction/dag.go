@@ -143,7 +143,10 @@ func validateChildAmount(key string, spec *pb.Transfer) error {
 	}
 	var twerr twirp.Error
 	if errors.As(err, &twerr) {
-		return fmt.Errorf("transaction: transfers[%q].amount %s", key, twerr.Msg())
+		// Msg already leads with the field path money.Validate was given
+		// ("amount is required", "amount.minor_units must be ..."), so it
+		// is appended to the leg's own path rather than repeated after it.
+		return fmt.Errorf("transaction: transfers[%q].%s", key, twerr.Msg())
 	}
 	return fmt.Errorf("transaction: transfers[%q].amount is invalid: %w", key, err)
 }

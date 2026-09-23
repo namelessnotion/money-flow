@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/twitchtv/twirp"
 	"google.golang.org/protobuf/proto"
@@ -95,6 +96,54 @@ func IsOpen(ctx context.Context, store eventstore.Store, transactionID string) (
 	default:
 		return true, nil
 	}
+}
+
+// TerminalEventTypes lists the event types after which a Transaction's saga
+// has nothing left to do — the true terminals runSaga stops at. A reader of
+// the whole log (cmd/resume -open) uses it to skip finished Transactions
+// without folding each one. Unlike IsOpen it counts RollbackFailed as
+// finished: that state waits on a person, never on another saga run.
+func TerminalEventTypes() []string {
+	return []string{
+		eventstore.EventType(&pb.TransactionCompleted{}),
+		eventstore.EventType(&pb.TransactionRolledBack{}),
+		eventstore.EventType(&pb.TransactionRollbackFailed{}),
+		eventstore.EventType(&pb.TransactionRejected{}),
+	}
+}
+
+// ChildTransferIDs lists every Transfer transactionID has requested — its
+// dispatched children, then any Reversals its rollback asked for — in the
+// order its stream recorded them. A gated child that was never requested has
+// no stream of its own and is not listed. It lets an out-of-band driver
+// (cmd/resume) wake a Transaction's children the way their own published
+// triggers would.
+func ChildTransferIDs(ctx context.Context, store eventstore.Store, transactionID string) ([]string, error) {
+	events, err := store.Load(ctx, AggregateType, transactionID)
+	if err != nil {
+		return nil, twirp.InternalErrorWith(err)
+	}
+
+	var ids []string
+	for _, e := range events {
+		switch e.EventType {
+		case eventstore.EventType(&pb.TransferRequestedWithinTransaction{}),
+			eventstore.EventType(&pb.TransferReversalRequestedWithinTransaction{}):
+		default:
+			continue
+		}
+		msg, err := e.Decode()
+		if err != nil {
+			return nil, twirp.InternalErrorWith(err)
+		}
+		switch m := msg.(type) {
+		case *pb.TransferRequestedWithinTransaction:
+			ids = append(ids, m.GetTransferId())
+		case *pb.TransferReversalRequestedWithinTransaction:
+			ids = append(ids, m.GetReversalId())
+		}
+	}
+	return ids, nil
 }
 
 // Exists implements transfer.TransactionExistsChecker: reports whether
@@ -217,7 +266,8 @@ func rejectedResponse(e *pb.TransactionRejected) *pb.StartInitializingTransactio
 // since it reflects a caller-timing mistake rather than a durable business
 // fact — when transfer_id isn't in this Transaction's DAG at all, or isn't
 // currently Gated (not found, dependencies unsatisfied, or already
-// processed).
+// processed). A child the saga has simply not gated yet (see awaitingGate) is
+// answered with a retryable twirp Unavailable instead of a rejection.
 //
 // It requests that one child in-process, which looks like an exception to this
 // package's no-dispatch rule and is not: a gated child is already touched, so
@@ -242,7 +292,7 @@ func (s *Server) StartProcessingTransfer(ctx context.Context, req *pb.StartProce
 		return rejectedProcessing(req, "transaction not found"), nil
 	}
 
-	transfers, _, err := decodeSpec(events)
+	transfers, deps, err := decodeSpec(events)
 	if err != nil {
 		return nil, err
 	}
@@ -256,6 +306,11 @@ func (s *Server) StartProcessingTransfer(ctx context.Context, req *pb.StartProce
 		return nil, err
 	}
 	if children[req.GetTransferId()] != childGated {
+		if awaitingGate(topLevelState(events), transfers, deps, children, req.GetTransferId()) {
+			return nil, twirp.NewError(twirp.Unavailable, fmt.Sprintf(
+				"transaction %q has not gated transfer %q yet; retry once its saga has caught up", req.GetId(), req.GetTransferId(),
+			))
+		}
 		return rejectedProcessing(req, fmt.Sprintf(
 			"transfer %q is not gated (dependencies not yet satisfied, or already processed)", req.GetTransferId(),
 		)), nil
@@ -297,6 +352,24 @@ func (s *Server) StartProcessingTransfer(ctx context.Context, req *pb.StartProce
 	}
 }
 
+// awaitingGate reports whether transferID is a gated child the saga simply
+// has not reached yet: auto_process=false, untouched, every parent completed,
+// and the Transaction still going forward — Initialized counts, since the fold
+// that starts it gates its roots. The next fold will gate it, so a caller
+// asking now is early rather than wrong, and hearing "not gated" would read as
+// a refusal that only publication lag caused.
+func awaitingGate(
+	state transactionState, transfers map[string]*pb.Transfer, deps map[string]*pb.TransferIdList, children map[string]childState, transferID string,
+) bool {
+	if state != stateInitialized && state != stateStarted {
+		return false
+	}
+	if transfers[transferID].GetAutoProcess() {
+		return false
+	}
+	return slices.Contains(readyToRun(transfers, deps, touchedSet(children), completedSet(children)), transferID)
+}
+
 func rejectedProcessing(req *pb.StartProcessingTransferRequest, reason string) *pb.StartProcessingTransferResponse {
 	return &pb.StartProcessingTransferResponse{
 		Id: req.GetId(),
@@ -336,8 +409,11 @@ func (s *Server) GetTransactionState(ctx context.Context, req *pb.GetTransaction
 	return &pb.GetTransactionStateResponse{Id: req.GetId(), State: topLevelState(events).proto(), Reason: reason}, nil
 }
 
-// StartTransactionRollback is legal only while the Transaction is Started —
-// mirroring CancelAcceptedTransfer's restriction to pre-commitment states.
+// StartTransactionRollback is legal only while the Transaction is Initialized
+// or Started — mirroring CancelAcceptedTransfer's restriction to
+// pre-commitment states. Initialized is included because it now lasts until
+// the orchestrator folds it; a rollback recorded then abandons every child
+// before any is dispatched.
 // This is the manual counterpart to the automatic rollback the saga already
 // triggers on any child failure: an operator-driven abort of a Transaction
 // that hasn't failed on its own. Idempotent once rollback has already begun
@@ -360,7 +436,7 @@ func (s *Server) StartTransactionRollback(ctx context.Context, req *pb.StartTran
 	}
 
 	switch topLevelState(events) {
-	case stateStarted:
+	case stateInitialized, stateStarted:
 		if err := s.appendSagaStep(ctx, req.GetId(), &pb.TransactionRollbackStarted{Id: req.GetId(), Reason: req.GetReason()}); err != nil {
 			return nil, twirp.InternalErrorWith(err)
 		}

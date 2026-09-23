@@ -334,7 +334,7 @@ func TestSameTransactionVisibility_DAGCanSpendItsOwnTaggedToken(t *testing.T) {
 }
 
 // TestRunSaga_IdempotentMidDAGResume mirrors Transfer's own resumability
-// tests: calling runSaga (via GetTransactionState) after only partial
+// tests: calling runSaga (via Resume) after only partial
 // progress is recorded converges to the same state a full run would reach,
 // and an extra call afterward is a pure no-op.
 func TestRunSaga_IdempotentMidDAGResume(t *testing.T) {
@@ -373,8 +373,8 @@ func TestRunSaga_IdempotentMidDAGResume(t *testing.T) {
 
 	// Resuming before anything external happened converges to the exact
 	// same state — a pure no-op.
-	if _, err := txnServer.GetTransactionState(ctx, &pb.GetTransactionStateRequest{Id: txnID}); err != nil {
-		t.Fatalf("GetTransactionState() error = %v", err)
+	if err := txnServer.Resume(ctx, txnID); err != nil {
+		t.Fatalf("Resume() error = %v", err)
 	}
 	eventsAfter, err := store.Load(ctx, AggregateType, txnID)
 	if err != nil {
@@ -402,8 +402,8 @@ func TestRunSaga_IdempotentMidDAGResume(t *testing.T) {
 
 	// One more resume on an already-terminal Transaction is a pure no-op.
 	countBefore := len(events)
-	if _, err := txnServer.GetTransactionState(ctx, &pb.GetTransactionStateRequest{Id: txnID}); err != nil {
-		t.Fatalf("GetTransactionState() error = %v", err)
+	if err := txnServer.Resume(ctx, txnID); err != nil {
+		t.Fatalf("Resume() error = %v", err)
 	}
 	events, err = store.Load(ctx, AggregateType, txnID)
 	if err != nil {
