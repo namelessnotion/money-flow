@@ -35,9 +35,20 @@ so much as names it.
 
 ## Running it
 
-The orchestrator reads the topics the CDC connector publishes, so the connector has to exist first. It is
-behind the `cdc` compose profile for that reason — `docker compose up -d` does not start it, because without
-`make cdc-up` there would be nothing on the topics at all.
+The orchestrator reads the topics the CDC connector publishes, so the connector has to exist first. Registering
+it is a separate step from starting the containers: `docker compose up -d` does start the orchestrator (the
+`cdc` compose profile these docs described was removed in 0a3818a), but without `make cdc-up` there is nothing
+on the topics for it to read and it simply idles.
+
+**Both are required, not tuning.** Since the async cutover
+([go ADR 0006](../go/docs/adr/0006-synchronous-dispatch-removed-from-the-rpc-surface.md)) nothing in the RPC
+surface runs a saga: `cmd/server` records decisions and answers, and this process does the rest. Without it, or
+without the connector, every Transaction stops at `initialized` and no money moves — quietly, since nothing
+errors.
+
+`make resume-open` is the way out when a trigger will never arrive: publication starts at the current end of the
+log, so anything written before `make cdc-up` is never published at all, and the aggregate has no wake-up
+coming. It drives everything still in flight through this same orchestrator, out of band.
 
 ```bash
 make cdc-up

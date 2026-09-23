@@ -20,10 +20,14 @@ module Services
     # 1. Requires the Security to be fully subscribed and not already drawn.
     # 2. Records the ids it is about to send, derived from the Security, so
     #    asking twice converges on Go rather than drawing twice.
-    # 3. Asks Go to run it. The leg is a root and mints nothing, so a short
-    #    escrow is refused at accept time, before anything is written.
-    # 4. Asks Go how it stands, because an operator who pressed the button is
-    #    owed a definitive answer.
+    # 3. Asks Go to accept it. The leg is a root and mints nothing, so a short
+    #    escrow is refused at accept time, before anything is written — which
+    #    is the answer an operator who pressed the button actually needs.
+    #
+    # It does not wait to see the money move. Go accepts the Transaction and
+    # returns; running it belongs to the orchestrator, and the outcome reaches
+    # Ruby through the projection like every other lifecycle fact
+    # (go/docs/adr/0006). Services::Securities::Stage is where it shows up.
     #
     # Getting that money out to a real bank is an ordinary ACH withdrawal from
     # the Borrower's own cleared cash. The Draw does not cross the boundary.
@@ -41,7 +45,6 @@ module Services
 
         perform { record_ids(security) }
         start_transaction!(security)
-        require_settled!(security)
         security
       end
 
@@ -80,14 +83,6 @@ module Services
         )
       rescue Refused => e
         raise Refused, "refused before any money moved: #{e.message}"
-      end
-
-      sig { params(security: Models::Security).void }
-      def require_settled!(security)
-        outcome = @go.resume(required(security, :draw_transaction_id))
-        return unless outcome.failed?
-
-        raise Refused, "refused: #{outcome.reason.empty? ? outcome.state : outcome.reason}"
       end
 
       # The draw ids are nullable on the row until record_ids writes them, but

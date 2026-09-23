@@ -72,6 +72,11 @@ trigger-shaped process manager does not observe intermediate state through messa
 unnecessary. Either leave them defined and unused deliberately, or remove them — but do not implement them on
 the assumption this decision required them.
 
+> **Still true after the cutover.** [ADR 0006](0006-synchronous-dispatch-removed-from-the-rpc-surface.md) removed
+> the synchronous dispatch entirely and needed none of them: the `*Started` members were already taken for
+> something else by [ADR 0005](0005-saga-dispatch-claim-prevents-double-invocation.md)'s claim markers, and the
+> `Start*` and `Complete*` members remain defined and unused.
+
 **Concurrent appends to a Transaction's stream become reachable.** With per-type topics, a transfer-topic
 message and a transaction-topic message can be handled concurrently and both append to the same Transaction.
 `appendSagaStep` already retries `ErrConcurrencyConflict`, so this is handled — but it is now a live path rather

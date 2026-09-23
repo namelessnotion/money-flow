@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	sharedpb "github.com/namelessnotion/money_flow/go/gen/proto/shared/v1"
+	pb "github.com/namelessnotion/money_flow/go/gen/proto/transaction/v1"
 	tokenpb "github.com/namelessnotion/money_flow/go/gen/proto/token/v1"
 	walletpb "github.com/namelessnotion/money_flow/go/gen/proto/wallet/v1"
 	"github.com/namelessnotion/money_flow/go/internal/eventstore"
@@ -67,4 +68,123 @@ func mintAndFundToken(t *testing.T, store eventstore.Store, lc ledger.Client, wa
 	if results[0].Result != ledger.TransferResultOK {
 		t.Fatalf("fund token: transfer result = %v, want OK", results[0].Result)
 	}
+}
+
+// driveSaga stands in for cmd/orchestrator. Nothing in the RPC surface
+// advances a saga any more, so a test that wants a Transaction to get
+// anywhere has to say what drove it — which is the point, and is why this is
+// called explicitly at each site rather than hidden inside a wrapper around
+// StartInitializingTransaction.
+//
+// One round resumes the Transaction, then every child Transfer it has heard
+// of, then the Transaction again — the same two-step the real orchestrator
+// makes when a transfer-topic trigger arrives and it follows the link to the
+// owning Transaction (saga.Orchestrator.handleTransfer). Rounds repeat until
+// one of them appends nothing anywhere, which is the quiescence a trigger loop
+// reaches when there is no further event to deliver.
+//
+// xfers may be nil for a Transaction driven through a fake transferClient,
+// where there are no real child Transfer streams to resume.
+//
+// It returns how many rounds it took, so a test can assert that slicing really
+// did spread the work across more than one.
+func driveSaga(t *testing.T, ts *Server, xfers *transfer.Server, store eventstore.Store, transactionID string) int {
+	t.Helper()
+	ctx := context.Background()
+
+	const maxRounds = 200
+	for round := 1; ; round++ {
+		if round > maxRounds {
+			t.Fatalf("driveSaga(%s): still appending after %d rounds; the saga is not converging", transactionID, maxRounds)
+		}
+		before := totalEvents(t, store, transactionID)
+
+		if err := ts.Resume(ctx, transactionID); err != nil {
+			t.Fatalf("driveSaga(%s): resume transaction: %v", transactionID, err)
+		}
+		if xfers != nil {
+			for _, childID := range knownChildren(t, store, transactionID) {
+				if err := xfers.Resume(ctx, childID); err != nil {
+					t.Fatalf("driveSaga(%s): resume child %s: %v", transactionID, childID, err)
+				}
+			}
+			if err := ts.Resume(ctx, transactionID); err != nil {
+				t.Fatalf("driveSaga(%s): resume transaction: %v", transactionID, err)
+			}
+		}
+
+		if totalEvents(t, store, transactionID) == before {
+			return round
+		}
+	}
+}
+
+// knownChildren lists every Transfer this Transaction has recorded anything
+// about and that has a stream of its own, including the Reversals its rollback
+// created — those are Transfer aggregates too, and they need resuming exactly
+// like a forward child. A gated child is named on the Transaction's stream but
+// was never requested, so it has no stream and is left out: the orchestrator
+// only ever gets a trigger for an aggregate that has actually written
+// something.
+func knownChildren(t *testing.T, store eventstore.Store, transactionID string) []string {
+	t.Helper()
+	events, err := store.Load(context.Background(), AggregateType, transactionID)
+	if err != nil {
+		t.Fatalf("Load(%s): %v", transactionID, err)
+	}
+
+	seen := map[string]bool{}
+	var ids []string
+	add := func(id string) {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	for _, e := range events {
+		msg, err := e.Decode()
+		if err != nil {
+			t.Fatalf("Decode(%s): %v", e.EventType, err)
+		}
+		add(childEventTransferID(msg))
+		// A Reversal is named only by the event that requested it.
+		if requested, ok := msg.(*pb.TransferReversalRequestedWithinTransaction); ok {
+			add(requested.GetReversalId())
+		}
+		if rolled, ok := msg.(*pb.TransferRolledBackWithinTransaction); ok {
+			add(rolled.GetDetailId())
+		}
+	}
+
+	existing := ids[:0]
+	for _, id := range ids {
+		child, err := store.Load(context.Background(), transfer.AggregateType, id)
+		if err != nil {
+			t.Fatalf("Load(transfer %s): %v", id, err)
+		}
+		if len(child) > 0 {
+			existing = append(existing, id)
+		}
+	}
+	return existing
+}
+
+// totalEvents counts the Transaction's own stream plus every child's, so a
+// round that only moved a child still registers as progress.
+func totalEvents(t *testing.T, store eventstore.Store, transactionID string) int {
+	t.Helper()
+	ctx := context.Background()
+	events, err := store.Load(ctx, AggregateType, transactionID)
+	if err != nil {
+		t.Fatalf("Load(%s): %v", transactionID, err)
+	}
+	total := len(events)
+	for _, childID := range knownChildren(t, store, transactionID) {
+		child, err := store.Load(ctx, transfer.AggregateType, childID)
+		if err != nil {
+			t.Fatalf("Load(transfer %s): %v", childID, err)
+		}
+		total += len(child)
+	}
+	return total
 }

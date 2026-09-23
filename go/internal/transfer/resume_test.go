@@ -56,7 +56,7 @@ func TestResume_IsANoOpOnATerminalTransfer(t *testing.T) {
 	server := NewServer(store, lc, nil, nil)
 	ctx := context.Background()
 	transferID := testutil.ID("xfer1")
-	if _, err := server.RequestTransfer(ctx, transferRequest(transferID, testutil.ID("w1"), testutil.ID("w2"), usd(400), false)); err != nil {
+	if _, err := requestAndRun(t, server, ctx, transferRequest(transferID, testutil.ID("w1"), testutil.ID("w2"), usd(400), false)); err != nil {
 		t.Fatalf("RequestTransfer() error = %v", err)
 	}
 	before, err := store.Load(ctx, AggregateType, transferID)
@@ -145,5 +145,59 @@ func TestResume_IsANoOpOnARejectedReversal(t *testing.T) {
 
 	if got, err := Outcome(ctx, store, reversalID); err != nil || got != OutcomeRejected {
 		t.Fatalf("Outcome() = (%v, %v), want OutcomeRejected", got, err)
+	}
+}
+
+// The cutover, stated as a test on the Transfer side. RequestTransfer records
+// the acceptance and stops: nothing is prepared, nothing reaches TigerBeetle,
+// and the Transfer does not move until something resumes it. Asserting the
+// stream is exactly the one acceptance — and that the ledger was never called —
+// is what would catch dispatch creeping back into the handler.
+func TestRequestTransfer_RecordsTheAcceptanceAndRunsNothing(t *testing.T) {
+	t.Parallel()
+	store := eventstore.NewMemoryStore()
+	lc := &createTransfersCountingClient{Client: ledger.NewFakeClient()}
+	openWallet(t, store, testutil.ID("w1"), sharedpb.Allows_ALLOWS_ONRAMP_AND_OFFRAMP)
+	openWallet(t, store, testutil.ID("w2"), sharedpb.Allows_ALLOWS_ONRAMP_AND_OFFRAMP)
+	mintToken(t, store, lc, testutil.ID("w1"), testutil.ID("t1"), usd(1000))
+	fundToken(t, lc, testutil.ID("t1"), 1000)
+
+	server := NewServer(store, lc, nil, nil)
+	ctx := context.Background()
+	transferID := testutil.ID("xfer1")
+
+	before := lc.count()
+	resp, err := server.RequestTransfer(ctx, transferRequest(transferID, testutil.ID("w1"), testutil.ID("w2"), usd(400), false))
+	if err != nil {
+		t.Fatalf("RequestTransfer() error = %v", err)
+	}
+	if resp.GetTransferRequestAccepted() == nil {
+		t.Fatalf("result = %v, want Accepted", resp.GetResult())
+	}
+
+	events, err := store.Load(ctx, AggregateType, transferID)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("stream holds %d events, want exactly the one TransferRequestAccepted", len(events))
+	}
+	if currentState(events) != stateAccepted {
+		t.Errorf("state = %v, want accepted", currentState(events))
+	}
+	if got := lc.count(); got != before {
+		t.Errorf("ledger.CreateTransfers called %d times during RequestTransfer, want none", got-before)
+	}
+
+	// And resuming it is what moves it.
+	if err := server.Resume(ctx, transferID); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	events, err = store.Load(ctx, AggregateType, transferID)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if currentState(events) != stateCommitted {
+		t.Errorf("state after Resume = %v, want committed", currentState(events))
 	}
 }

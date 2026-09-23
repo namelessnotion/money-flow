@@ -28,7 +28,7 @@ indefinitely. Two did in development (`ACH E2E`, `ItsAlive`).
    cash moves to bank control first; that step is called **funding**. A shortfall refuses the shadow leg, and
    Go rolls the Transaction back with nothing yet moved across the bank boundary. Deposits keep v1: their
    shadow leg still waits for the real leg, so uncleared cash is only minted for money that arrived.
-2. **`Initiate` asks Go how the Transaction stands before submitting to the provider.** `start_transaction`
+2. **Something asks Go how the Transaction stands before submitting to the provider.** `start_transaction`
    itself now catches the common shortfall — [go/docs/adr/0004](../../../go/docs/adr/0004-transaction-accept-time-funding-preflight.md)
    has Go reject an unfundable withdrawal in its own accept/reject decision, before writing anything — but
    `Initiate` still calls `ResumeTransaction` once afterward regardless, and that call remains the one thing
@@ -36,18 +36,34 @@ indefinitely. Two did in development (`ACH E2E`, `ItsAlive`).
    Go's reason and the entry is never submitted. Both checks exist for the same guarantee; the second is what
    makes it hold even in the residual case where the first passed but the real, unchanged dispatch that follows
    it disagrees moments later.
+
+   > **Amended 2026-09-22: the check moved, the guarantee did not.** `Initiate` could make it because the whole
+   > DAG ran inside its call. Since
+   > [`go/docs/adr/0006`](../../../go/docs/adr/0006-synchronous-dispatch-removed-from-the-rpc-surface.md) Go
+   > accepts the Transaction and returns, so at that point the funding leg has not run and asking would only ever
+   > answer `INITIALIZED`.
+   >
+   > `Services::Ach::SubmitDue` makes it now, and the pairing is **stronger** than this decision shipped with:
+   > the real leg must be `staged` in the projection — which for a withdrawal is unreachable except past the
+   > dependency edge on the funding leg, so it *proves* funding rather than inferring it from "started and not
+   > terminal" — and only then is Go asked, immediately before the entry is handed over.
+   > [ADR 0008](0008-ach-submission-is-a-sweep.md) has the whole of it.
 3. **A rolled-back withdrawal undoes its funding with an ordinary reversal.** The shadow leg is not staged, so
    neither is its reversal: after a return, the rollback completes in the same call.
 
 ## Consequences
 
-- A withdrawal an entity cannot cover fails at `initiateAchWithdrawal` with a GraphQL error. Since
+- A withdrawal an entity cannot cover fails at `initiateAchWithdrawal` with a GraphQL error. **(Still true
+  after the async cutover: the funding leg is ready at time zero, so Go's pre-flight sees it and rejects before
+  writing anything. This is the case customers actually hit, and it is still answered immediately.)** Since
   [go/docs/adr/0004](../../../go/docs/adr/0004-transaction-accept-time-funding-preflight.md), the common case
   never starts at all: Go rejects the Transaction outright, and its record shows `INITIATION` failed with
   everything after it — including `FUNDING` — `SKIPPED`, and no rollback step (nothing was ever started to roll
   back). The original shape this decision shipped with — `FUNDING` failed, `ROLLBACK` done — is still reachable
-  for the residual race `ResumeTransaction` (decision 2) exists to catch, where Go's own pre-check passed but
-  the real dispatch that follows it disagrees moments later.
+  for the residual race decision 2's second check exists to catch, where Go's own pre-check passed but
+  the real dispatch that follows it disagrees moments later. **Since the async cutover that race is the normal
+  asynchronous path rather than a rarity — the dispatch happens in the orchestrator, after the response — so a
+  withdrawal that fails this way is learned from the projection rather than from an error.**
 - Cleared cash is held in bank control for as long as the ACH entry is outstanding, so it cannot fund a second
   withdrawal in the meantime.
 - A staged reversal can still arise, from reversing a *deposit's* committed real leg, which only happens if a

@@ -1,8 +1,11 @@
 // Package transaction implements the Transaction root aggregate: a set of
 // Transfers wired into a dependency DAG to accomplish one task (e.g. an ACH
-// deposit's real custody leg plus its parallel shadow-tracking leg). The
-// saga is synchronous and in-process, the same shape as transfer's own
-// runSaga — see saga.go.
+// deposit's real custody leg plus its parallel shadow-tracking leg).
+//
+// Every RPC here records a decision and returns. None of them drives the
+// saga: dispatch belongs to cmd/orchestrator, which folds an aggregate's own
+// stream when a published event says it moved. The decision an RPC records is
+// itself such an event, so accepting a Transaction is what starts it.
 package transaction
 
 import (
@@ -41,7 +44,8 @@ func abortedRetry(transactionID string) error {
 // operation.Stage/Perform/Cancel/Fail directly instead of through
 // operation.Server's RPC surface. ConfirmStagedTransfer/PostPendingTransfer
 // are deliberately absent: ruby calls those directly on a staged child's own
-// id as part of the ResumeTransaction contract, never through Transaction.
+// id, and the Transfer events they write are what wake the owning Transaction
+// (see saga.Orchestrator's handleTransfer) — never through Transaction.
 type transferClient interface {
 	RequestTransfer(ctx context.Context, req *transferpb.RequestTransferRequest) (*transferpb.RequestTransferResponse, error)
 	CancelAcceptedTransfer(ctx context.Context, req *transferpb.CancelAcceptedTransferRequest) (*transferpb.CancelAcceptedTransferResponse, error)
@@ -110,15 +114,25 @@ func Exists(ctx context.Context, store eventstore.Store, transactionID string) (
 // StartInitializingTransaction accepts or rejects req, in both cases
 // recording that decision as transactionID's first event — a rejection is
 // as much a fact about this id's history as an acceptance is, the same
-// reasoning transfer.RequestTransfer already uses. Two checks happen before
-// TransactionInitialized is ever written, either of which produces
-// TransactionRejected instead: DAG validation, and — new, see
+// reasoning transfer.RequestTransfer already uses. Three checks happen before
+// TransactionInitialized is ever written, any of which produces
+// TransactionRejected instead: DAG validation (including this Transaction's
+// width limit and a leg whose amount no Transfer would accept), and — see
 // wouldAcceptReadyChildren and go/docs/adr/0004 — a pre-flight check of
 // every non-mint_source child that would be dispatched immediately. The
-// latter is a fast, best-effort check; the real dispatch inside runSaga
-// below is unchanged and remains the sole authority regardless of what this
-// pre-check found. Idempotent: a Transaction that was already decided —
-// initialized or rejected — has its recorded outcome returned as-is.
+// last is a fast, best-effort check; the real dispatch remains the sole
+// authority regardless of what it found.
+//
+// It accepts; it does not run. On success the Transaction is Initialized and
+// nothing more: no child has been dispatched, and TransactionStarted has not
+// been written. TransactionInitialized is published like any other event, and
+// the orchestrator's fold of it is what starts the saga. So Initialized is a
+// state that now lasts, and a Transaction sitting in it says the publication
+// pipeline or the orchestrator is behind — which is worth knowing, and used to
+// be invisible.
+//
+// Idempotent: a Transaction that was already decided — initialized or
+// rejected — has its recorded outcome returned as-is.
 func (s *Server) StartInitializingTransaction(ctx context.Context, req *pb.StartInitializingTransactionRequest) (*pb.StartInitializingTransactionResponse, error) {
 	if err := id.Validate("id", req.GetId()); err != nil {
 		return nil, err
@@ -130,7 +144,7 @@ func (s *Server) StartInitializingTransaction(ctx context.Context, req *pb.Start
 			return nil, twirp.InternalErrorWith(err)
 		}
 		if len(events) > 0 {
-			return s.decidedStartInitializingTransaction(ctx, req.GetId(), events)
+			return s.decidedStartInitializingTransaction(req.GetId(), events)
 		}
 
 		var event proto.Message
@@ -155,7 +169,6 @@ func (s *Server) StartInitializingTransaction(ctx context.Context, req *pb.Start
 		switch err := s.store.Append(ctx, AggregateType, req.GetId(), 0, event); {
 		case err == nil:
 			if initialized, ok := event.(*pb.TransactionInitialized); ok {
-				logSagaError("StartInitializingTransaction", req.GetId(), s.runSaga(ctx, req.GetId()))
 				return initializedResponse(initialized), nil
 			}
 			return rejectedResponse(event.(*pb.TransactionRejected)), nil
@@ -168,14 +181,13 @@ func (s *Server) StartInitializingTransaction(ctx context.Context, req *pb.Start
 	return nil, abortedRetry(req.GetId())
 }
 
-func (s *Server) decidedStartInitializingTransaction(ctx context.Context, transactionID string, events []eventstore.Event) (*pb.StartInitializingTransactionResponse, error) {
+func (s *Server) decidedStartInitializingTransaction(transactionID string, events []eventstore.Event) (*pb.StartInitializingTransactionResponse, error) {
 	msg, err := events[0].Decode()
 	if err != nil {
 		return nil, twirp.InternalErrorWith(err)
 	}
 	switch m := msg.(type) {
 	case *pb.TransactionInitialized:
-		logSagaError("StartInitializingTransaction", transactionID, s.runSaga(ctx, transactionID))
 		return initializedResponse(m), nil
 	case *pb.TransactionRejected:
 		return rejectedResponse(m), nil
@@ -206,6 +218,14 @@ func rejectedResponse(e *pb.TransactionRejected) *pb.StartInitializingTransactio
 // fact — when transfer_id isn't in this Transaction's DAG at all, or isn't
 // currently Gated (not found, dependencies unsatisfied, or already
 // processed).
+//
+// It requests that one child in-process, which looks like an exception to this
+// package's no-dispatch rule and is not: a gated child is already touched, so
+// readyToRun will never return it and dispatchReady can never reach it. This
+// call is the only thing that can, and it is one child by construction — the
+// same "one transition, never a fold" shape the settlement RPCs on Transfer
+// keep. What it no longer does is fold afterward, so the response reports that
+// the child was requested (or refused at accept time), never that it finished.
 func (s *Server) StartProcessingTransfer(ctx context.Context, req *pb.StartProcessingTransferRequest) (*pb.StartProcessingTransferResponse, error) {
 	if err := id.Validate("id", req.GetId()); err != nil {
 		return nil, err
@@ -244,7 +264,6 @@ func (s *Server) StartProcessingTransfer(ctx context.Context, req *pb.StartProce
 	if err := s.requestChildTransfer(ctx, req.GetId(), spec); err != nil {
 		return nil, twirp.InternalErrorWith(err)
 	}
-	logSagaError("StartProcessingTransfer", req.GetId(), s.runSaga(ctx, req.GetId()))
 
 	events, err = s.store.Load(ctx, AggregateType, req.GetId())
 	if err != nil {
@@ -267,8 +286,8 @@ func (s *Server) StartProcessingTransfer(ctx context.Context, req *pb.StartProce
 			},
 		}, nil
 	default:
-		// childRequested or childCompleted (prepare+commit can resolve
-		// synchronously within the same runSaga call above).
+		// childRequested: the Transfer has accepted, and its own saga runs from
+		// the trigger that acceptance published.
 		return &pb.StartProcessingTransferResponse{
 			Id: req.GetId(),
 			Result: &pb.StartProcessingTransferResponse_TransferRequestedWithinTransaction{
@@ -287,13 +306,17 @@ func rejectedProcessing(req *pb.StartProcessingTransferRequest, reason string) *
 	}
 }
 
-// ResumeTransaction re-runs runSaga for transactionID and reports its
-// resulting top-level state. This is Transaction's answer to having no
-// naturally-repeated entry point the way every Transfer RPC re-runs
-// transfer.runSaga on call: a staged child settles via calls made on ITS
-// OWN id, which this Transaction has no way to learn about except by being
-// asked to look again.
-func (s *Server) ResumeTransaction(ctx context.Context, req *pb.ResumeTransactionRequest) (*pb.ResumeTransactionResponse, error) {
+// GetTransactionState reports transactionID's top-level state and the reason
+// behind it. It is a read: it folds the stream and answers, and advances
+// nothing.
+//
+// Driving belongs to cmd/orchestrator (see Resume in saga.go, which is the
+// verb this RPC no longer performs — the two are deliberately not the same
+// thing any more). What this is for is authority: Ruby's own view of a
+// Transaction is a lagging projection and may never be treated as the truth,
+// so anything that must know where a Transaction actually stands before acting
+// — an ACH entry about to reach a provider, above all — asks here.
+func (s *Server) GetTransactionState(ctx context.Context, req *pb.GetTransactionStateRequest) (*pb.GetTransactionStateResponse, error) {
 	if err := id.Validate("id", req.GetId()); err != nil {
 		return nil, err
 	}
@@ -306,25 +329,23 @@ func (s *Server) ResumeTransaction(ctx context.Context, req *pb.ResumeTransactio
 		return nil, twirp.NewError(twirp.NotFound, fmt.Sprintf("transaction %q not found", req.GetId()))
 	}
 
-	logSagaError("ResumeTransaction", req.GetId(), s.runSaga(ctx, req.GetId()))
-
-	events, err = s.store.Load(ctx, AggregateType, req.GetId())
-	if err != nil {
-		return nil, twirp.InternalErrorWith(err)
-	}
 	reason, err := lastEventReason(events)
 	if err != nil {
 		return nil, err
 	}
-	return &pb.ResumeTransactionResponse{Id: req.GetId(), State: topLevelState(events).proto(), Reason: reason}, nil
+	return &pb.GetTransactionStateResponse{Id: req.GetId(), State: topLevelState(events).proto(), Reason: reason}, nil
 }
 
 // StartTransactionRollback is legal only while the Transaction is Started —
 // mirroring CancelAcceptedTransfer's restriction to pre-commitment states.
-// This is the manual counterpart to the automatic rollback runSaga already
+// This is the manual counterpart to the automatic rollback the saga already
 // triggers on any child failure: an operator-driven abort of a Transaction
 // that hasn't failed on its own. Idempotent once rollback has already begun
 // or resolved; any other state is refused.
+//
+// It records that the rollback has begun and returns. TransactionRollbackStarted
+// is the trigger the orchestrator folds to reverse the children, so the state
+// this reports back is rollback_started rather than a resolved terminal.
 func (s *Server) StartTransactionRollback(ctx context.Context, req *pb.StartTransactionRollbackRequest) (*pb.StartTransactionRollbackResponse, error) {
 	if err := id.Validate("id", req.GetId()); err != nil {
 		return nil, err
@@ -343,7 +364,6 @@ func (s *Server) StartTransactionRollback(ctx context.Context, req *pb.StartTran
 		if err := s.appendSagaStep(ctx, req.GetId(), &pb.TransactionRollbackStarted{Id: req.GetId(), Reason: req.GetReason()}); err != nil {
 			return nil, twirp.InternalErrorWith(err)
 		}
-		logSagaError("StartTransactionRollback", req.GetId(), s.runSaga(ctx, req.GetId()))
 	case stateRollbackStarted, stateRolledBack, stateRollbackFailed:
 		// Already on or past this path — idempotent no-op.
 	default:

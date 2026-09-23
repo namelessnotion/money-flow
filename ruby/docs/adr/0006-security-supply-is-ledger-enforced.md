@@ -92,3 +92,11 @@ all.
 - A Security with unsold Supply after its offering window needs a policy this ADR does not set.
 - The zero-amount stall is a latent trap for any future shape, not just this one. Ruby works around it in
   three places; Go should reject it in `validateDAG` at accept time.
+
+  > **Done, 2026-09-22.** `validateDAG` now refuses any leg `money.Validate` would refuse — zero minor units,
+  > a missing currency, or no amount at all — as one `TransactionRejected` written before anything else exists
+  > ([`go/docs/adr/0007`](../../../go/docs/adr/0007-bounded-transaction-width-and-sliced-dispatch.md)). Ruby's
+  > three workarounds stay as belt-and-braces rather than being removed: they give a better message at the call
+  > site, and the CHECK constraints stop a bad row being written at all. The stall this describes mattered more
+  > after the async cutover, not less — with nothing watching the RPC response, a swallowed transport error
+  > reached nobody at all.

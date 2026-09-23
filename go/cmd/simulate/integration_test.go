@@ -16,7 +16,7 @@ import (
 // cmd/server, just without a real database or ledger. It exists to prove
 // this package's understanding of the saga (in particular: a staged
 // Transfer's Transaction stays Started until settled or rolled back, and
-// ResumeTransaction is what notices either) against the actual
+// GetTransactionState is what notices either) against the actual
 // implementation, not a hand-written fake of it.
 func TestSimulateEndToEnd(t *testing.T) {
 	t.Parallel()
@@ -25,6 +25,12 @@ func TestSimulateEndToEnd(t *testing.T) {
 	store := eventstore.NewMemoryStore()
 	servers := saga.Wire(store, ledger.NewFakeClient())
 	holders := holder.NewServer(store)
+
+	// Nothing drives a saga in-process any more (go/docs/adr/0006), so these
+	// stand in for the delivery cmd/orchestrator normally receives. See
+	// driver_test.go.
+	transactions := drivenTransactions{TransactionService: servers.Transaction, orchestrator: servers.Orchestrator(), store: store}
+	transfers := drivenTransfers{TransferService: servers.Transfer, orchestrator: servers.Orchestrator(), store: store}
 
 	const (
 		// numEntities is kept well above concurrency so pickPair rarely
@@ -50,14 +56,14 @@ func TestSimulateEndToEnd(t *testing.T) {
 
 	initial := make(map[string]int64, len(entities))
 	for _, e := range entities {
-		if err := seedEntity(ctx, servers.Transaction, reserve, e, initialBalance, currency); err != nil {
+		if err := seedEntity(ctx, transactions, reserve, e, initialBalance, currency); err != nil {
 			t.Fatalf("seedEntity(%s): %v", e.name, err)
 		}
 		initial[e.walletID] = initialBalance
 	}
 
 	drive := func(ctx context.Context, from, to entity, amount uint64, currency string, planned outcome) txResult {
-		return driveOne(ctx, servers.Transaction, servers.Transfer, from, to, amount, currency, planned)
+		return driveOne(ctx, transactions, transfers, from, to, amount, currency, planned)
 	}
 	cfg := runConfig{currency: currency, minAmount: minAmount, maxAmount: maxAmount, rollbackRate: rollbackRate}
 	results, wallClock := runLoad(ctx, entities, cfg, numTransactions, concurrency, seed, drive)
@@ -128,6 +134,12 @@ func TestSimulateEndToEndTransferMode(t *testing.T) {
 	servers := saga.Wire(store, ledger.NewFakeClient())
 	holders := holder.NewServer(store)
 
+	// Nothing drives a saga in-process any more (go/docs/adr/0006), so these
+	// stand in for the delivery cmd/orchestrator normally receives. See
+	// driver_test.go.
+	transactions := drivenTransactions{TransactionService: servers.Transaction, orchestrator: servers.Orchestrator(), store: store}
+	transfers := drivenTransfers{TransferService: servers.Transfer, orchestrator: servers.Orchestrator(), store: store}
+
 	const (
 		numEntities            = 30
 		numTransactions        = 90
@@ -147,14 +159,14 @@ func TestSimulateEndToEndTransferMode(t *testing.T) {
 
 	initial := make(map[string]int64, len(entities))
 	for _, e := range entities {
-		if err := seedEntity(ctx, servers.Transaction, reserve, e, initialBalance, currency); err != nil {
+		if err := seedEntity(ctx, transactions, reserve, e, initialBalance, currency); err != nil {
 			t.Fatalf("seedEntity(%s): %v", e.name, err)
 		}
 		initial[e.walletID] = initialBalance
 	}
 
 	drive := func(ctx context.Context, from, to entity, amount uint64, currency string, planned outcome) txResult {
-		return driveOneTransfer(ctx, servers.Transfer, from, to, amount, currency, planned)
+		return driveOneTransfer(ctx, transfers, from, to, amount, currency, planned)
 	}
 	cfg := runConfig{currency: currency, minAmount: minAmount, maxAmount: maxAmount, rollbackRate: rollbackRate}
 	results, wallClock := runLoad(ctx, entities, cfg, numTransactions, concurrency, seed, drive)

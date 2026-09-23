@@ -18,9 +18,10 @@ module Services
     # Investor, so the sweep re-sending one is a no-op in Go and Ruby keeps no
     # "already disbursed" flag — the row is a record of what was sent.
     #
-    # Unlike the other services here it does not resume: the sweep needs no
-    # synchronous answer, and the projection tells the story. A Disbursement
-    # that rolls back is visible and needs a person, not a retry.
+    # No service here asks Go how a Transaction went any more — since the async
+    # cutover the answer would always be "accepted, nothing done yet", and the
+    # projection is what tells the story (go/docs/adr/0006). A Disbursement that
+    # rolls back is visible there and needs a person, not a retry.
     class Disburse < BaseService
       sig { params(gateway: GoGateway).void }
       def initialize(gateway: GoGateway.new)

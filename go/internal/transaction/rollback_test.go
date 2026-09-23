@@ -54,6 +54,7 @@ func TestMidDAGFailure_TriggersReverseTopologicalRollback(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StartInitializingTransaction() error = %v", err)
 	}
+	driveSaga(t, txnServer, xferServer, store, txnID)
 
 	events, err := store.Load(ctx, AggregateType, txnID)
 	if err != nil {
@@ -179,6 +180,7 @@ func TestRollbackFailure_ReachesTransactionRollbackFailed(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StartInitializingTransaction() error = %v", err)
 	}
+	driveSaga(t, txnServer, xferServer, store, txnID)
 
 	events, err := store.Load(ctx, AggregateType, txnID)
 	if err != nil {
@@ -237,6 +239,7 @@ func TestCrossTransactionTokenReservation_HidesThenRevealsCashToken(t *testing.T
 	}); err != nil {
 		t.Fatalf("StartInitializingTransaction() error = %v", err)
 	}
+	driveSaga(t, txnServer, xferServer, store, txnID)
 	// Settle real (ACH posts) but do NOT resume the Transaction yet — shadow
 	// stays undispatched, so Transaction A is still open.
 	if _, err := xferServer.ConfirmStagedTransfer(ctx, &transferpb.ConfirmStagedTransferRequest{Id: realID}); err != nil {
@@ -259,10 +262,9 @@ func TestCrossTransactionTokenReservation_HidesThenRevealsCashToken(t *testing.T
 		t.Fatalf("result = %v, want TransferRequestRejected while Transaction A is still open", resp.GetResult())
 	}
 
-	// Now let A finish (shadow fires, Transaction completes).
-	if _, err := txnServer.ResumeTransaction(ctx, &pb.ResumeTransactionRequest{Id: txnID}); err != nil {
-		t.Fatalf("ResumeTransaction() error = %v", err)
-	}
+	// Now let A finish: posting the real leg published a trigger, and folding
+	// it fires the shadow leg and completes the Transaction.
+	driveSaga(t, txnServer, xferServer, store, txnID)
 	events, _ := store.Load(ctx, AggregateType, txnID)
 	if topLevelState(events) != stateCompleted {
 		t.Fatalf("Transaction A state = %v, want completed", topLevelState(events))
@@ -317,6 +319,7 @@ func TestSameTransactionVisibility_DAGCanSpendItsOwnTaggedToken(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StartInitializingTransaction() error = %v", err)
 	}
+	driveSaga(t, txnServer, xferServer, store, txnID)
 
 	events, err := store.Load(ctx, AggregateType, txnID)
 	if err != nil {
@@ -331,7 +334,7 @@ func TestSameTransactionVisibility_DAGCanSpendItsOwnTaggedToken(t *testing.T) {
 }
 
 // TestRunSaga_IdempotentMidDAGResume mirrors Transfer's own resumability
-// tests: calling runSaga (via ResumeTransaction) after only partial
+// tests: calling runSaga (via GetTransactionState) after only partial
 // progress is recorded converges to the same state a full run would reach,
 // and an extra call afterward is a pure no-op.
 func TestRunSaga_IdempotentMidDAGResume(t *testing.T) {
@@ -357,6 +360,7 @@ func TestRunSaga_IdempotentMidDAGResume(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StartInitializingTransaction() error = %v", err)
 	}
+	driveSaga(t, txnServer, xferServer, store, txnID)
 
 	// Stuck mid-DAG: real is only Staged, nothing more can happen yet.
 	eventsBefore, err := store.Load(ctx, AggregateType, txnID)
@@ -369,8 +373,8 @@ func TestRunSaga_IdempotentMidDAGResume(t *testing.T) {
 
 	// Resuming before anything external happened converges to the exact
 	// same state — a pure no-op.
-	if _, err := txnServer.ResumeTransaction(ctx, &pb.ResumeTransactionRequest{Id: txnID}); err != nil {
-		t.Fatalf("ResumeTransaction() error = %v", err)
+	if _, err := txnServer.GetTransactionState(ctx, &pb.GetTransactionStateRequest{Id: txnID}); err != nil {
+		t.Fatalf("GetTransactionState() error = %v", err)
 	}
 	eventsAfter, err := store.Load(ctx, AggregateType, txnID)
 	if err != nil {
@@ -380,16 +384,14 @@ func TestRunSaga_IdempotentMidDAGResume(t *testing.T) {
 		t.Fatalf("event count after a no-progress resume = %d, want unchanged from %d", len(eventsAfter), len(eventsBefore))
 	}
 
-	// Now let real settle, and resume again — should reach Completed.
+	// Now let real settle, and drive again — should reach Completed.
 	if _, err := xferServer.ConfirmStagedTransfer(ctx, &transferpb.ConfirmStagedTransferRequest{Id: realID}); err != nil {
 		t.Fatalf("ConfirmStagedTransfer() error = %v", err)
 	}
 	if _, err := xferServer.PostPendingTransfer(ctx, &transferpb.PostPendingTransferRequest{Id: realID}); err != nil {
 		t.Fatalf("PostPendingTransfer() error = %v", err)
 	}
-	if _, err := txnServer.ResumeTransaction(ctx, &pb.ResumeTransactionRequest{Id: txnID}); err != nil {
-		t.Fatalf("ResumeTransaction() error = %v", err)
-	}
+	driveSaga(t, txnServer, xferServer, store, txnID)
 	events, err := store.Load(ctx, AggregateType, txnID)
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -400,8 +402,8 @@ func TestRunSaga_IdempotentMidDAGResume(t *testing.T) {
 
 	// One more resume on an already-terminal Transaction is a pure no-op.
 	countBefore := len(events)
-	if _, err := txnServer.ResumeTransaction(ctx, &pb.ResumeTransactionRequest{Id: txnID}); err != nil {
-		t.Fatalf("ResumeTransaction() error = %v", err)
+	if _, err := txnServer.GetTransactionState(ctx, &pb.GetTransactionStateRequest{Id: txnID}); err != nil {
+		t.Fatalf("GetTransactionState() error = %v", err)
 	}
 	events, err = store.Load(ctx, AggregateType, txnID)
 	if err != nil {

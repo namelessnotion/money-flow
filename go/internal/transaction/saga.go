@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 
 	"github.com/twitchtv/twirp"
 	"google.golang.org/protobuf/proto"
@@ -101,7 +100,7 @@ func topLevelState(events []eventstore.Event) transactionState {
 
 // lastEventReason reads the reason off whichever reason-carrying event
 // (TransactionRejected/RollbackStarted/RolledBack/RollbackFailed) most
-// recently landed — used to answer ResumeTransaction/StartTransactionRollback
+// recently landed — used to answer GetTransactionState/StartTransactionRollback
 // callers without making them separately walk the log.
 func lastEventReason(events []eventstore.Event) (string, error) {
 	if len(events) == 0 {
@@ -326,29 +325,18 @@ func (s *Server) appendSagaStep(ctx context.Context, transactionID string, event
 	}
 }
 
-// logSagaError reports a runSaga failure that was deliberately not surfaced
-// to the RPC caller — the accept/reject or per-child decision that
-// triggered this runSaga run is already durable by the time runSaga
-// executes, the same reasoning transfer.Server's own logSagaError
-// documents. The Transaction self-heals: it stays wherever runSaga left it,
-// and the next call that touches this id resumes it.
-func logSagaError(rpc, transactionID string, err error) {
-	if err != nil {
-		log.Printf("transaction: %s(%s): saga did not complete: %v", rpc, transactionID, err)
-	}
-}
-
 // Resume advances transactionID's saga from whatever its stream currently
 // records — the Transaction-side twin of transfer.Server.Resume, and the other
 // half of the event-triggered orchestrator's vocabulary. It is exactly
-// runSaga, exported, for the same reason: a trigger and an RPC must drive the
-// Transaction through the same code.
+// runSaga, exported.
 //
-// It differs from the ResumeTransaction RPC only in what it does with a
-// failure. The RPC answers a caller that wants the Transaction's state and so
-// logs a saga error rather than surfacing it; the orchestrator is the driver
-// and needs the error back, because whether a trigger is retried or the
-// partition halts is its decision to make (go/docs/adr/0003).
+// It is now the only way a Transaction moves. Nothing in the RPC surface
+// drives one, so a trigger the publication pipeline never delivers is a
+// Transaction that waits indefinitely — cmd/resume exists for exactly that.
+//
+// Errors come straight back rather than being logged and swallowed: the
+// orchestrator is the driver, and whether a trigger is retried or the
+// consumer halts is its decision to make (go/docs/adr/0003).
 func (s *Server) Resume(ctx context.Context, transactionID string) error {
 	return s.runSaga(ctx, transactionID)
 }
@@ -356,10 +344,11 @@ func (s *Server) Resume(ctx context.Context, transactionID string) error {
 // runSaga folds the Transaction's current state and dispatches the next
 // step, looping until it reaches a state that waits on something outside
 // this call — an in-flight or gated child, or an external
-// StartProcessingTransfer/StartTransactionRollback — or a true terminal
-// (Completed, RolledBack, RollbackFailed, Rejected). Safe, and expected, to
-// call idempotently any number of times for the same id: each call resumes
-// from wherever the stream actually left off.
+// StartProcessingTransfer/StartTransactionRollback — a dispatch slice
+// boundary (see maxDispatchPerStep), or a true terminal (Completed,
+// RolledBack, RollbackFailed, Rejected). Safe, and expected, to call
+// idempotently any number of times for the same id: each call resumes from
+// wherever the stream actually left off.
 func (s *Server) runSaga(ctx context.Context, transactionID string) error {
 	for {
 		events, err := s.store.Load(ctx, AggregateType, transactionID)
@@ -414,9 +403,16 @@ func (s *Server) runSaga(ctx context.Context, transactionID string) error {
 				continue
 			}
 
-			dispatched, err := s.dispatchReady(ctx, transactionID, transfers, deps, children)
+			dispatched, more, err := s.dispatchReady(ctx, transactionID, transfers, deps, children)
 			if err != nil {
 				return err
+			}
+			if more {
+				// This slice is dispatched and its events are written. Those
+				// events are themselves triggers, so the next resume takes the
+				// next slice. Stop here rather than looping, so no one run's
+				// fold is unbounded.
+				return nil
 			}
 			if dispatched {
 				continue
@@ -441,11 +437,18 @@ func (s *Server) runSaga(ctx context.Context, transactionID string) error {
 				continue
 			}
 
-			progressed, waiting, blocked, err := s.rollbackNext(ctx, transactionID, transfers, deps, children)
+			progressed, more, waiting, blocked, err := s.rollbackNext(ctx, transactionID, transfers, deps, children)
 			if err != nil {
 				return err
 			}
 			switch {
+			case more:
+				// Checked before blocked: more implies this slice made
+				// progress, and evaluating blocked while children remain to be
+				// rolled back would record TransactionRollbackFailed for a
+				// rollback that is merely unfinished. The appends this slice
+				// just made are the triggers that fetch the next one.
+				return nil
 			case progressed:
 				continue
 			case waiting:
@@ -485,32 +488,66 @@ func (s *Server) runSaga(ctx context.Context, transactionID string) error {
 	}
 }
 
-// dispatchReady dispatches every currently-ready child (per readyToRun):
-// auto_process=true children get an actual RequestTransfer call;
-// auto_process=false children are simply marked Gated, waiting for an
-// explicit StartProcessingTransfer. Returns true if it made any progress,
-// so runSaga knows to loop again rather than stopping.
+// maxDispatchPerStep bounds how many ready children one saga run dispatches
+// before ending the run. It bounds the size of one unit of work, not the
+// total: N children still cost N dispatches, they just cost them in
+// ceil(N/K) separately-retryable runs instead of one unbounded fold. That is
+// the point — a run is a Kafka handler, and a handler that keeps failing
+// halts the consumer for every other aggregate sharing it (ADR 0003).
+//
+// No cursor is stored, because none is needed. Every dispatched child
+// appends one TransferRequested/Gated/FailedWithinTransaction to this
+// Transaction's own stream, and readyToRun excludes every touched child: the
+// stream is the cursor. Those same appends are published, so the writes that
+// record a slice are the triggers that fetch the next one. A slice that
+// reports more work therefore always appended at least one event — which is
+// the whole progress argument, and is why it has a test of its own rather
+// than only this comment.
+//
+// Per run, not in flight: ADR 0001 records that a transfer-topic and a
+// transaction-topic message can be handled concurrently and both append
+// here, so two concurrent runs may take disjoint slices. That is safe for
+// the reasons ADR 0005 gives — RequestTransfer is idempotent by id and
+// appendSagaStep dedupes by (type, transfer_id) — and the absolute ceiling
+// on a Transaction's width stays maxTransfersPerTransaction.
+const maxDispatchPerStep = 8
+
+// dispatchReady dispatches up to maxDispatchPerStep currently-ready children
+// (per readyToRun): auto_process=true children get an actual RequestTransfer
+// call; auto_process=false children are simply marked Gated, waiting for an
+// explicit StartProcessingTransfer.
+//
+// Reports dispatched, so runSaga knows whether to loop again, and more, so it
+// knows to end the run instead. more implies dispatched.
+//
+// Which children a slice draws is deliberately unspecified: readyToRun ranges
+// a map, so the order varies between runs. Nothing depends on it — the DAG
+// constrains a child only by its parents, and every ready child is by
+// definition unconstrained.
 func (s *Server) dispatchReady(
 	ctx context.Context, transactionID string, transfers map[string]*pb.Transfer, deps map[string]*pb.TransferIdList, children map[string]childState,
-) (bool, error) {
+) (dispatched, more bool, err error) {
 	ready := readyToRun(transfers, deps, touchedSet(children), completedSet(children))
 	if len(ready) == 0 {
-		return false, nil
+		return false, false, nil
+	}
+	if len(ready) > maxDispatchPerStep {
+		ready, more = ready[:maxDispatchPerStep], true
 	}
 
 	for _, childID := range ready {
 		spec := transfers[childID]
 		if !spec.GetAutoProcess() {
 			if err := s.appendSagaStep(ctx, transactionID, &pb.TransferGatedWithinTransaction{Id: transactionID, TransferId: childID}); err != nil {
-				return false, err
+				return false, false, err
 			}
 			continue
 		}
 		if err := s.requestChildTransfer(ctx, transactionID, spec); err != nil {
-			return false, err
+			return false, false, err
 		}
 	}
-	return true, nil
+	return true, more, nil
 }
 
 // requestChildTransfer calls transfer.RequestTransfer for spec, tagged with
@@ -652,7 +689,7 @@ func (s *Server) reconcileRollbacks(
 // on every subsequent sweep rather than retried automatically forever.
 func (s *Server) rollbackNext(
 	ctx context.Context, transactionID string, transfers map[string]*pb.Transfer, deps map[string]*pb.TransferIdList, children map[string]childState,
-) (progressed, waiting, blocked bool, err error) {
+) (progressed, more, waiting, blocked bool, err error) {
 	rolledBack := make(map[string]bool, len(children))
 	inFlight := make(map[string]bool, len(children))
 	anyRollbackFailed := false
@@ -669,20 +706,40 @@ func (s *Server) rollbackNext(
 
 	ready := readyToRollback(transfers, deps, touchedSet(children), rolledBack, inFlight)
 
-	madeProgress := false
+	// Filter before slicing, not inside the loop, and the difference is not
+	// stylistic. A child already recorded as stuck is skipped without
+	// appending anything — it is never retried automatically — so a slice
+	// drawn from the unfiltered list can be made up entirely of those. This
+	// call would then report no progress, fall through to blocked below, and
+	// have runSaga record TransactionRollbackFailed while children that could
+	// still have been reversed never were: money left out rather than put
+	// back, and a Transaction that tells an operator it is beyond help when it
+	// was only unfinished. Filtering first means blocked is reached only once
+	// nothing rollbackable remains.
+	//
+	// readyToRun needs no equivalent: every child it returns appends exactly
+	// once, so a forward slice always makes progress.
+	candidates := make([]string, 0, len(ready))
 	for _, childID := range ready {
-		if children[childID] == childRollbackFailed {
-			continue // already recorded as stuck; not retried automatically
+		if children[childID] != childRollbackFailed {
+			candidates = append(candidates, childID)
 		}
+	}
+	if len(candidates) > maxDispatchPerStep {
+		candidates, more = candidates[:maxDispatchPerStep], true
+	}
+
+	madeProgress := false
+	for _, childID := range candidates {
 		if err := s.rollbackChild(ctx, transactionID, transfers[childID], children[childID]); err != nil {
-			return false, false, false, err
+			return false, false, false, false, err
 		}
 		madeProgress = true
 	}
 	if madeProgress {
-		return true, false, false, nil
+		return true, more, false, false, nil
 	}
-	return false, len(inFlight) > 0, anyRollbackFailed, nil
+	return false, false, len(inFlight) > 0, anyRollbackFailed, nil
 }
 
 // rollbackChild picks the rollback action for one ready child from its LIVE

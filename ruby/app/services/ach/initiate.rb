@@ -3,9 +3,7 @@
 
 require 'securerandom'
 require_relative '../base_service'
-require_relative 'fake_provider'
 require_relative 'go_gateway'
-require_relative 'return'
 require_relative 'transaction_shape'
 
 module Services
@@ -15,21 +13,30 @@ module Services
     # 1. Records the intent — direction, amount and every id — before calling
     #    anything, so a retry or a re-run after a crash resends the same ids and
     #    converges on Go's idempotency instead of originating twice.
-    # 2. Asks Go to run the Transaction. Its real leg stops, staged — after,
-    #    for a withdrawal, the cleared cash has moved to bank control.
-    # 3. Asks Go how the Transaction stands, and goes on only if it is still
-    #    running: a withdrawal short of cleared cash is rolled back inside
-    #    step 2, and must never reach the provider (ruby/docs/adr/0004).
-    # 4. Submits the entry to the provider, then confirms the staged real leg:
-    #    it now waits, pending, for the ACH network to settle or return it.
+    # 2. Asks Go to accept the Transaction. A withdrawal that cannot be funded
+    #    is normally refused right here, by Go's own accept-time pre-flight of
+    #    the funding leg, before a single event is written.
     #
-    # Lifecycle state is not recorded here: it arrives through the projection.
+    # And that is the whole of it. Nothing is handed to the provider from here.
+    #
+    # It used to be: this service ran the Transaction, asked Go how it had gone,
+    # and submitted the entry once it was sure the funding leg had committed —
+    # which is the guarantee ruby/docs/adr/0004 exists for. Since the async
+    # cutover (go/docs/adr/0006) Go accepts and returns, so at the end of this
+    # method the funding leg has not run and there is nothing yet to be sure of.
+    # Asking anyway would only ever get back "initialized", and submitting on
+    # that would be paying out a withdrawal nobody had funded.
+    #
+    # So submission moved to Services::Ach::SubmitDue, a sweep that waits until
+    # the ledger has actually moved and then checks with Go before handing the
+    # entry over. The guarantee is intact and in fact stronger there; what
+    # changes is that a caller here learns only whether the Transaction was
+    # accepted, and everything after that arrives through the projection.
     class Initiate < BaseService
-      sig { params(gateway: GoGateway, provider: Provider).void }
-      def initialize(gateway: GoGateway.new, provider: FakeProvider.new)
+      sig { params(gateway: GoGateway).void }
+      def initialize(gateway: GoGateway.new)
         super()
         @go = gateway
-        @provider = provider
       end
 
       sig { params(request: InitiateAchRequest).returns(Models::AchTransaction) }
@@ -40,37 +47,28 @@ module Services
         ach = perform { record_intent(request, shape) }
 
         start_transaction!(shape, ach)
-        require_running!(ach)
-        submit(ach, shape)
         ach
       end
 
       private
 
-      # Go's own accept/reject decision (go/docs/adr/0004) now catches the
-      # common underfunded-withdrawal case here, before any event exists —
-      # not just a malformed DAG. Re-wraps GoGateway's bare refusal with the
-      # same framing require_running!'s own, rarer catch uses below, so the
-      # message a caller sees doesn't depend on which of the two checks
-      # caught it.
+      # The only refusal a caller of this service ever sees, and it covers more
+      # than it sounds like: a malformed DAG, a Transaction wider than Go allows,
+      # a leg that would move nothing, and — the one that matters here — a
+      # withdrawal whose funding leg Go's accept-time pre-flight can already see
+      # is short (go/docs/adr/0004). All of them are decided before any event
+      # exists, so "before any money moved" is literally true.
+      #
+      # What it cannot catch is the residual race that pre-flight explicitly
+      # does not close: it is a check, not a reservation, and the real dispatch
+      # now happens later, in the orchestrator. Such a withdrawal is rolled back
+      # without ever reaching the provider, and shows up as a rolled-back
+      # Transaction on the row rather than as an error here.
       sig { params(shape: TransactionShape, ach: Models::AchTransaction).void }
       def start_transaction!(shape, ach)
         @go.start_transaction(shape.start_request(transaction_id: ach.id, amount_minor_units: ach.amount_minor_units))
       rescue Refused => e
         raise Refused, "refused before any money moved: #{e.message}"
-      end
-
-      # Nothing has left the platform yet, so a Transaction Go did not keep
-      # running is simply refused. This is the only thing that ever learns
-      # the real dispatch's actual outcome — start_transaction!'s own
-      # response is built before Go's saga runs, so it can catch the common
-      # case early but can never be the last word (go/docs/adr/0004).
-      sig { params(ach: Models::AchTransaction).void }
-      def require_running!(ach)
-        outcome = @go.resume(ach.id)
-        return if outcome.started?
-
-        raise Refused, "refused before any money moved: #{outcome.reason.empty? ? outcome.state : outcome.reason}"
       end
 
       sig { params(request: InitiateAchRequest).returns(TransactionShape) }
@@ -92,37 +90,6 @@ module Services
           currency: TransactionShape::CURRENCY,
           real_transfer_id: shape.real_transfer_id,
           shadow_transfer_id: shape.shadow_transfer_id
-        )
-      end
-
-      # The reference is kept as soon as the provider gives it, before Go is
-      # told: an entry the provider holds must always be traceable.
-      sig { params(ach: Models::AchTransaction, shape: TransactionShape).void }
-      def submit(ach, shape)
-        reference = submit_entry(ach, shape)
-        perform { ach.update(provider_reference: reference) }
-        @go.confirm_staged(ach.real_transfer_id)
-      end
-
-      # A refused submission is a return that happened early: the entry will
-      # never post, so the Transaction is rolled back the same way.
-      sig { params(ach: Models::AchTransaction, shape: TransactionShape).returns(String) }
-      def submit_entry(ach, shape)
-        @provider.submit(entry(ach, shape))
-      rescue Provider::SubmissionFailed => e
-        reason = "provider refused the entry: #{e.message}"
-        Return.new(gateway: @go).call(ach_transaction_id: ach.id, reason: reason)
-        raise Refused, reason
-      end
-
-      sig { params(ach: Models::AchTransaction, shape: TransactionShape).returns(Entry) }
-      def entry(ach, shape)
-        Entry.new(
-          transaction_id: ach.id,
-          direction: shape.direction,
-          amount_minor_units: ach.amount_minor_units,
-          currency: ach.currency,
-          bank_wallet_id: shape.wallets.fetch(Types::Enums::AccountType::Bank)
         )
       end
     end

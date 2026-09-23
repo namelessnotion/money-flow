@@ -40,7 +40,7 @@ func TestCommit_TigerBeetleRejectionRoutesToFailedNotCancelled(t *testing.T) {
 	// CreateTransfers batch gets rejected.
 	server := NewServer(store, &rejectingTransfersClient{Client: lc}, nil, nil)
 	ctx := context.Background()
-	if _, err := server.RequestTransfer(ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), false)); err != nil {
+	if _, err := requestAndRun(t, server, ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), false)); err != nil {
 		t.Fatalf("RequestTransfer() error = %v", err)
 	}
 
@@ -77,7 +77,7 @@ func TestStage_TigerBeetleRejectionRoutesToFailed(t *testing.T) {
 
 	server := NewServer(store, &rejectingTransfersClient{Client: lc}, nil, nil)
 	ctx := context.Background()
-	if _, err := server.RequestTransfer(ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), true)); err != nil {
+	if _, err := requestAndRun(t, server, ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), true)); err != nil {
 		t.Fatalf("RequestTransfer(stage=true) error = %v", err)
 	}
 

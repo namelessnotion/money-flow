@@ -10,8 +10,8 @@ import (
 )
 
 // fakeTransactions implements transactionpb.TransactionService, scripted per
-// id: ResumeTransaction returns the states listed, repeating the last once
-// exhausted. Only ResumeTransaction is exercised by settle's complete
+// id: GetTransactionState returns the states listed, repeating the last once
+// exhausted. Only GetTransactionState is exercised by settle's complete
 // branch; every other method panics, since a test reaching one has drifted
 // from what it means to script this fake.
 type fakeTransactions struct {
@@ -27,14 +27,14 @@ func (f *fakeTransactions) StartProcessingTransfer(context.Context, *transaction
 	panic("fakeTransactions: StartProcessingTransfer not scripted")
 }
 
-func (f *fakeTransactions) ResumeTransaction(_ context.Context, req *transactionpb.ResumeTransactionRequest) (*transactionpb.ResumeTransactionResponse, error) {
+func (f *fakeTransactions) GetTransactionState(_ context.Context, req *transactionpb.GetTransactionStateRequest) (*transactionpb.GetTransactionStateResponse, error) {
 	states := f.resumeStates[req.GetId()]
 	i := f.calls[req.GetId()]
 	if i >= len(states) {
 		i = len(states) - 1
 	}
 	f.calls[req.GetId()]++
-	return &transactionpb.ResumeTransactionResponse{Id: req.GetId(), State: states[i]}, nil
+	return &transactionpb.GetTransactionStateResponse{Id: req.GetId(), State: states[i]}, nil
 }
 
 func (f *fakeTransactions) StartTransactionRollback(context.Context, *transactionpb.StartTransactionRollbackRequest) (*transactionpb.StartTransactionRollbackResponse, error) {

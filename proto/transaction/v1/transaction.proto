@@ -105,6 +105,16 @@ message StartInitializingTransactionRequest {
 
      A child with no entry (or an empty list) is a DAG root, ready immediately
      when the Transaction starts executing.
+
+     There is an upper bound on how many transfers one Transaction may hold,
+     and it is generous — a shape anywhere near it is a caller that has lost
+     track of what it is building. It exists because a Transaction is the unit
+     of rollback: an N-child Transaction failing is N reversals needing an
+     operator's attention, so N has to stay comprehensible. Exceeding it is a
+     TransactionRejected, before anything is written. See
+     go/internal/transaction's maxTransfersPerTransaction for the number and the
+     full reasoning; a wide-but-legal DAG is also dispatched in slices rather
+     than all at once, so no single step of the saga is unbounded either.
   */
 }
 
@@ -118,7 +128,11 @@ message TransactionInitialized {
 
 message TransactionRejected {
   string id = 1;
-  string reason = 2; // cyclic/self dependency, dangling parent reference, empty transfers map, ...
+  // cyclic/self dependency, dangling parent reference, empty transfers map,
+  // more transfers than one Transaction may hold, a leg whose amount no
+  // Transfer would accept (zero, no currency, or absent), an immediately
+  // dispatchable child that could not be funded, ...
+  string reason = 2;
 }
 
 message StartInitializingTransactionResponse {
@@ -255,19 +269,25 @@ enum TransactionState {
   TRANSACTION_STATE_REJECTED = 7;
 }
 
-// No naturally-repeated entry point exists for Transaction the way every
-// Transfer RPC re-runs runSaga on call: a staged child settles via calls
-// made on ITS OWN id (ConfirmStagedTransfer/PostPendingTransfer), which the
-// owning Transaction has no way to learn about except by being asked to
-// look again. Contract: ruby calls the child's own staged-settlement RPC,
-// then calls ResumeTransaction(owning_transaction_id) — no polling, no
-// background worker, matching the synchronous-in-process model the Transfer
-// saga itself already uses.
-message ResumeTransactionRequest {
+// Reads where a Transaction stands. It advances nothing.
+//
+// It was called ResumeTransaction, and it did resume: a staged child settles
+// through calls made on ITS OWN id (ConfirmStagedTransfer/PostPendingTransfer),
+// and this was the only way the owning Transaction could be told to go and
+// look. Since the async cutover it is not needed for that — those settlement
+// calls write events of their own, and go/cmd/orchestrator follows them back to
+// the owning Transaction — and the name would have been a lie, next to a
+// transaction.Server.Resume that really does drive.
+//
+// What it is for now is authority. ruby's view of a Transaction is a lagging
+// projection and is never the truth, so anything that must know where one
+// actually stands before acting on it — an ACH entry about to be handed to a
+// provider, above all — asks here rather than reading its own tables.
+message GetTransactionStateRequest {
   string id = 1;
 }
 
-message ResumeTransactionResponse {
+message GetTransactionStateResponse {
   string id = 1;
   TransactionState state = 2;
   string reason = 3;
@@ -281,6 +301,6 @@ message StartTransactionRollbackResponse {
 service TransactionService {
   rpc StartInitializingTransaction(StartInitializingTransactionRequest) returns (StartInitializingTransactionResponse) {}
   rpc StartProcessingTransfer(StartProcessingTransferRequest) returns (StartProcessingTransferResponse) {}
-  rpc ResumeTransaction(ResumeTransactionRequest) returns (ResumeTransactionResponse) {}
+  rpc GetTransactionState(GetTransactionStateRequest) returns (GetTransactionStateResponse) {}
   rpc StartTransactionRollback(StartTransactionRollbackRequest) returns (StartTransactionRollbackResponse) {}
 }

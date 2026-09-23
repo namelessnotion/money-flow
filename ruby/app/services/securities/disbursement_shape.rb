@@ -25,10 +25,13 @@ module Services
     #
     # **An interest-only Repayment retires nothing, so it has no retirement leg
     # at all** and the payout leg becomes the root. The leg is absent rather
-    # than zero because Go turns a zero-amount Transfer into a transport error
-    # that the Transaction saga logs and swallows — the RPC still answers
-    # TransactionInitialized, and the Transaction sits in Started forever with
-    # no event to explain why. A refusal would be survivable; that is not.
+    # than zero, and that was once the difference between survivable and not:
+    # Go turned a zero-amount Transfer into a transport error the saga
+    # swallowed, stranding the Transaction in Started with nothing to explain
+    # it. Go now refuses such a leg at accept time instead, as one recorded
+    # rejection (go/docs/adr/0007), so this is belt-and-braces — it gives a
+    # better message here, at the call site, and the disbursements CHECK stops
+    # a bad row being written at all.
     class DisbursementShape < T::Struct
       FACTORY_NAME = 'security_disbursement'
       # Bumped whenever the legs or their order change, so Go's record of each

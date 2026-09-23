@@ -68,13 +68,22 @@ func TestOrchestrator_DrivesATransactionToCompletedFromTriggersAlone(t *testing.
 	t.Parallel()
 	w, txnID, realID, shadowID := achDeposit(t)
 
-	// The transaction topic starts it: initialized -> started, real dispatched.
+	// The transaction topic starts it: initialized -> started, and the real leg
+	// is requested. Requested is all it is — accepting a Transfer no longer runs
+	// it, so it has not staged yet.
 	w.mustDeliver(transaction.AggregateType, txnID)
-	if got := w.outcome(realID); got != transfer.OutcomeStaged {
-		t.Fatalf("real Outcome() = %v, want staged", got)
+	if got := w.outcome(realID); got != transfer.OutcomeInFlight {
+		t.Fatalf("real Outcome() = %v, want in_flight: accepted, not yet run", got)
 	}
 	if got := w.outcome(shadowID); got != transfer.OutcomeNotFound {
 		t.Fatalf("shadow Outcome() = %v, want not_found: it depends on real completing", got)
+	}
+
+	// The real leg's own acceptance is a trigger too, and folding it is what
+	// prepares and stages it.
+	w.mustDeliver(transfer.AggregateType, realID)
+	if got := w.outcome(realID); got != transfer.OutcomeStaged {
+		t.Fatalf("real Outcome() = %v, want staged", got)
 	}
 
 	// ...days pass, ACH settles. The Transaction is told nothing.
@@ -83,56 +92,24 @@ func TestOrchestrator_DrivesATransactionToCompletedFromTriggersAlone(t *testing.
 		t.Fatalf("state = %v, want still STARTED before the trigger arrives", got)
 	}
 
-	// The transfer topic finishes it: the committed child is reconciled, the
-	// shadow leg becomes ready, and the Transaction completes.
+	// The transfer topic carries the settlement back: the committed child is
+	// reconciled and the shadow leg becomes ready, so it is requested.
 	w.mustDeliver(transfer.AggregateType, realID)
-	if got := w.transactionState(txnID); got != transactionpb.TransactionState_TRANSACTION_STATE_COMPLETED {
-		t.Fatalf("state = %v, want COMPLETED", got)
+	if got := w.outcome(shadowID); got != transfer.OutcomeInFlight {
+		t.Fatalf("shadow Outcome() = %v, want in_flight: requested by the reconciliation", got)
 	}
+	if got := w.transactionState(txnID); got != transactionpb.TransactionState_TRANSACTION_STATE_STARTED {
+		t.Fatalf("state = %v, want still STARTED: the shadow leg has not run", got)
+	}
+
+	// And the shadow leg's own trigger runs it and, following the link to its
+	// owner, completes the Transaction.
+	w.mustDeliver(transfer.AggregateType, shadowID)
 	if got := w.outcome(shadowID); got != transfer.OutcomeCommitted {
 		t.Errorf("shadow Outcome() = %v, want committed", got)
 	}
-}
-
-// Merging this before the cutover is only safe if the orchestrator does
-// nothing at all where the synchronous saga already did the work. Here the
-// whole Transaction runs the old way, and then every message it would have
-// published is delivered.
-func TestOrchestrator_IsANoOpWhenTheSynchronousPathAlreadyFinished(t *testing.T) {
-	t.Parallel()
-	w, bankAccount, cash, bankControl, uncleared := achWorld(t)
-	txnID := testutil.ID("txn-sync")
-	realID := testutil.ID("real")
-	shadowID := testutil.ID("shadow")
-
-	// The ordinary RPC, saga and all: no staging anywhere, so it runs to
-	// completion inside the call.
-	if _, err := w.transactions.StartInitializingTransaction(context.Background(), &transactionpb.StartInitializingTransactionRequest{
-		Id: txnID,
-		Transfers: map[string]*transactionpb.Transfer{
-			realID:   {Id: realID, Amount: usd(10000), FromWalletId: bankAccount, ToWalletId: cash, AutoProcess: true, MintSource: true},
-			shadowID: {Id: shadowID, Amount: usd(10000), FromWalletId: bankControl, ToWalletId: uncleared, AutoProcess: true, MintSource: true},
-		},
-		TransferDependency: map[string]*transactionpb.TransferIdList{shadowID: {TransferId: []string{realID}}},
-	}); err != nil {
-		t.Fatalf("StartInitializingTransaction() error = %v", err)
-	}
 	if got := w.transactionState(txnID); got != transactionpb.TransactionState_TRANSACTION_STATE_COMPLETED {
-		t.Fatalf("state = %v, want COMPLETED from the synchronous path", got)
-	}
-
-	before, _ := w.store.counts()
-	for _, id := range []string{realID, shadowID} {
-		w.mustDeliver(transfer.AggregateType, id)
-	}
-	w.mustDeliver(transaction.AggregateType, txnID)
-	after, _ := w.store.counts()
-
-	if after != before {
-		t.Errorf("the log grew by %d events; the orchestrator must add nothing where the saga already ran", after-before)
-	}
-	if got := w.transactionState(txnID); got != transactionpb.TransactionState_TRANSACTION_STATE_COMPLETED {
-		t.Errorf("state = %v, want COMPLETED", got)
+		t.Fatalf("state = %v, want COMPLETED", got)
 	}
 }
 
@@ -143,8 +120,9 @@ func TestOrchestrator_RedeliveringEveryMessageChangesNothing(t *testing.T) {
 	w, txnID, realID, shadowID := achDeposit(t)
 
 	w.mustDeliver(transaction.AggregateType, txnID)
-	w.settle(realID)
 	w.mustDeliver(transfer.AggregateType, realID)
+	w.settle(realID)
+	w.drain(txnID)
 	if got := w.transactionState(txnID); got != transactionpb.TransactionState_TRANSACTION_STATE_COMPLETED {
 		t.Fatalf("state = %v, want COMPLETED before redelivery", got)
 	}
@@ -205,6 +183,7 @@ func TestOrchestrator_ConvergesWhateverOrderTopicsArriveIn(t *testing.T) {
 			// the orders above names an aggregate that genuinely exists — a
 			// trigger can only ever follow the event that produced it.
 			w.mustDeliver(transaction.AggregateType, txnID)
+			w.mustDeliver(transfer.AggregateType, realID)
 			w.settle(realID)
 
 			ids := map[string]string{"transaction": txnID, "real": realID, "shadow": shadowID}
@@ -220,6 +199,13 @@ func TestOrchestrator_ConvergesWhateverOrderTopicsArriveIn(t *testing.T) {
 					t.Fatalf("Handle(%s %s) error = %v", s.aggregateType, s.which, err)
 				}
 			}
+
+			// The order above is the thing under test; what follows is simply
+			// the rest of the messages arriving, which at-least-once delivery
+			// guarantees they eventually do. Convergence is the claim, so an
+			// order that has merely not finished yet is not a failure — one
+			// that cannot finish is.
+			w.drain(txnID)
 
 			if got := w.transactionState(txnID); got != transactionpb.TransactionState_TRANSACTION_STATE_COMPLETED {
 				t.Errorf("state = %v, want COMPLETED whatever the order", got)
@@ -317,8 +303,13 @@ func stagedReversalRollback(t *testing.T) (w *world, txnID, realID string) {
 	)
 
 	w.mustDeliver(transaction.AggregateType, txnID)
-	w.settle(realID)
+	// One trigger per hop: the real leg's acceptance stages it, the settlement
+	// reconciles it and requests the shadow leg, the shadow leg's own trigger
+	// runs it and it fails, and that failure starts the rollback and requests
+	// the Reversal — which then needs a trigger of its own to stage.
 	w.mustDeliver(transfer.AggregateType, realID)
+	w.settle(realID)
+	w.drain(txnID)
 	return w, txnID, realID
 }
 
@@ -388,6 +379,9 @@ func TestOrchestrator_ConcurrentTriggersOnOneTransactionConverge(t *testing.T) {
 	w, txnID, realID, _ := achDeposit(t)
 
 	w.mustDeliver(transaction.AggregateType, txnID)
+	// Staging the real leg is its own hop now, and it has to have happened
+	// before the settlement below means anything.
+	w.mustDeliver(transfer.AggregateType, realID)
 	w.settle(realID)
 
 	barrier := newAppendBarrier(transaction.AggregateType, txnID, 2)
@@ -420,6 +414,10 @@ func TestOrchestrator_ConcurrentTriggersOnOneTransactionConverge(t *testing.T) {
 	if _, conflicts := w.store.counts(); conflicts == 0 {
 		t.Error("no optimistic-concurrency conflict occurred; the test proved nothing about the retry")
 	}
+	// Both handlers raced to reconcile the settled child and dispatch the
+	// shadow leg; running that leg is one more hop, and convergence is the
+	// claim under test rather than the message count.
+	w.drain(txnID)
 	if got := w.transactionState(txnID); got != transactionpb.TransactionState_TRANSACTION_STATE_COMPLETED {
 		t.Errorf("state = %v, want COMPLETED: concurrent appends must converge", got)
 	}
@@ -500,7 +498,12 @@ func TestOrchestrator_ConcurrentDispatchOfTheSameReadyChildConverges(t *testing.
 
 	// The underlying Transfer itself must also have converged cleanly
 	// (staged, per achDeposit's realID spec) rather than having hit the
-	// transfer-side contradiction this whole decision exists to prevent.
+	// transfer-side contradiction this whole decision exists to prevent. Its
+	// own trigger is what runs it that far — the racing dispatches above only
+	// accepted it, once.
+	if err := w.deliver(transfer.AggregateType, realID); err != nil {
+		t.Fatalf("Handle(transfer %s) error = %v", realID, err)
+	}
 	if outcome, err := transfer.Outcome(context.Background(), w.store, realID); err != nil || outcome != transfer.OutcomeStaged {
 		t.Errorf("transfer.Outcome(%s) = (%v, %v), want (OutcomeStaged, nil)", realID, outcome, err)
 	}

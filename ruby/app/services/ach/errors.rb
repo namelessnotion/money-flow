@@ -18,6 +18,13 @@ module Services
     # Only a deposit mints uncleared cash; there is nothing else to clear.
     class NotClearable < StandardError; end
 
+    # The entry may not reach the provider yet, or ever: its real leg is not
+    # staged, or Go says the Transaction is no longer running. Raised rather
+    # than waited on, because the caller — a sweep — will look again, and a
+    # Transaction that has gone terminal needs a person rather than a retry
+    # (ruby/docs/adr/0004).
+    class NotSubmittable < StandardError; end
+
     # The entity lacks an account an ACH shape moves money through.
     class MissingAccount < StandardError; end
   end

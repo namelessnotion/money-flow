@@ -122,7 +122,7 @@ func TestOutcome_MirrorsSagaProgression(t *testing.T) {
 
 	// Staged: OutcomeStaged, then OutcomePending, then OutcomeCommitted.
 	transferID := testutil.ID("xfer1")
-	if _, err := server.RequestTransfer(ctx, transferRequest(transferID, testutil.ID("w1"), testutil.ID("w2"), usd(400), true)); err != nil {
+	if _, err := requestAndRun(t, server, ctx, transferRequest(transferID, testutil.ID("w1"), testutil.ID("w2"), usd(400), true)); err != nil {
 		t.Fatalf("RequestTransfer(stage=true) error = %v", err)
 	}
 	if got, err := Outcome(ctx, store, transferID); err != nil || got != OutcomeStaged {
@@ -181,7 +181,7 @@ func TestOutcome_Failed(t *testing.T) {
 	server := NewServer(store, &rejectingTransfersClient{Client: lc}, nil, nil)
 	ctx := context.Background()
 	transferID := testutil.ID("xfer1")
-	if _, err := server.RequestTransfer(ctx, transferRequest(transferID, testutil.ID("w1"), testutil.ID("w2"), usd(400), false)); err != nil {
+	if _, err := requestAndRun(t, server, ctx, transferRequest(transferID, testutil.ID("w1"), testutil.ID("w2"), usd(400), false)); err != nil {
 		t.Fatalf("RequestTransfer() error = %v", err)
 	}
 

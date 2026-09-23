@@ -24,16 +24,24 @@
 // SERVER_URL defaults to a local go/cmd/server; DATABASE_URL defaults to
 // the same development database cmd/events and cmd/server use.
 //
-// Run go/cmd/orchestrator (with CDC publishing) alongside the server for a
-// heavily concurrent run. A Transfer whose prepare step loses a
-// concurrency race on a hot Wallet is left mid-flight until something
-// resumes its saga — only the orchestrator's event-triggered Resume does
-// that. This tool gives every such transaction -retry-stuck-attempts more
-// tries, waiting -retry-stuck-delay before each so the orchestrator has a
-// chance to catch up; a TRANSACTION_STATE_STARTED transaction still in the
-// final report ran out of retries, not out of hope — rerunning verification
-// a little later, or with a longer delay, may still resolve it. Pushing
-// -entities up relative to -concurrency also reduces how often any one
+// go/cmd/orchestrator and a registered CDC connector are REQUIRED, not an
+// optimisation for heavy runs. Since the async cutover (go/docs/adr/0006)
+// nothing in the RPC surface advances a saga: every call this tool makes
+// records a decision and returns, and the orchestrator folds the events that
+// publishes. Without it nothing settles and every transaction reports open —
+// so `make cdc-up && make orchestrator-up` before running this, and check
+// `make orchestrator-logs` first if everything comes back STARTED.
+//
+// Every transaction therefore starts out open, and the wait is the normal
+// path rather than a rescue: each one is looked at up to
+// -settle-wait-attempts times, -settle-wait-delay apart, which is one CDC
+// round trip each. A TRANSACTION_STATE_STARTED transaction still in the final
+// report ran out of attempts, not out of hope — looking again later, or with a
+// longer delay, may still resolve it.
+//
+// One genuine stall remains: a Transfer whose prepare step loses a concurrency
+// race on a hot Wallet is left mid-flight, and only a later trigger moves it.
+// Pushing -entities up relative to -concurrency reduces how often any one
 // Wallet is hot enough to race in the first place.
 package main
 
@@ -78,8 +86,8 @@ func main() {
 		seed           = flag.Uint64("seed", uint64(time.Now().UnixNano()), "RNG seed; fix it for a reproducible run")
 		skipVerify     = flag.Bool("skip-verify", false, "skip the post-run ledger correctness check (no Postgres access needed)")
 		timeout        = flag.Duration("timeout", 30*time.Second, "per-RPC timeout")
-		retryAttempts  = flag.Int("retry-stuck-attempts", 3, "how many more times to try settling a still-open transaction, giving go/cmd/orchestrator a chance to catch up (0 disables retrying)")
-		retryDelay     = flag.Duration("retry-stuck-delay", 2*time.Second, "how long to wait before each retry of a still-open transaction")
+		retryAttempts  = flag.Int("settle-wait-attempts", 10, "how many more times to look at a still-open transaction, giving go/cmd/orchestrator time to reach it (0 disables waiting)")
+		retryDelay     = flag.Duration("settle-wait-delay", time.Second, "how long to wait before each look at a still-open transaction")
 	)
 	flag.Parse()
 
@@ -123,11 +131,11 @@ func main() {
 	results, wallClock := runLoad(ctx, entities, cfg, *transactionsN, *concurrency, *seed, drive)
 
 	if stuck := len(stuckIndices(results)); stuck > 0 && *retryAttempts > 0 {
-		log.Printf("simulate: %d transactions still open; retrying up to %d times, %s apart", stuck, *retryAttempts, *retryDelay)
+		log.Printf("simulate: %d transactions still open; waiting for the orchestrator, up to %d times, %s apart", stuck, *retryAttempts, *retryDelay)
 		if remaining := retryStuck(ctx, results, *retryAttempts, *retryDelay, retry); remaining > 0 {
-			log.Printf("simulate: %d transactions still open after retrying", remaining)
+			log.Printf("simulate: %d transactions still open after waiting", remaining)
 		} else {
-			log.Print("simulate: every transaction reached a terminal state after retrying")
+			log.Print("simulate: every transaction reached a terminal state")
 		}
 	}
 
@@ -204,10 +212,12 @@ func printSummary(s summary) {
 		fmt.Printf("WARNING: %d transactions never got a final state (transport/RPC error)\n", s.errors)
 	}
 	if s.openCount > 0 {
-		fmt.Printf("NOTE: %d transactions are still open even after retrying — likely a Transfer that lost a "+
-			"concurrency race while preparing on a hot Wallet and go/cmd/orchestrator either isn't running or "+
-			"hasn't caught up yet; try -retry-stuck-attempts/-retry-stuck-delay higher, or reduce contention "+
-			"with more -entities relative to -concurrency\n", s.openCount)
+		fmt.Printf("NOTE: %d transactions are still open. Nothing but go/cmd/orchestrator advances a saga, so "+
+			"check it is running and has a CDC connector to consume from (`make cdc-up && make orchestrator-up`, "+
+			"then `make orchestrator-logs`) — with neither, every transaction ends here. Otherwise it has not "+
+			"caught up, or a Transfer lost a concurrency race while preparing on a hot Wallet: try "+
+			"-settle-wait-attempts/-settle-wait-delay higher, or reduce contention with more -entities relative "+
+			"to -concurrency\n", s.openCount)
 	}
 }
 

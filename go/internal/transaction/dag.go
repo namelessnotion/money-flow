@@ -2,11 +2,35 @@ package transaction
 
 import (
 	"context"
+	"errors"
 	"fmt"
+
+	"github.com/twitchtv/twirp"
 
 	pb "github.com/namelessnotion/money_flow/go/gen/proto/transaction/v1"
 	"github.com/namelessnotion/money_flow/go/internal/eventstore"
+	"github.com/namelessnotion/money_flow/go/internal/money"
 )
+
+// maxTransfersPerTransaction caps how wide one Transaction may be. It is a
+// circuit breaker, not a design constraint: every shape this system builds is
+// one or two legs, so a request anywhere near this limit is a caller that has
+// lost track of what it is assembling. Two independent reasons, either
+// sufficient on its own:
+//
+//   - Rollback blast radius. The Transaction is the unit of rollback, so an
+//     N-child Transaction failing is N reversals, each a whole Transfer running
+//     its own saga (ADR 0002). TransactionRollbackFailed is a terminal that
+//     requires a person, and bounding N bounds how much that person has to
+//     reconcile by hand.
+//   - TigerBeetle's batch ceiling is unguarded below this point.
+//     ledger.CreateTransfers passes the caller's whole slice straight through
+//     with no chunking, and a linked chain cannot span batches. lookupBatchMax
+//     exists, but only for reads.
+//
+// It does NOT make wide DAGs cheap — maxDispatchPerStep in saga.go is what
+// bounds the work of any one saga run. This bounds what may exist at all.
+const maxTransfersPerTransaction = 64
 
 // decodeSpec reads the DAG (transfers + transfer_dependency) recorded on
 // TransactionInitialized — this Transaction's first event whenever it
@@ -25,10 +49,12 @@ func decodeSpec(events []eventstore.Event) (map[string]*pb.Transfer, map[string]
 }
 
 // validateDAG rejects a malformed spec before TransactionInitialized is
-// ever written: an empty transfer set, a dangling reference (either side —
-// transfer_dependency naming a transfer_id not present in transfers), or a
-// cycle. A direct self-dependency is just a 1-cycle and needs no special
-// case. Uses Kahn's algorithm: build in-degree per node from deps, then
+// ever written: an empty transfer set, more transfers than one Transaction
+// may hold, a leg whose amount no Transfer would accept, a dangling
+// reference (either side — transfer_dependency naming a transfer_id not
+// present in transfers), or a cycle. A direct self-dependency is just a
+// 1-cycle and needs no special case. Uses Kahn's algorithm: build in-degree
+// per node from deps, then
 // repeatedly process zero-in-degree nodes, decrementing their children's
 // in-degree as they're processed; if fewer nodes were processed than exist
 // once the queue empties, a cycle exists among whatever's left.
@@ -36,9 +62,19 @@ func validateDAG(transfers map[string]*pb.Transfer, deps map[string]*pb.Transfer
 	if len(transfers) == 0 {
 		return fmt.Errorf("transaction: transfers must not be empty")
 	}
+	// Checked before anything that walks the graph, so a pathological request
+	// is refused at its cheapest, and before wouldAcceptReadyChildren so an
+	// over-wide DAG never costs one balance read per child.
+	if len(transfers) > maxTransfersPerTransaction {
+		return fmt.Errorf("transaction: %d transfers exceeds the limit of %d per Transaction",
+			len(transfers), maxTransfersPerTransaction)
+	}
 	for key, spec := range transfers {
 		if spec.GetId() != key {
 			return fmt.Errorf("transaction: transfers[%q].id = %q, want it to match its own map key", key, spec.GetId())
+		}
+		if err := validateChildAmount(key, spec); err != nil {
+			return err
 		}
 	}
 
@@ -84,6 +120,32 @@ func validateDAG(transfers map[string]*pb.Transfer, deps map[string]*pb.Transfer
 		return fmt.Errorf("transaction: transfer_dependency contains a cycle (a direct self-dependency counts)")
 	}
 	return nil
+}
+
+// validateChildAmount refuses a leg whose amount transfer.RequestTransfer
+// would refuse anyway — a nil Money, a missing currency, or zero minor units.
+//
+// Catching it here is not tidiness. Refused at dispatch, that refusal is a
+// twirp error rather than a domain rejection: requestChildTransfer returns
+// it, runSaga returns it, and the caller never sees it — leaving the
+// Transaction in Started with no event on its stream to explain why it will
+// never move again. Refused here it is one TransactionRejected, written
+// before anything else exists, which the read model shows like any other
+// rejection. ruby/docs/adr/0006 asks for exactly this.
+//
+// money.Validate stays the one owner of what a well-formed amount is (see its
+// package doc); only its message is unwrapped, so the recorded reason reads
+// as domain prose rather than a transport error string.
+func validateChildAmount(key string, spec *pb.Transfer) error {
+	err := money.Validate("amount", spec.GetAmount())
+	if err == nil {
+		return nil
+	}
+	var twerr twirp.Error
+	if errors.As(err, &twerr) {
+		return fmt.Errorf("transaction: transfers[%q].amount %s", key, twerr.Msg())
+	}
+	return fmt.Errorf("transaction: transfers[%q].amount is invalid: %w", key, err)
 }
 
 // readyToRun returns every child id that (a) has not yet been touched (no

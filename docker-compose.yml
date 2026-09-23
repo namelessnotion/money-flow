@@ -125,9 +125,12 @@ services:
       timeout: 3s
       retries: 10
 
-  # Resque worker for the `ach` queue: runs Jobs::ClearAchDeposits, which
-  # originates clearing Transactions in Go. Same image as `ruby`. Under the
-  # `cdc` profile because it clears from the read model the consumer builds.
+  # Resque worker for the `ach` and `securities` queues: runs
+  # Jobs::SubmitAchEntries and Jobs::ClearAchDeposits, which hand entries to the
+  # provider and originate clearing Transactions in Go, plus
+  # Jobs::DisburseRepayments. Same image as `ruby`. Every one of them reads the
+  # projection the consumer builds, so it needs `make cdc-up` and
+  # `make consumer-up` to do anything at all.
   resque-worker:
     build:
       context: .

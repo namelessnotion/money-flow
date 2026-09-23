@@ -9,16 +9,19 @@ RSpec.describe Services::Ach::Settle do
 
   before { stub_go_happy_path }
 
-  it 'posts the pending real leg, then resumes the Transaction so the shadow leg runs' do
+  it 'posts the pending real leg, and leaves the Transaction to the orchestrator' do
     service.call(ach_transaction_id: ach.id)
 
     expect(transfer_client).to have_received(:post_pending_transfer) do |req|
       expect(req.id).to eq(ach.real_transfer_id)
     end
-    expect(transaction_client).to have_received(:resume_transaction) { |req| expect(req.id).to eq(ach.id) }
+    # Posting writes TransferCommitted to the leg's own stream, and that event
+    # is what wakes the owning Transaction. Asking Go to do it here as well
+    # would be racing the orchestrator for the same work.
+    expect(transaction_client).not_to have_received(:get_transaction_state)
   end
 
-  it 'raises when Go refuses to post, and does not resume' do
+  it 'raises when Go refuses to post' do
     allow(transfer_client).to receive(:post_pending_transfer) do |req|
       twirp_ok(Transfer::V1::PostPendingTransferResponse.new(
                  id: req.id,
@@ -28,7 +31,6 @@ RSpec.describe Services::Ach::Settle do
     end
 
     expect { service.call(ach_transaction_id: ach.id) }.to raise_error(Services::Ach::Refused, 'not pending')
-    expect(transaction_client).not_to have_received(:resume_transaction)
   end
 
   it 'raises Unavailable once Go stays unreachable' do

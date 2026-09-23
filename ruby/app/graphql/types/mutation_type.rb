@@ -6,6 +6,7 @@ require_relative '../mutations/onboard_entity'
 require_relative '../mutations/initiate_ach'
 require_relative '../mutations/settle_ach'
 require_relative '../mutations/return_ach'
+require_relative '../mutations/submit_ach_now'
 require_relative '../mutations/clear_ach'
 require_relative '../mutations/issue_security'
 require_relative '../mutations/purchase_security'
@@ -21,6 +22,7 @@ module Types
     field :initiate_ach_withdrawal, mutation: Mutations::InitiateAchWithdrawal
     field :settle_ach, mutation: Mutations::SettleAch
     field :return_ach, mutation: Mutations::ReturnAch
+    field :submit_ach_now, mutation: Mutations::SubmitAchNow
     field :clear_ach, mutation: Mutations::ClearAch
 
     field :issue_security, mutation: Mutations::IssueSecurity

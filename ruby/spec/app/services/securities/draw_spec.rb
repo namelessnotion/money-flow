@@ -58,17 +58,22 @@ RSpec.describe Services::Securities::Draw do
       expect(recorded).to eq(drawn.draw_transaction_id)
     end
 
-    it 'asks Go how it went, because an operator is owed a definitive answer' do
+    it 'asks Go to accept it and nothing more' do
+      # A short escrow is refused at accept time — the leg is a root, so the
+      # pre-flight sees it — and that is the answer an operator gets. Whether
+      # the money actually moved arrives through the projection, because since
+      # the async cutover it is the orchestrator that moves it.
       drawn = service.call(security_id: security.id)
 
-      expect(transaction_client).to have_received(:resume_transaction) do |req|
+      expect(transaction_client).to have_received(:start_initializing_transaction) do |req|
         expect(req.id).to eq(drawn.draw_transaction_id)
       end
+      expect(transaction_client).not_to have_received(:get_transaction_state)
     end
 
-    it "raises Go's reason when the draw rolled back" do
-      allow(transaction_client).to receive(:resume_transaction) do |req|
-        resumed_rolled_back(req.id, 'wallet "escrow" has insufficient Token capacity: 1 USD short')
+    it "raises Go's reason when the escrow is short, which the pre-flight catches" do
+      allow(transaction_client).to receive(:start_initializing_transaction) do |req|
+        transaction_rejected(req.id, 'wallet "escrow" has insufficient Token capacity: 1 USD short')
       end
 
       expect { service.call(security_id: security.id) }

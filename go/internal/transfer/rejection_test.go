@@ -40,11 +40,11 @@ func TestRequestTransfer_RejectedRequestIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	req := transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), false)
 
-	first, err := server.RequestTransfer(ctx, req)
+	first, err := requestAndRun(t, server, ctx, req)
 	if err != nil {
 		t.Fatalf("first RequestTransfer() error = %v", err)
 	}
-	second, err := server.RequestTransfer(ctx, req)
+	second, err := requestAndRun(t, server, ctx, req)
 	if err != nil {
 		t.Fatalf("second RequestTransfer() error = %v", err)
 	}
@@ -71,7 +71,7 @@ func TestRequestReversal_RejectionIsRecorded(t *testing.T) {
 	server := NewServer(store, lc, nil, nil)
 	ctx := context.Background()
 
-	resp, err := server.RequestReversal(ctx, &pb.RequestReversalRequest{
+	resp, err := reverseAndRun(t, server, ctx, &pb.RequestReversalRequest{
 		Id: testutil.ID("rev1"), TransferId: testutil.ID("never-existed"), Reason: "test",
 	})
 	if err != nil {
@@ -98,7 +98,7 @@ func TestConfirmStagedTransfer_RejectionIsRecordedOntoExistingStream(t *testing.
 	server := NewServer(store, lc, nil, nil)
 	ctx := context.Background()
 	// Not staged — commits immediately, ending up Committed.
-	if _, err := server.RequestTransfer(ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), false)); err != nil {
+	if _, err := requestAndRun(t, server, ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), false)); err != nil {
 		t.Fatalf("RequestTransfer() error = %v", err)
 	}
 	before := len(mustEvents(t, store, testutil.ID("xfer1")))
@@ -135,7 +135,7 @@ func TestCancelStagedTransfer_RejectionIsRecordedOntoExistingStream(t *testing.T
 
 	server := NewServer(store, lc, nil, nil)
 	ctx := context.Background()
-	if _, err := server.RequestTransfer(ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), false)); err != nil {
+	if _, err := requestAndRun(t, server, ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), false)); err != nil {
 		t.Fatalf("RequestTransfer() error = %v", err)
 	}
 

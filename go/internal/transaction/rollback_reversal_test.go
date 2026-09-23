@@ -68,7 +68,8 @@ func reversingRollbackFixture(t *testing.T, lc ledger.Client) (eventstore.Store,
 	openWallet(t, store, cash, sharedpb.Allows_ALLOWS_NONE)
 	openWallet(t, store, uncleared, sharedpb.Allows_ALLOWS_NONE)
 
-	txnServer := NewServer(store, newTransferServer(store, lc))
+	xferServer := newTransferServer(store, lc)
+	txnServer := NewServer(store, xferServer)
 	txnID := testutil.ID("txn-rev")
 	realID := testutil.ID("real")
 	shadowID := testutil.ID("shadow")
@@ -82,6 +83,12 @@ func reversingRollbackFixture(t *testing.T, lc ledger.Client) (eventstore.Store,
 	}); err != nil {
 		t.Fatalf("StartInitializingTransaction() error = %v", err)
 	}
+
+	// Accepting writes only TransactionInitialized now, so the whole run —
+	// the real leg committing, the shadow leg failing, and the rollback that
+	// reverses the real leg — happens here, under the trigger loop rather than
+	// inside the RPC.
+	driveSaga(t, txnServer, xferServer, store, txnID)
 	return store, txnID, realID
 }
 

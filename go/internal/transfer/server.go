@@ -3,13 +3,20 @@
 // newly-minted destination Token(s), including a reversal flow and a
 // staged/pending settlement path for external rails like ACH. See the
 // implementation plan for the full saga design.
+//
+// RequestTransfer and RequestReversal record a decision and return; the saga
+// itself runs in cmd/orchestrator, from the events those decisions publish.
+// The settlement RPCs below (ConfirmStagedTransfer, PostPendingTransfer,
+// CancelStagedTransfer, CancelAcceptedTransfer) are the exception, and are not
+// really one: each performs a single claimed transition for one Transfer and
+// answers with its outcome, which is what its caller needs. None of them
+// folds.
 package transfer
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 
 	"github.com/twitchtv/twirp"
 	"google.golang.org/protobuf/proto"
@@ -93,23 +100,6 @@ func sagaStepError(err error) error {
 	return twirp.InternalErrorWith(err)
 }
 
-// logSagaError reports a runSaga failure that was deliberately not surfaced
-// to the RPC caller (the Accepted/Rejected response is already decided by
-// the time runSaga runs — decision #5/#7). This is only ever a genuinely
-// unexpected failure: a TigerBeetle rejection of a batch we submitted is
-// not an error here at all — stage()/commit() route it through compensate()
-// to a durable TransferFailed event and return nil. Anything that reaches
-// this function is a store failure, a decode failure, or a saga
-// contradiction — worth an operator's attention even though the caller
-// won't see it, so it's logged rather than dropped. The Transfer itself
-// self-heals: it stays wherever runSaga left it, and the next call that
-// touches this id (a retry, or an unrelated later request) resumes it.
-func logSagaError(rpc, transferID string, err error) {
-	if err != nil {
-		log.Printf("transfer: %s(%s): saga did not complete: %v", rpc, transferID, err)
-	}
-}
-
 func decodedCommitted(events []eventstore.Event) (*pb.TransferCommitted, error) {
 	for _, e := range events {
 		if e.EventType != eventstore.EventType(&pb.TransferCommitted{}) {
@@ -131,13 +121,16 @@ func decodedCommitted(events []eventstore.Event) (*pb.TransferCommitted, error) 
 // RequestTransfer accepts or rejects req, in both cases recording that
 // decision as transferID's first event — a rejection is as much a fact
 // about this id's history as an acceptance is, so it belongs in the log
-// too, not only in the transient RPC response. If accepted, the saga is
-// driven forward synchronously (decision #5): prepare, then stage or commit
-// depending on req.Stage; what happens next after that lives in the event
-// log, per decision #7. Idempotent: a Transfer that was already decided —
-// accepted or rejected — has its recorded outcome returned as-is (and, if
-// accepted, its saga nudged forward again, self-healing a stuck saga,
-// decision #5's mitigation).
+// too, not only in the transient RPC response.
+//
+// Accepting is all it does. Nothing is prepared, staged or committed here:
+// TransferRequestAccepted is published like any other event, and the
+// orchestrator's fold of it is what prepares the Transfer and then stages or
+// commits it depending on Stage. So an accepted response means the Transfer
+// exists and will run, not that any money has moved.
+//
+// Idempotent: a Transfer that was already decided — accepted or rejected — has
+// its recorded outcome returned as-is.
 func (s *Server) RequestTransfer(ctx context.Context, req *pb.RequestTransferRequest) (*pb.RequestTransferResponse, error) {
 	if err := id.Validate("id", req.GetId()); err != nil {
 		return nil, err
@@ -195,7 +188,6 @@ func (s *Server) RequestTransfer(ctx context.Context, req *pb.RequestTransferReq
 			continue // a concurrent write landed first — reload and re-decide
 		}
 		if accepted, isAccept := event.(*pb.TransferRequestAccepted); isAccept {
-			logSagaError("RequestTransfer", req.GetId(), s.runSaga(ctx, req.GetId()))
 			return acceptedResponse(accepted), nil
 		}
 		return rejectedTransferResponse(rejection), nil
@@ -213,7 +205,6 @@ func (s *Server) decidedRequestTransfer(ctx context.Context, transferID string, 
 	}
 	switch m := msg.(type) {
 	case *pb.TransferRequestAccepted:
-		logSagaError("RequestTransfer", transferID, s.runSaga(ctx, transferID))
 		return acceptedResponse(m), nil
 	case *pb.TransferRequestRejected:
 		return rejectedTransferResponse(m), nil
@@ -299,7 +290,8 @@ func acceptedTransferCancelledResponse(transferID, reason string) *pb.CancelAcce
 // that decision as this reversal id's first event for the same reason
 // RequestTransfer does. If accepted, its manifest is derived from the
 // original Transfer (reversalManifest), never independently selected or
-// minted, and its saga is driven forward the same way RequestTransfer's is.
+// minted, and — like RequestTransfer — it is left for the orchestrator to run
+// from the acceptance this publishes.
 func (s *Server) RequestReversal(ctx context.Context, req *pb.RequestReversalRequest) (*pb.RequestReversalResponse, error) {
 	if err := id.Validate("id", req.GetId()); err != nil {
 		return nil, err
@@ -348,7 +340,6 @@ func (s *Server) RequestReversal(ctx context.Context, req *pb.RequestReversalReq
 			continue
 		}
 		if accepted, isAccept := event.(*pb.ReversalRequestAccepted); isAccept {
-			logSagaError("RequestReversal", req.GetId(), s.runSaga(ctx, req.GetId()))
 			return reversalAcceptedResponse(accepted), nil
 		}
 		return rejectedReversalResponse(rejection), nil
@@ -363,7 +354,6 @@ func (s *Server) decidedRequestReversal(ctx context.Context, transferID string, 
 	}
 	switch m := msg.(type) {
 	case *pb.ReversalRequestAccepted:
-		logSagaError("RequestReversal", transferID, s.runSaga(ctx, transferID))
 		return reversalAcceptedResponse(m), nil
 	case *pb.ReversalRequestRejected:
 		return rejectedReversalResponse(m), nil

@@ -1,8 +1,10 @@
 package transaction
 
 import (
+	"fmt"
 	"testing"
 
+	sharedpb "github.com/namelessnotion/money_flow/go/gen/proto/shared/v1"
 	pb "github.com/namelessnotion/money_flow/go/gen/proto/transaction/v1"
 )
 
@@ -14,10 +16,13 @@ func deps(m map[string][]string) map[string]*pb.TransferIdList {
 	return out
 }
 
+// transfers builds a well-formed spec for each id. The amount is not
+// incidental: validateDAG refuses a leg money.Validate would refuse, so a
+// fixture without one would fail every test below for the wrong reason.
 func transfers(ids ...string) map[string]*pb.Transfer {
 	out := make(map[string]*pb.Transfer, len(ids))
 	for _, id := range ids {
-		out[id] = &pb.Transfer{Id: id, AutoProcess: true}
+		out[id] = &pb.Transfer{Id: id, Amount: usd(100), AutoProcess: true}
 	}
 	return out
 }
@@ -77,7 +82,7 @@ func TestValidateDAG_RejectsDanglingParentReference(t *testing.T) {
 
 func TestValidateDAG_RejectsMismatchedTransferID(t *testing.T) {
 	t.Parallel()
-	xfers := map[string]*pb.Transfer{"A": {Id: "not-a", AutoProcess: true}}
+	xfers := map[string]*pb.Transfer{"A": {Id: "not-a", Amount: usd(100), AutoProcess: true}}
 	if err := validateDAG(xfers, nil); err == nil {
 		t.Fatal("validateDAG() error = nil, want an error when a Transfer's own id doesn't match its map key")
 	}
@@ -89,6 +94,56 @@ func TestValidateDAG_RejectsDanglingChildReference(t *testing.T) {
 	d := deps(map[string][]string{"does-not-exist": {"A"}})
 	if err := validateDAG(xfers, d); err == nil {
 		t.Fatal("validateDAG() error = nil, want an error for a dependency entry naming an unknown child")
+	}
+}
+
+// Each fixture below carries exactly one violation. Map iteration order is
+// random, so a spec breaking two rules at once would report whichever the
+// range hit first — which is fine in production (any reason is a rejection)
+// and useless in a test.
+
+func TestValidateDAG_RejectsMoreTransfersThanTheLimit(t *testing.T) {
+	t.Parallel()
+	ids := make([]string, 0, maxTransfersPerTransaction+1)
+	for i := 0; i <= maxTransfersPerTransaction; i++ {
+		ids = append(ids, fmt.Sprintf("t%d", i))
+	}
+	if err := validateDAG(transfers(ids...), nil); err == nil {
+		t.Fatalf("validateDAG() error = nil for %d transfers, want a rejection past the limit of %d",
+			len(ids), maxTransfersPerTransaction)
+	}
+}
+
+// The limit itself has to be legal, or the boundary is off by one and nothing
+// would say so.
+func TestValidateDAG_AcceptsExactlyTheLimit(t *testing.T) {
+	t.Parallel()
+	ids := make([]string, 0, maxTransfersPerTransaction)
+	for i := 0; i < maxTransfersPerTransaction; i++ {
+		ids = append(ids, fmt.Sprintf("t%d", i))
+	}
+	if err := validateDAG(transfers(ids...), nil); err != nil {
+		t.Errorf("validateDAG() error = %v for exactly %d transfers, want nil", err, maxTransfersPerTransaction)
+	}
+}
+
+// All three shapes money.Validate refuses strand a Transaction identically:
+// the leg is refused at dispatch as a transport error, which never reaches
+// the caller and never reaches the stream.
+func TestValidateDAG_RejectsAmountsNoTransferWouldAccept(t *testing.T) {
+	t.Parallel()
+	for name, amount := range map[string]*sharedpb.Money{
+		"zero minor units": {MinorUnits: 0, Currency: "USD"},
+		"no currency":      {MinorUnits: 100, Currency: ""},
+		"no amount at all": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			xfers := map[string]*pb.Transfer{"A": {Id: "A", Amount: amount, AutoProcess: true}}
+			if err := validateDAG(xfers, nil); err == nil {
+				t.Fatalf("validateDAG() error = nil for a leg with %s, want a rejection", name)
+			}
+		})
 	}
 }
 

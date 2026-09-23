@@ -19,10 +19,14 @@ module Services
     #    what is still owed.
     # 2. Records the payment and the ids it is about to send, before calling
     #    Go, so a retry resends the same ids and converges.
-    # 3. Asks Go to run it. The leg is a root and mints nothing, so an
+    # 3. Asks Go to accept it. The leg is a root and mints nothing, so an
     #    underfunded Borrower is refused at accept time, before anything is
-    #    written.
-    # 4. Asks Go how it went.
+    #    written — the one refusal a caller learns here.
+    #
+    # It does not wait for the money to arrive. Go accepts and returns; the
+    # orchestrator runs it, and the outcome reaches Ruby through the projection
+    # (go/docs/adr/0006). That is also what the disbursement sweep waits on: it
+    # only acts on a Repayment the read model has seen complete.
     #
     # Disbursing it to the holders is not this service's job: that is a sweep,
     # one Transaction per holder (ruby/docs/adr/0007). The Borrower gets the
@@ -45,7 +49,6 @@ module Services
         repayment = perform { record(security, principal_minor_units, interest_minor_units, as_of) }
 
         start_transaction!(security, repayment)
-        require_settled!(repayment)
         repayment
       end
 
@@ -99,14 +102,6 @@ module Services
         )
       rescue Refused => e
         raise Refused, "refused before any money moved: #{e.message}"
-      end
-
-      sig { params(repayment: Models::Repayment).void }
-      def require_settled!(repayment)
-        outcome = @go.resume(repayment.id)
-        return unless outcome.failed?
-
-        raise Refused, "refused: #{outcome.reason.empty? ? outcome.state : outcome.reason}"
       end
 
       sig { params(repayment: Models::Repayment).returns(Integer) }

@@ -51,14 +51,12 @@ module GoStubs
              ))
   end
 
-  def resumed(id, state)
-    twirp_ok(Transaction::V1::ResumeTransactionResponse.new(id: id, state: state))
+  def transaction_state(id, state)
+    twirp_ok(Transaction::V1::GetTransactionStateResponse.new(id: id, state: state))
   end
 
-  def resumed_completed(id) = resumed(id, :TRANSACTION_STATE_COMPLETED)
-
-  def resumed_rolled_back(id, reason)
-    twirp_ok(Transaction::V1::ResumeTransactionResponse.new(
+  def transaction_rolled_back(id, reason)
+    twirp_ok(Transaction::V1::GetTransactionStateResponse.new(
                id: id, state: :TRANSACTION_STATE_ROLLED_BACK, reason: reason
              ))
   end
@@ -81,18 +79,20 @@ module GoStubs
     stub_transfer_service_happy_path
   end
 
+  # STARTED is what Submit requires before an entry may reach the provider —
+  # the one place anything still asks Go directly. Nothing else does: since the
+  # async cutover every other service learns an outcome from the projection.
   def stub_transaction_service_happy_path
     allow(transaction_client).to receive(:start_initializing_transaction) { |req| transaction_initialized(req.id) }
-    allow(transaction_client).to receive(:resume_transaction) { |req| resumed(req.id, :TRANSACTION_STATE_STARTED) }
+    allow(transaction_client).to receive(:get_transaction_state) do |req|
+      transaction_state(req.id, :TRANSACTION_STATE_STARTED)
+    end
   end
 
-  # The same, for a Security's Transactions. Nothing a Security originates
-  # stages, so the whole DAG normally runs to completion inside the call that
-  # started it — hence COMPLETED rather than ACH's STARTED.
+  # The same, for a Security's Transactions.
   def stub_go_securities_happy_path
     stub_go_happy_path
     allow(holder_client).to receive(:provision) { holder_provisioned }
-    allow(transaction_client).to receive(:resume_transaction) { |req| resumed_completed(req.id) }
   end
 
   def stub_transfer_service_happy_path

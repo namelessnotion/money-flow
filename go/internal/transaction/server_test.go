@@ -48,14 +48,37 @@ func TestStartInitializingTransaction_Accepts(t *testing.T) {
 		t.Fatalf("result = %v, want TransactionInitialized", resp.GetResult())
 	}
 
+	// Accepting records one event and stops. TransactionStarted is the saga's
+	// to write, from the trigger this acceptance publishes, so a Transaction
+	// that has only been accepted really is Initialized and nothing more —
+	// asserting the stream is exactly that one event is what would catch
+	// dispatch creeping back into the handler.
 	events, err := store.Load(ctx, AggregateType, txnID)
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if topLevelState(events) != stateStarted {
-		t.Fatalf("state = %v, want started (runSaga should have moved Initialized -> Started -> gated child)", topLevelState(events))
+	if len(events) != 1 {
+		t.Fatalf("stream holds %d events, want exactly the one TransactionInitialized; types = %v",
+			len(events), eventTypesOf(events))
+	}
+	if topLevelState(events) != stateInitialized {
+		t.Fatalf("state = %v, want initialized", topLevelState(events))
 	}
 	children, err := foldChildStates(events)
+	if err != nil {
+		t.Fatalf("foldChildStates() error = %v", err)
+	}
+	if len(children) != 0 {
+		t.Errorf("children = %v, want none touched yet", children)
+	}
+
+	// Driving it is what gates the child.
+	driveSaga(t, server, nil, store, txnID)
+	events, err = store.Load(ctx, AggregateType, txnID)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	children, err = foldChildStates(events)
 	if err != nil {
 		t.Fatalf("foldChildStates() error = %v", err)
 	}
@@ -114,6 +137,52 @@ func TestStartInitializingTransaction_RejectsEmptyTransfers(t *testing.T) {
 	}
 }
 
+// A leg that moves nothing used to be accepted here and only refused later,
+// at dispatch, as a twirp error nobody sees — leaving the Transaction in
+// Started with nothing on its stream to explain why it stopped
+// (ruby/docs/adr/0006). It is now one TransactionRejected and no dispatch at
+// all. Asserting the stream is exactly that one event is the half that would
+// catch the check drifting to after dispatch.
+func TestStartInitializingTransaction_RejectsAZeroAmountLegBeforeDispatchingAnything(t *testing.T) {
+	t.Parallel()
+	store := eventstore.NewMemoryStore()
+	// A nil transferClient is the assertion: reaching dispatch would panic.
+	server := NewServer(store, nil)
+	ctx := context.Background()
+
+	txnID := testutil.ID("txn1")
+	childID := testutil.ID("xfer1")
+	resp, err := server.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
+		Id: txnID,
+		Transfers: map[string]*pb.Transfer{childID: {
+			Id: childID, Amount: usd(0),
+			FromWalletId: testutil.ID("w1"), ToWalletId: testutil.ID("w2"),
+			AutoProcess: true,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("StartInitializingTransaction() error = %v", err)
+	}
+	rejected := resp.GetTransactionRejected()
+	if rejected == nil {
+		t.Fatalf("result = %v, want TransactionRejected", resp.GetResult())
+	}
+	if !strings.Contains(rejected.GetReason(), "amount") {
+		t.Errorf("reason = %q, want it to name the amount as the problem", rejected.GetReason())
+	}
+
+	events, err := store.Load(ctx, AggregateType, txnID)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("stream has %d events, want exactly the one TransactionRejected", len(events))
+	}
+	if topLevelState(events) != stateRejected {
+		t.Errorf("state = %v, want rejected", topLevelState(events))
+	}
+}
+
 func TestStartInitializingTransaction_IsIdempotent(t *testing.T) {
 	t.Parallel()
 	store := eventstore.NewMemoryStore()
@@ -138,10 +207,10 @@ func TestStartInitializingTransaction_IsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	// TransactionInitialized, TransactionStarted, TransferGatedWithinTransaction — no
-	// duplicates from the second call.
-	if len(events) != 3 {
-		t.Errorf("stream holds %d events, want 3 (no duplicate work on replay); types = %v", len(events), eventTypesOf(events))
+	// Just the one TransactionInitialized: accepting writes nothing else, and
+	// the replay adds nothing either.
+	if len(events) != 1 {
+		t.Errorf("stream holds %d events, want 1 (no duplicate work on replay); types = %v", len(events), eventTypesOf(events))
 	}
 }
 
@@ -330,9 +399,12 @@ func TestStartInitializingTransaction_AcceptsFundedReadyChild(t *testing.T) {
 		t.Fatalf("result = %v, want TransactionInitialized", resp.GetResult())
 	}
 
-	// The pre-check passing is additive, not a replacement: the real
-	// dispatch inside runSaga must still have actually run — shadow
-	// (unstaged) commits immediately, unblocking the staged real leg.
+	// The pre-check passing is additive, not a replacement: the real dispatch
+	// must still actually run, and now it runs under the trigger loop rather
+	// than inside this call — shadow (unstaged) commits, unblocking the staged
+	// real leg, which then waits for an external confirmation.
+	driveSaga(t, txnServer, xferServer, store, txnID)
+
 	events, err := store.Load(ctx, AggregateType, txnID)
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)

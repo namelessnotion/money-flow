@@ -1,7 +1,9 @@
 # Business backend
 
 Ruby holds the business side of money flow: who the entities are, what they asked for, and a read model of
-what the ledger did about it. Two capabilities live here — moving money across the bank boundary over **ACH**,
+what the ledger did about it. It asks Go to *accept* work and learns what became of it from the published
+events; no call it makes runs a ledger operation to completion
+([go ADR 0006](../go/docs/adr/0006-synchronous-dispatch-removed-from-the-rpc-surface.md)). Two capabilities live here — moving money across the bank boundary over **ACH**,
 and offering **Securities** in a Borrower's debt obligation for Investors to buy fractions of. It originates work in `go/` through its Twirp services and learns the outcome
 from `transfer-events` / `transaction-events` / `token-events` ([ADR 0001](docs/adr/0001-read-model-consumer-and-follow-on-write-back.md)).
 Go is the source of truth for every Transfer and Transaction; Ruby's view of them may lag and is never
@@ -28,19 +30,26 @@ A withdrawal's shadow leg, which moves its amount out of cleared cash into bank 
 is even staged. Without enough cleared cash the whole Transaction is refused outright before anything reaches
 the provider — Go catches the common case in its own accept/reject decision, before writing anything, so
 nothing is ever started to roll back ([ADR 0004](docs/adr/0004-ach-withdrawal-funds-before-it-leaves.md);
-[go ADR 0004](../go/docs/adr/0004-transaction-accept-time-funding-preflight.md)).
+[go ADR 0004](../go/docs/adr/0004-transaction-accept-time-funding-preflight.md)). Because the real leg waits
+on it, the real leg reaching *staged* is itself proof that Funding happened — which is what lets Submission
+be safe without watching the Transaction run.
 
 **Submission**
 Handing the entry to the ACH provider. Once the provider holds it, the staged real leg is confirmed, and it
 waits as *pending*.
 
+Done by a scheduled sweep, not by the call that originated the Transaction, and only once the real leg is
+*staged* — which for a withdrawal is unreachable until its Funding has committed. Go is asked one more time,
+immediately before the entry is handed over, because the read model may lag ([ADR 0008](docs/adr/0008-ach-submission-is-a-sweep.md)).
+The row's provider reference is the record that it was sent, and there is no other.
+
 **Settlement**
-The provider reports that the entry posted. The pending real leg is posted, and resuming the Transaction runs
-the shadow leg.
+The provider reports that the entry posted. The pending real leg is posted, and the shadow leg follows once
+Go has heard about it — which it does on its own, from the event posting the leg published.
 
 **Return**
 The provider reports that the entry will never post (an R-code), or refuses it at submission. The real leg is
-cancelled, and resuming the Transaction rolls it back.
+cancelled, and the Transaction rolls back once Go has heard about it.
 
 **Clearing**
 Moving a settled deposit's money from uncleared cash to cleared cash once the ACH return window has passed:

@@ -84,17 +84,20 @@ module Services
         refused!(response.data&.transaction_rejected)
       end
 
-      # Runs the Transaction's saga forward from what its Transfers now say, and
-      # answers where it then stands.
+      # Where the Transaction stands, straight from Go rather than from the
+      # projection.
       #
-      # This matters more here than it does for ACH. A Security's shapes gate
-      # their second leg behind their first, and Go's accept-time pre-flight
-      # only looks at children ready at time zero — so a gated leg's real
-      # outcome is only ever learned by asking.
+      # No securities service calls this. They record their intent, ask Go to
+      # accept the Transaction, and read the outcome off the projection like
+      # every other lifecycle fact (go/docs/adr/0006) — nothing here has to be
+      # sure of anything before acting, the way an ACH entry about to reach a
+      # provider does. It stays because an operator tool or a future service
+      # that does need authority should have somewhere to get it, and because
+      # the alternative is each caller inventing its own.
       sig { params(transaction_id: String).returns(Outcome) }
-      def resume(transaction_id)
-        request = Transaction::V1::ResumeTransactionRequest.new(id: transaction_id)
-        data = retrying { T.unsafe(@transaction_client).resume_transaction(request) }.data
+      def state(transaction_id)
+        request = Transaction::V1::GetTransactionStateRequest.new(id: transaction_id)
+        data = retrying { T.unsafe(@transaction_client).get_transaction_state(request) }.data
         Outcome.new(state: data.state, reason: data.reason)
       end
 

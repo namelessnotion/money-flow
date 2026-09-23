@@ -103,29 +103,40 @@ make restart   # docker compose restart
 make migrate   # run both migrators out-of-band, without restarting go/ruby
 ```
 
-### The event pipeline (CDC)
+### The event pipeline (CDC) — **required, not optional**
 
-`make up` does not publish anything to Kafka. The event pipeline is opt-in,
-under the `cdc` compose profile:
+Nothing advances a saga except `orchestrator`, and it has nothing to consume
+until the Debezium connector is registered
+([go ADR 0006](go/docs/adr/0006-synchronous-dispatch-removed-from-the-rpc-surface.md)).
+`make up` alone gets you an API that accepts work and never runs any of it:
+every Transaction sits in `initialized`, no money moves, and nothing errors.
+
+`docker compose up -d` does start the containers — the `cdc` compose profile
+these docs used to describe was removed in 0a3818a — but registering the
+connector is a separate step and always was:
 
 ```bash
 make cdc-up            # register the Debezium connector: money_flow_dev -> Kafka
-make orchestrator-up   # Go saga orchestrator (optional for the flow below)
+make orchestrator-up   # Go saga orchestrator — nothing runs without it
 make consumer-up       # Ruby read-model consumer
-make jobs-up           # Redis + Resque worker + resque-scheduler (ACH clearing)
+make jobs-up           # Redis + Resque worker + resque-scheduler (ACH submission, clearing, disbursement)
 ```
 
 | Piece             | What it does                                                                 | Logs                     |
 | ----------------- | ---------------------------------------------------------------------------- | ------------------------ |
 | connector         | Publishes `money_flow_dev`'s `events` table to `<aggregate>-events` topics   | —                        |
-| `orchestrator`    | Resumes Transfer and Transaction sagas from `transfer-events` / `transaction-events` | `make orchestrator-logs` |
+| `orchestrator`    | **Runs** every Transfer and Transaction saga, from `transfer-events` / `transaction-events` | `make orchestrator-logs` |
 | `ruby-consumer`   | Projects the same topics into `transaction_projections` / `transfer_projections` | `make consumer-logs`     |
-| `resque-scheduler` / `resque-worker` | Hourly on weekdays, clears ACH deposits 3 Fed business days after they complete (uncleared → cleared cash) | `make jobs-logs` |
+| `resque-scheduler` / `resque-worker` | Submits ready ACH entries every minute; clears deposits 3 Fed business days after they complete; disburses Repayments every 5 minutes | `make jobs-logs` |
 
 Publication starts at the current end of the log; events written before
-`make cdc-up` are never published. Both consumers **halt** (exit non-zero,
-nothing committed) on a message they cannot process, by design — check their
-logs if state stops moving.
+`make cdc-up` are never published. That matters more than it reads: an
+aggregate whose events were never published has no wake-up coming and no RPC
+can give it one. `make resume-open` drives everything still in flight, by hand
+— run it after starting CDC late, and after any orchestrator repair.
+
+Both consumers **halt** (exit non-zero, nothing committed) on a message they
+cannot process, by design — check their logs if state stops moving.
 
 Tear down in this order, **before** `make down`. The connector's replication
 slot lives in the Postgres volume and pins WAL until it is dropped:
@@ -138,7 +149,8 @@ make cdc-down
 ## Running an ACH Transaction end to end
 
 With the stack and the event pipeline up (`make up`, then
-`make cdc-up consumer-up`), drive a deposit through GraphQL at
+`make cdc-up orchestrator-up consumer-up jobs-up` — **all four**, see above),
+drive a deposit through GraphQL at
 `http://localhost:9292/graphql`. The snippets need `curl` and
 [`jq`](https://jqlang.org/). `gql` sends a query, and passes each
 `--arg name value` as a GraphQL variable:
@@ -160,9 +172,12 @@ ENTITY=$(gql 'mutation { onboardEntity(name: "Acme") { entity { id } } }' \
   | jq -r '.data.onboardEntity.entity.id')
 ```
 
-**2. Initiate a $125.00 deposit.** Go stages the real leg (bank → cash). Ruby
-then submits the entry to the fake ACH provider and confirms the leg, which
-waits as pending for the ACH network.
+**2. Initiate a $125.00 deposit.** Go records the Transaction and returns; it
+is `INITIALIZED` and nothing has happened yet. The orchestrator picks it up and
+stages the real leg (bank → cash). Once it is staged, the submission sweep hands
+the entry to the fake ACH provider and confirms the leg, which then waits as
+pending for the ACH network — within a minute, or immediately with
+`submitAchNow`.
 
 ```bash
 ACH=$(gql 'mutation($entity: ID!) {
@@ -171,7 +186,10 @@ ACH=$(gql 'mutation($entity: ID!) {
 ```
 
 **3. Watch the read model catch up.** State comes from the Ruby consumer. It is
-`null` for a moment, then `STARTED` with the real leg `PENDING`.
+`null` for a moment, then `INITIALIZED`, then `STARTED` with the real leg
+`STAGED` and — once the sweep has run — `PENDING`. A Transaction that stays
+`INITIALIZED` means the orchestrator is not running or the connector is not
+registered.
 
 ```bash
 achs() {
@@ -187,6 +205,10 @@ real leg commits, the shadow leg (bank control → uncleared cash) runs, and the
 Transaction completes: `COMPLETED`, with the real leg `COMMITTED`.
 
 ```bash
+# Don't wait a minute for the sweep:
+gql 'mutation($ach: ID!) { submitAchNow(achTransactionId: $ach) { achTransaction { id } } }' --arg ach "$ACH"
+sleep 3 && achs
+
 gql 'mutation($ach: ID!) { settleAch(achTransactionId: $ach) { achTransaction { id } } }' --arg ach "$ACH"
 sleep 3 && achs
 ```

@@ -115,7 +115,7 @@ func driveOne(
 }
 
 func resumeTransaction(ctx context.Context, transactions transactionpb.TransactionService, id string) (transactionpb.TransactionState, string, error) {
-	resp, err := transactions.ResumeTransaction(ctx, &transactionpb.ResumeTransactionRequest{Id: id})
+	resp, err := transactions.GetTransactionState(ctx, &transactionpb.GetTransactionStateRequest{Id: id})
 	if err != nil {
 		return transactionpb.TransactionState_TRANSACTION_STATE_UNSPECIFIED, "", err
 	}

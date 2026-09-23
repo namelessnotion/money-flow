@@ -77,10 +77,10 @@ func (w *world) mustDeliver(aggregateType, aggregateID string) {
 	}
 }
 
-// transactionState folds the Transaction's own stream, rather than asking the
-// ResumeTransaction RPC. The RPC runs the saga before it answers, so using it
-// here would drive the very progress these tests are asserting has not
-// happened yet.
+// transactionState folds the Transaction's own stream rather than asking the
+// GetTransactionState RPC. The RPC no longer drives anything, so either would
+// now answer the same — but folding keeps these tests independent of the RPC
+// surface entirely, which is what they are about.
 func (w *world) transactionState(transactionID string) transactionpb.TransactionState {
 	w.t.Helper()
 	events, err := w.store.Load(context.Background(), transaction.AggregateType, transactionID)
@@ -300,4 +300,114 @@ func (b *appendBarrier) tripped() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.released
+}
+
+// drain delivers triggers until delivering more changes nothing: the
+// transaction's own, then one per child Transfer it has heard of, round after
+// round. It stands for "every message was eventually delivered", which is what
+// a test asserting convergence rather than a particular sequence actually
+// needs.
+//
+// It exists because the cutover made every Transfer cost a hop of its own. A
+// child used to reach its wait state inside the RequestTransfer call the
+// Transaction made; now accepting it is all that call does, and staging or
+// committing it takes the trigger its acceptance published. Tests that spell
+// their sequence out (see TestOrchestrator_DrivesATransactionToCompletedFromTriggersAlone)
+// still do so on purpose.
+func (w *world) drain(transactionID string) {
+	w.t.Helper()
+
+	const maxRounds = 100
+	for round := 1; ; round++ {
+		if round > maxRounds {
+			w.t.Fatalf("drain(%s): still changing after %d rounds", transactionID, maxRounds)
+		}
+		before := w.eventCount(transactionID)
+
+		w.mustDeliver(transaction.AggregateType, transactionID)
+		for _, childID := range w.childTransfers(transactionID) {
+			w.mustDeliver(transfer.AggregateType, childID)
+		}
+
+		if w.eventCount(transactionID) == before {
+			return
+		}
+	}
+}
+
+// childTransfers lists every Transfer the Transaction has written about and
+// that has a stream of its own — including Reversals, which are Transfers too
+// and arrive on the same topic. A gated child is named but never requested, so
+// it has no stream and no trigger would ever be published for it.
+func (w *world) childTransfers(transactionID string) []string {
+	w.t.Helper()
+	ctx := context.Background()
+	events, err := w.store.Load(ctx, transaction.AggregateType, transactionID)
+	if err != nil {
+		w.t.Fatalf("Load() error = %v", err)
+	}
+
+	seen := map[string]bool{}
+	var ids []string
+	for _, e := range events {
+		msg, decodeErr := e.Decode()
+		if decodeErr != nil {
+			w.t.Fatalf("Decode(%s) error = %v", e.EventType, decodeErr)
+		}
+		for _, id := range transferIDsNamedBy(msg) {
+			if id == "" || seen[id] {
+				continue
+			}
+			child, loadErr := w.store.Load(ctx, transfer.AggregateType, id)
+			if loadErr != nil {
+				w.t.Fatalf("Load(transfer %s) error = %v", id, loadErr)
+			}
+			if len(child) > 0 {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids
+}
+
+func transferIDsNamedBy(msg proto.Message) []string {
+	switch m := msg.(type) {
+	case *transactionpb.TransferRequestedWithinTransaction:
+		return []string{m.GetTransferId()}
+	case *transactionpb.TransferGatedWithinTransaction:
+		return []string{m.GetTransferId()}
+	case *transactionpb.TransferCompletedWithinTransaction:
+		return []string{m.GetTransferId()}
+	case *transactionpb.TransferFailedWithinTransaction:
+		return []string{m.GetTransferId()}
+	case *transactionpb.TransferReversalRequestedWithinTransaction:
+		return []string{m.GetTransferId(), m.GetReversalId()}
+	case *transactionpb.TransferRolledBackWithinTransaction:
+		return []string{m.GetTransferId(), m.GetDetailId()}
+	case *transactionpb.TransferRollbackFailedWithinTransaction:
+		return []string{m.GetTransferId()}
+	default:
+		return nil
+	}
+}
+
+// eventCount totals the Transaction's stream and every child's, so a round
+// that only moved a child still counts as change.
+func (w *world) eventCount(transactionID string) int {
+	w.t.Helper()
+	ctx := context.Background()
+	events, err := w.store.Load(ctx, transaction.AggregateType, transactionID)
+	if err != nil {
+		w.t.Fatalf("Load() error = %v", err)
+	}
+	total := len(events)
+	for _, childID := range w.childTransfers(transactionID) {
+		child, loadErr := w.store.Load(ctx, transfer.AggregateType, childID)
+		if loadErr != nil {
+			w.t.Fatalf("Load(transfer %s) error = %v", childID, loadErr)
+		}
+		total += len(child)
+	}
+	return total
 }

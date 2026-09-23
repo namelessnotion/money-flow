@@ -35,6 +35,27 @@ This is also Ruby's second follow-on chain, so ADR 0001 requires deciding what t
    Per-holder Transactions invert all three: each is two legs, one holder's failure is one holder's failure,
    and nothing contends because the sweep sends them one at a time.
 
+   > **Amended 2026-09-22. The first reason is dissolved; the other two survive and the decision stands.**
+   >
+   > [`go/docs/adr/0006`](../../../go/docs/adr/0006-synchronous-dispatch-removed-from-the-rpc-surface.md)
+   > removed synchronous dispatch from the RPC surface. `dispatchReady` no longer runs a Transfer saga at
+   > all — it accepts each child and the orchestrator runs it — so "two hundred Transfer sagas in one HTTP
+   > call… a *retried* timeout re-entering a call Go is still executing" is simply no longer true. That was
+   > the loudest of the three and it is gone.
+   >
+   > The second is **worse** than when this was written: the gap between
+   > `wouldAcceptReadyChildren` and the real dispatch was microseconds and is now a CDC round trip, so an
+   > over-accept against one unconsumed snapshot is more reachable, not less.
+   >
+   > The third is untouched. The Transaction is still the unit of rollback, and
+   > `TransactionRollbackFailed` is still a terminal that requires a person.
+   >
+   > Go now enforces a width limit of its own
+   > ([`go/docs/adr/0007`](../../../go/docs/adr/0007-bounded-transaction-width-and-sliced-dispatch.md)),
+   > so a two-hundred-holder fan-out is refused at accept time rather than merely avoided by this
+   > decision's discipline. The reasoning there is the same two reasons, which is why this decision
+   > survives its own first argument being withdrawn.
+
 2. **Its ids are derived** — `detid("<repayment id>:disbursement:<investor id>")`, and `…:payout` /
    `…:retirement` for the legs. Go's idempotency on `StartInitializingTransaction` is the only duplicate
    guard, as ADR 0001 prescribes. The `disbursements` row is a record of what was sent, not an "already
@@ -91,6 +112,11 @@ has seen a Transaction for its derived id, and never again after that.
 
 - A holder is paid within five minutes of their Repayment being seen, not instantly. Nothing here promises
   otherwise, and `disburseRepaymentNow` exists for demonstrations the way `clearAch` does.
+
+  > **Amended 2026-09-22.** "Seen" now costs more than it did. `due` requires the Repayment's Transaction to
+  > read `completed` in the projection, and since the async cutover reaching `completed` takes several CDC
+  > round trips rather than happening inside the call that started it. The five minutes is still the sweep's
+  > own; what precedes it is longer.
 - A Disbursement that rolls back needs a person. It is visible in GraphQL as a state on the row, and the
   sweep will not touch it again.
 - An allocation that will not add up fails its own Repayment and no others; the sweep logs it and carries on.

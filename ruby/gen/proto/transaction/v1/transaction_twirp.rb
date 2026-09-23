@@ -9,7 +9,7 @@ module Transaction
       service 'TransactionService'
       rpc :StartInitializingTransaction, StartInitializingTransactionRequest, StartInitializingTransactionResponse, :ruby_method => :start_initializing_transaction
       rpc :StartProcessingTransfer, StartProcessingTransferRequest, StartProcessingTransferResponse, :ruby_method => :start_processing_transfer
-      rpc :ResumeTransaction, ResumeTransactionRequest, ResumeTransactionResponse, :ruby_method => :resume_transaction
+      rpc :GetTransactionState, GetTransactionStateRequest, GetTransactionStateResponse, :ruby_method => :get_transaction_state
       rpc :StartTransactionRollback, StartTransactionRollbackRequest, StartTransactionRollbackResponse, :ruby_method => :start_transaction_rollback
     end
 

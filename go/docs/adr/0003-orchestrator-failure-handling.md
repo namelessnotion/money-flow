@@ -52,6 +52,12 @@ keeps answering while saga progress is stopped, which turns "the orchestrator ha
 degradation. The two also have genuinely different scaling and restart profiles, and staging the eventual
 cutover needs the consumer deployed and observed before the synchronous dispatch is removed.
 
+> **That precondition was discharged on 2026-09-22 by [ADR 0006](0006-synchronous-dispatch-removed-from-the-rpc-surface.md),**
+> which removed the synchronous dispatch. Note what this does to the sentence above: "degradation" was true while
+> the RPC server could still drive a saga on its own. It no longer can. A halted orchestrator now means the API
+> keeps *accepting* work and none of it progresses, which is a smaller outage than the API being down and a
+> larger one than this paragraph describes.
+
 ## Consequences
 
 **Halting is coarser than one partition.** The consumer stops reading every partition it owns, not only the one
@@ -76,3 +82,9 @@ holds, so anything that weakens `appendSagaStep`'s guard weakens this decision t
 **Not decided here:** what an operator should *do* with a halted consumer beyond looking at it — whether there
 is ever a supported way to skip a message by hand, and what that would have to record. Nothing in the code
 offers one today, deliberately.
+
+> **Partly answered 2026-09-22 by [ADR 0006](0006-synchronous-dispatch-removed-from-the-rpc-surface.md).**
+> `go/cmd/resume` drives one aggregate, or every aggregate still in flight, through this same orchestrator, out
+> of band. It is not a way to skip a message: it touches no offsets and the halted message stays uncommitted.
+> What it does is let an operator move the aggregates a halt (or a publication gap) stranded, without waiting
+> for a trigger that may never come. Skipping a message by hand remains undecided and unoffered.

@@ -12,6 +12,25 @@ clear_ach_deposits:
   queue: ach
   description: Originate clearing Transactions for ACH deposits 3 business days after completion
 
+# Hands every ready ACH entry to the provider: those whose real leg the read
+# model has seen staged and that carry no provider reference yet
+# (Services::Ach::SubmitDue). Since the async cutover this is the only thing
+# that submits — Initiate accepts the Transaction and stops, because at that
+# moment a withdrawal's funding leg has not run and there is nothing to be sure
+# of (go/docs/adr/0006, ruby/docs/adr/0008).
+#
+# Every minute, which is cron's floor, and every day. This is the whole of the
+# delay a customer sees between asking for a withdrawal and the entry reaching
+# the provider, so it wants to be as short as the scheduler allows — unlike
+# clearing, which waits on a calendar anyway. Weekends included: an entry
+# should be queued for the next banking day, not sit out the weekend. It is
+# idempotent, so a missed or failed run is picked up by the next.
+submit_ach_entries:
+  cron: "* * * * * America/New_York"
+  class: Jobs::SubmitAchEntries
+  queue: ach
+  description: Submit ACH entries whose real leg is staged to the provider
+
 # Pays every completed Repayment out to the holders of its Security, one
 # Transaction per holder (ruby/docs/adr/0007). Every five minutes rather than
 # hourly: unlike ACH clearing, nothing here waits on a calendar, so the only

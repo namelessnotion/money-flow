@@ -65,6 +65,7 @@ func TestACHDeposit_RealAndShadowHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartInitializingTransaction() error = %v", err)
 	}
+	driveSaga(t, txnServer, xferServer, store, txnID)
 	if resp.GetTransactionInitialized() == nil {
 		t.Fatalf("result = %v, want TransactionInitialized", resp.GetResult())
 	}
@@ -97,12 +98,15 @@ func TestACHDeposit_RealAndShadowHappyPath(t *testing.T) {
 		t.Fatalf("PostPendingTransfer() error = %v", err)
 	}
 
-	// Ruby calls ResumeTransaction once it's told real posted; shadow must
-	// fire automatically (auto_process=true, no gating) and commit
-	// synchronously since it's unstaged, completing the whole Transaction.
-	resumeResp, err := txnServer.ResumeTransaction(ctx, &pb.ResumeTransactionRequest{Id: txnID})
+	// Posting the real leg publishes TransferCommitted, and the orchestrator's
+	// fold of it is what wakes the Transaction: the shadow leg's dependency is
+	// now satisfied, so it dispatches and — being unstaged — commits, completing
+	// the whole Transaction. GetTransactionState afterwards only reads the result.
+	driveSaga(t, txnServer, xferServer, store, txnID)
+
+	resumeResp, err := txnServer.GetTransactionState(ctx, &pb.GetTransactionStateRequest{Id: txnID})
 	if err != nil {
-		t.Fatalf("ResumeTransaction() error = %v", err)
+		t.Fatalf("GetTransactionState() error = %v", err)
 	}
 	if resumeResp.GetState() != pb.TransactionState_TRANSACTION_STATE_COMPLETED {
 		t.Fatalf("state = %v, want COMPLETED", resumeResp.GetState())
@@ -138,6 +142,7 @@ func TestTransaction2_SingleNodeClearingHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartInitializingTransaction() error = %v", err)
 	}
+	driveSaga(t, txnServer, xferServer, store, txnID)
 	if resp.GetTransactionInitialized() == nil {
 		t.Fatalf("result = %v, want TransactionInitialized", resp.GetResult())
 	}
@@ -206,6 +211,7 @@ func TestACHWithdrawal_SymmetricFlowNeedsNoNewMechanism(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartInitializingTransaction() error = %v", err)
 	}
+	driveSaga(t, txnServer, xferServer, store, txnID)
 
 	events, err := store.Load(ctx, AggregateType, txnID)
 	if err != nil {
@@ -248,6 +254,7 @@ func TestGenericManualGating_GatedChildWaitsForStartProcessingTransfer(t *testin
 	if err != nil {
 		t.Fatalf("StartInitializingTransaction() error = %v", err)
 	}
+	driveSaga(t, txnServer, xferServer, store, txnID)
 
 	events, err := store.Load(ctx, AggregateType, txnID)
 	if err != nil {
@@ -268,13 +275,13 @@ func TestGenericManualGating_GatedChildWaitsForStartProcessingTransfer(t *testin
 	}
 
 	// Resuming without triggering it changes nothing — still gated.
-	if _, err := txnServer.ResumeTransaction(ctx, &pb.ResumeTransactionRequest{Id: txnID}); err != nil {
-		t.Fatalf("ResumeTransaction() error = %v", err)
+	if _, err := txnServer.GetTransactionState(ctx, &pb.GetTransactionStateRequest{Id: txnID}); err != nil {
+		t.Fatalf("GetTransactionState() error = %v", err)
 	}
 	events, _ = store.Load(ctx, AggregateType, txnID)
 	children, _ = foldChildStates(events)
 	if children[gatedID] != childGated {
-		t.Fatalf("gated child state after ResumeTransaction = %v, want still gated", children[gatedID])
+		t.Fatalf("gated child state after GetTransactionState = %v, want still gated", children[gatedID])
 	}
 
 	processResp, err := txnServer.StartProcessingTransfer(ctx, &pb.StartProcessingTransferRequest{Id: txnID, TransferId: gatedID})
@@ -284,6 +291,11 @@ func TestGenericManualGating_GatedChildWaitsForStartProcessingTransfer(t *testin
 	if processResp.GetTransferRequestedWithinTransaction() == nil {
 		t.Fatalf("result = %v, want TransferRequestedWithinTransaction", processResp.GetResult())
 	}
+
+	// Ungating requests the child and nothing more — the response says
+	// "requested", never "completed". The child's own acceptance is the trigger
+	// that runs it and then completes the Transaction.
+	driveSaga(t, txnServer, xferServer, store, txnID)
 
 	events, err = store.Load(ctx, AggregateType, txnID)
 	if err != nil {
@@ -315,6 +327,7 @@ func TestStartProcessingTransfer_RejectsWhenNotGated(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StartInitializingTransaction() error = %v", err)
 	}
+	driveSaga(t, txnServer, xferServer, store, txnID)
 
 	// rootID already ran to completion (auto_process=true) — not gated.
 	resp, err := txnServer.StartProcessingTransfer(ctx, &pb.StartProcessingTransferRequest{Id: txnID, TransferId: rootID})

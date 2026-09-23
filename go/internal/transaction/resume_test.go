@@ -36,12 +36,25 @@ func TestResume_StartsAnInitializedTransaction(t *testing.T) {
 		t.Fatalf("seed initialized: %v", err)
 	}
 
-	server := NewServer(store, newTransferServer(store, lc))
+	xferServer := newTransferServer(store, lc)
+	server := NewServer(store, xferServer)
+
+	// One resume starts the Transaction and requests its child. Completing takes
+	// the child's own trigger as well, which is what driveSaga stands in for.
 	if err := server.Resume(ctx, txnID); err != nil {
 		t.Fatalf("Resume() error = %v", err)
 	}
-
 	events, err := store.Load(ctx, AggregateType, txnID)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := topLevelState(events); got != stateStarted {
+		t.Fatalf("state after one resume = %v, want started", got)
+	}
+
+	driveSaga(t, server, xferServer, store, txnID)
+
+	events, err = store.Load(ctx, AggregateType, txnID)
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
@@ -61,7 +74,8 @@ func TestResume_IsANoOpOnATerminalTransaction(t *testing.T) {
 	openWallet(t, store, cleared, sharedpb.Allows_ALLOWS_NONE)
 	mintAndFundToken(t, store, lc, uncleared, testutil.ID("uncleared-token"), usd(10000))
 
-	server := NewServer(store, newTransferServer(store, lc))
+	xferServer := newTransferServer(store, lc)
+	server := NewServer(store, xferServer)
 	ctx := context.Background()
 	txnID := testutil.ID("txn1")
 	clearID := testutil.ID("clear")
@@ -73,6 +87,11 @@ func TestResume_IsANoOpOnATerminalTransaction(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StartInitializingTransaction() error = %v", err)
 	}
+	// Accepting no longer runs anything, so drive it to its terminal first:
+	// this test is about what a redelivered trigger does once there is nothing
+	// left to do.
+	driveSaga(t, server, xferServer, store, txnID)
+
 	before, err := store.Load(ctx, AggregateType, txnID)
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)

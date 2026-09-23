@@ -239,7 +239,7 @@ func TestCommit_ConcurrentPostPendingTransferConvergesWithoutDoubleSubmission(t 
 
 	server := NewServer(base, lc, nil, nil)
 	ctx := context.Background()
-	if _, err := server.RequestTransfer(ctx, transferRequest(transferID, w1, w2, usd(400), true)); err != nil {
+	if _, err := requestAndRun(t, server, ctx, transferRequest(transferID, w1, w2, usd(400), true)); err != nil {
 		t.Fatalf("RequestTransfer(stage=true) error = %v", err)
 	}
 	if _, err := server.ConfirmStagedTransfer(ctx, &pb.ConfirmStagedTransferRequest{Id: transferID}); err != nil {

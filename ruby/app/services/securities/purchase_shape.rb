@@ -32,9 +32,10 @@ module Services
     # The cost, stated rather than hidden: a child behind a dependency edge
     # gets no pre-flight at all, so an Investor short of cleared cash gets a
     # Transaction that initializes and then rolls back rather than one refused
-    # outright. Services::Securities::Purchase asks ResumeTransaction how it
-    # actually went, because the response to starting it cannot be the last
-    # word for a gated leg.
+    # outright. Nothing can tell them at the time — Purchase used to ask Go how
+    # it had actually gone, and since the async cutover there is nothing to ask
+    # about yet (go/docs/adr/0006). It surfaces as a rolled-back Subscription in
+    # the projection, through Services::Securities::Stage.
     class PurchaseShape < T::Struct
       FACTORY_NAME = 'security_purchase'
       # Bumped whenever the legs or their order change, so Go's record of each

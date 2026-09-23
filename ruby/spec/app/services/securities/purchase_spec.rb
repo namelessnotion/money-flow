@@ -48,14 +48,16 @@ RSpec.describe Services::Securities::Purchase do
       expect(rows_when_started).to eq(Models::Subscription.count)
     end
 
-    it 'asks Go how the Transaction actually went' do
-      # The money leg is gated and so never pre-flighted; the response to
-      # starting the Transaction cannot be the last word for it.
+    it 'asks Go to accept the Transaction and nothing more' do
+      # Running it belongs to the orchestrator now, and the outcome reaches Ruby
+      # through the projection. Asking Go how it went would get back
+      # "initialized" and tell a caller nothing.
       subscription = buy
 
-      expect(transaction_client).to have_received(:resume_transaction) do |req|
+      expect(transaction_client).to have_received(:start_initializing_transaction) do |req|
         expect(req.id).to eq(subscription.id)
       end
+      expect(transaction_client).not_to have_received(:get_transaction_state)
     end
 
     it 'lets one Investor buy into the same Security more than once' do
@@ -84,9 +86,12 @@ RSpec.describe Services::Securities::Purchase do
       expect { buy }.to raise_error(Services::Securities::Refused, /before any money moved.*insufficient Token/)
     end
 
-    it 'never asks Go to resume: an accept-time rejection is already definitive' do
+    it 'is refused synchronously, because the claim leg is the DAG root' do
+      # Oversubscription is the one refusal a caller still learns here: the
+      # claim leg is ready at time zero, so Go's accept-time pre-flight sees it
+      # and rejects before writing anything.
       expect { buy }.to raise_error(Services::Securities::Refused)
-      expect(transaction_client).not_to have_received(:resume_transaction)
+      expect(transaction_client).not_to have_received(:get_transaction_state)
     end
 
     it 'keeps the intent, whose projection will show it rejected' do
@@ -96,25 +101,29 @@ RSpec.describe Services::Securities::Purchase do
   end
 
   context 'when the Investor has too little cleared cash' do
-    # The executable statement of the trade-off PurchaseShape documents: the
-    # money leg sits behind a dependency edge, so Go's accept-time pre-flight
-    # never sees it. Go accepts the Transaction, dispatches the claim leg,
-    # fails the money leg, and reverses the claim leg — a rolled-back
-    # Transaction rather than a clean refusal. Only ResumeTransaction knows.
-    before do
-      stub_go_securities_happy_path
-      allow(transaction_client).to receive(:resume_transaction) do |req|
-        resumed_rolled_back(req.id, 'wallet "cleared_cash" has insufficient Token capacity: 5000 USD short')
-      end
+    # The executable statement of the trade-off PurchaseShape documents, and of
+    # what the async cutover did to it. The money leg sits behind a dependency
+    # edge, so Go's accept-time pre-flight never sees it: Go accepts the
+    # Transaction, and only later — in the orchestrator — dispatches the claim
+    # leg, fails the money leg and reverses the claim leg.
+    #
+    # Nothing here can learn that. It used to, by resuming; now the Transaction
+    # is merely accepted when this returns. So the Investor gets a Subscription
+    # back and finds out from its projected state, through
+    # Services::Securities::Stage, the same way they find out everything else.
+    before { stub_go_securities_happy_path }
+
+    it 'returns the Subscription rather than raising, because the outcome is not known yet' do
+      subscription = buy
+
+      expect(subscription).to be_a(Models::Subscription)
+      expect(transaction_client).not_to have_received(:get_transaction_state)
     end
 
-    it "raises Go's reason rather than returning a subscription that silently rolled back" do
-      expect { buy }.to raise_error(Services::Securities::Refused, /insufficient Token capacity/)
-    end
+    it 'records the intent, which is what the projection will attach the rollback to' do
+      subscription = buy
 
-    it 'still accepted the Transaction first, which is why resume is the only thing that knows' do
-      expect { buy }.to raise_error(Services::Securities::Refused)
-      expect(transaction_client).to have_received(:start_initializing_transaction)
+      expect(Models::Subscription[subscription.id]).not_to be_nil
     end
   end
 

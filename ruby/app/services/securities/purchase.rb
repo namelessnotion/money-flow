@@ -20,13 +20,19 @@ module Services
     # 2. Asks Go to run the Transaction. The claim leg gates, so an
     #    oversubscription is normally refused here, before any event is written
     #    and before any of the Investor's money moves.
-    # 3. Asks Go how the Transaction actually stands. Nothing here stages, so
-    #    the whole DAG runs to completion inside step 2's call — but the money
-    #    leg sits behind a dependency edge and so gets no accept-time
-    #    pre-flight at all. This is the only thing that ever learns its real
-    #    outcome, and step 2's answer can never be the last word for it.
-    # 4. Returns the Subscription. Lifecycle state is not recorded here: it
+    # 3. Returns the Subscription. Lifecycle state is not recorded here: it
     #    arrives through the projection.
+    #
+    # The money leg's outcome is not available here, and cannot be. It sits
+    # behind a dependency edge, so Go's accept-time pre-flight never looks at
+    # it, and since the async cutover the dispatch that would have found out
+    # happens in the orchestrator rather than inside step 2's call
+    # (go/docs/adr/0006). So an Investor short of cleared cash gets a
+    # Subscription that initializes and then rolls back, and learns it the same
+    # way they learn everything else — from the projection, through
+    # Services::Securities::Stage. What step 2 still catches synchronously is
+    # oversubscription, because the claim leg is the DAG root and is
+    # pre-flighted.
     class Purchase < BaseService
       sig { params(gateway: GoGateway).void }
       def initialize(gateway: GoGateway.new)
@@ -47,7 +53,6 @@ module Services
         subscription = perform { record_intent(security, investor, amount_minor_units, shape) }
 
         start_transaction!(shape, subscription)
-        require_settled!(subscription)
         subscription
       end
 
@@ -115,9 +120,9 @@ module Services
       end
 
       # An oversubscription is caught by Go's own accept/reject decision, before
-      # any event exists. Re-wrapped with the same framing require_settled!
-      # uses, so the message a caller sees does not depend on which check
-      # caught it.
+      # any event exists, and this is now the only refusal a caller sees
+      # directly — so the re-wrap is what makes an oversubscription read as a
+      # refusal rather than as a bare rejection reason.
       sig { params(shape: PurchaseShape, subscription: Models::Subscription).void }
       def start_transaction!(shape, subscription)
         @go.start_transaction(
@@ -126,18 +131,6 @@ module Services
         )
       rescue Refused => e
         raise Refused, "refused before any money moved: #{e.message}"
-      end
-
-      # The money leg is gated and so is never pre-flighted: an Investor short
-      # of cleared cash gets a Transaction that initializes and then rolls back,
-      # with Go reversing the already-committed claim leg. Nothing is left
-      # half-done, but the caller has to be told, and only this can tell them.
-      sig { params(subscription: Models::Subscription).void }
-      def require_settled!(subscription)
-        outcome = @go.resume(subscription.id)
-        return if outcome.completed? || outcome.started?
-
-        raise Refused, "refused: #{outcome.reason.empty? ? outcome.state : outcome.reason}"
       end
     end
   end

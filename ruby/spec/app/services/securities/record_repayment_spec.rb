@@ -81,9 +81,12 @@ RSpec.describe Services::Securities::RecordRepayment do
         .to raise_error(Services::Securities::InvalidAmount, /nothing has no leg/)
     end
 
-    it "raises Go's reason when the collection rolled back" do
-      allow(transaction_client).to receive(:resume_transaction) do |req|
-        resumed_rolled_back(req.id, 'wallet "cleared_cash" has insufficient Token capacity: 4000 USD short')
+    it "raises Go's reason when the Borrower is short, which the pre-flight catches" do
+      # The collection leg is the DAG root, so it is pre-flighted and refused
+      # before anything is written. That is the whole of what this service can
+      # learn: the rest arrives through the projection.
+      allow(transaction_client).to receive(:start_initializing_transaction) do |req|
+        transaction_rejected(req.id, 'wallet "cleared_cash" has insufficient Token capacity: 4000 USD short')
       end
 
       expect { repay }.to raise_error(Services::Securities::Refused, /insufficient Token capacity/)

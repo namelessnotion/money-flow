@@ -7,14 +7,16 @@
 // answering reads while something is wrong with consumption, and the
 // orchestrator should stop dead on a message it cannot process
 // (go/docs/adr/0003) without taking the API down with it. Separating them also
-// means saga throughput and API traffic scale independently, and that the
-// eventual cutover can be staged — the consumer already running everywhere
-// before the synchronous dispatch is removed.
+// means saga throughput and API traffic scale independently, and it is what
+// let the cutover be staged — this consumer ran everywhere first, and only then
+// was the synchronous dispatch removed.
 //
-// It runs alongside the synchronous saga, not instead of it. Every RPC handler
-// still drives its own saga in process; this adds a second driver of the same
-// sagas, which is safe precisely because resuming an aggregate that has already
-// reached its next wait state does nothing.
+// Since that removal (go/docs/adr/0006) this is the only thing that advances a
+// saga. cmd/server records decisions and answers; nothing in its RPC surface
+// dispatches anything. So this process is not an optional accelerator: with it
+// stopped, or with publication stalled, accepted work sits where it was
+// accepted. cmd/resume is the out-of-band way to move one aggregate by hand
+// when no trigger will ever arrive for it.
 //
 //	DATABASE_URL=postgres://... DATABASE_MAX_CONNS=5 KAFKA_BROKERS=kafka:9092 \
 //	TIGERBEETLE_ADDRESS=127.0.0.1:3000 TIGERBEETLE_CLUSTER_ID=0 \

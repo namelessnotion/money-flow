@@ -21,15 +21,21 @@ module Services
     # Being a sweep, it catches up on its own after any outage: nothing is
     # scheduled per Repayment that could be lost.
     #
-    # **Why not one fan-out Transaction across every holder.** Go dispatches a
-    # Transaction's ready children serially, in-process, inside the synchronous
-    # RPC that starts it, so a wide fan-out is that many Transfer sagas in one
-    # HTTP call. Every payout leg would also draw on the same repayment wallet,
-    # which is exactly the case where Go's accept-time pre-flight evaluates
-    # siblings against one unconsumed snapshot and can over-accept. And the
-    # Transaction is the unit of rollback: one holder's leg failing would
-    # reverse every holder already paid. Per-holder Transactions invert all
-    # three (ruby/docs/adr/0007).
+    # **Why not one fan-out Transaction across every holder.** Every payout leg
+    # would draw on the same repayment wallet, which is exactly the case where
+    # Go's accept-time pre-flight evaluates siblings against one unconsumed
+    # snapshot and can over-accept — and that window is wider now that the real
+    # dispatch happens a CDC round trip later. And the Transaction is the unit
+    # of rollback: one holder's leg failing would reverse every holder already
+    # paid. Per-holder Transactions invert both (ruby/docs/adr/0007).
+    #
+    # There used to be a third reason, that Go dispatched a Transaction's
+    # children serially and in-process inside the RPC that started it, so a
+    # wide fan-out was that many Transfer sagas in one HTTP call. That is no
+    # longer true (go/docs/adr/0006) and the ADR records it as withdrawn. Go
+    # also now refuses an over-wide Transaction outright, so this is a decision
+    # about shape rather than the only thing standing between here and a
+    # two-hundred-leg DAG.
     class DisburseDue
       # What a sweep did.
       class Result < T::Struct

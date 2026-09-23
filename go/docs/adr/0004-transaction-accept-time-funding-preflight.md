@@ -74,3 +74,17 @@ RPC handler) entirely — the "full async cutover" root ADR 0001 anticipated. A 
 (informal, not itself an ADR) found Postgres's own WAL fsync path, not synchronous dispatch, to be the
 sustained-throughput ceiling on this system's current infrastructure, which weakens the case for that further
 change. This decision stands on its own regardless of whether that larger cutover ever happens.
+
+> **Resolved 2026-09-22 by [ADR 0006](0006-synchronous-dispatch-removed-from-the-rpc-surface.md).** The cutover
+> was made, and that ADR takes the throughput finding above at face value rather than setting it aside: the case
+> it argues is bounded units of work and honest response semantics, not speed.
+>
+> **Decision 4's last sentence is superseded.** It says `Initiate#require_running!`'s `ResumeTransaction` call
+> "therefore stays exactly as it was". It does not: under the cutover that call would only ever see
+> `INITIALIZED`, because the real dispatch has not happened when the RPC returns. The check it performs is
+> unchanged in substance and now lives in `Services::Ach::SubmitDue`, alongside a second condition that makes it
+> stronger — see [`ruby/docs/adr/0008`](../../../ruby/docs/adr/0008-ach-submission-is-a-sweep.md).
+>
+> **Everything else here still holds**, including the known limitation below — which ADR 0006 makes more
+> reachable, not less, since the gap between this pre-check and the real dispatch is now a CDC round trip rather
+> than microseconds. [ADR 0007](0007-bounded-transaction-width-and-sliced-dispatch.md) bounds the damage.

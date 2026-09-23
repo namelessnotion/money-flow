@@ -13,6 +13,39 @@ import (
 	"github.com/namelessnotion/money_flow/go/internal/token"
 )
 
+// requestAndRun does what RequestTransfer alone used to do: record the
+// acceptance, then run the saga. Since the async cutover the RPC only records,
+// and cmd/orchestrator runs the saga from the event that acceptance publishes —
+// so a test that wants a Transfer to actually move has to drive it, and these
+// call sites say so rather than the RPC quietly doing both.
+//
+// It resumes only an accepted Transfer: a rejection opens and closes the stream
+// in one event and has no saga to run.
+func requestAndRun(t *testing.T, s *Server, ctx context.Context, req *pb.RequestTransferRequest) (*pb.RequestTransferResponse, error) {
+	t.Helper()
+	resp, err := s.RequestTransfer(ctx, req)
+	if err != nil || resp.GetTransferRequestAccepted() == nil {
+		return resp, err
+	}
+	if err := s.Resume(ctx, req.GetId()); err != nil {
+		t.Fatalf("requestAndRun(%s): resume: %v", req.GetId(), err)
+	}
+	return resp, nil
+}
+
+// reverseAndRun is requestAndRun for a Reversal, which is a Transfer too.
+func reverseAndRun(t *testing.T, s *Server, ctx context.Context, req *pb.RequestReversalRequest) (*pb.RequestReversalResponse, error) {
+	t.Helper()
+	resp, err := s.RequestReversal(ctx, req)
+	if err != nil || resp.GetReversalRequestAccepted() == nil {
+		return resp, err
+	}
+	if err := s.Resume(ctx, req.GetId()); err != nil {
+		t.Fatalf("reverseAndRun(%s): resume: %v", req.GetId(), err)
+	}
+	return resp, nil
+}
+
 func transferRequest(id, fromWallet, toWallet string, amount *sharedpb.Money, stage bool) *pb.RequestTransferRequest {
 	return &pb.RequestTransferRequest{Id: id, FromWalletId: fromWallet, ToWalletId: toWallet, Amount: amount, Stage: stage}
 }
@@ -59,7 +92,7 @@ func TestRequestTransfer_OneToOne(t *testing.T) {
 
 	server := NewServer(store, lc, nil, nil)
 	ctx := context.Background()
-	resp, err := server.RequestTransfer(ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), false))
+	resp, err := requestAndRun(t, server, ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), false))
 	if err != nil {
 		t.Fatalf("RequestTransfer() error = %v", err)
 	}
@@ -107,7 +140,7 @@ func TestRequestTransfer_ManyToOneFIFO(t *testing.T) {
 
 	server := NewServer(store, lc, nil, nil)
 	ctx := context.Background()
-	resp, err := server.RequestTransfer(ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), false))
+	resp, err := requestAndRun(t, server, ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), false))
 	if err != nil {
 		t.Fatalf("RequestTransfer() error = %v", err)
 	}
@@ -155,7 +188,7 @@ func TestRequestTransfer_InsufficientBalanceRejects(t *testing.T) {
 
 	server := NewServer(store, lc, nil, nil)
 	ctx := context.Background()
-	resp, err := server.RequestTransfer(ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), false))
+	resp, err := requestAndRun(t, server, ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), false))
 	if err != nil {
 		t.Fatalf("RequestTransfer() error = %v", err)
 	}
@@ -190,10 +223,10 @@ func TestRequestTransfer_IsIdempotent(t *testing.T) {
 	server := NewServer(store, lc, nil, nil)
 	ctx := context.Background()
 	req := transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), false)
-	if _, err := server.RequestTransfer(ctx, req); err != nil {
+	if _, err := requestAndRun(t, server, ctx, req); err != nil {
 		t.Fatalf("first RequestTransfer() error = %v", err)
 	}
-	if _, err := server.RequestTransfer(ctx, req); err != nil {
+	if _, err := requestAndRun(t, server, ctx, req); err != nil {
 		t.Fatalf("second RequestTransfer() error = %v", err)
 	}
 
@@ -213,7 +246,7 @@ func TestStagedTransfer_HappyPath(t *testing.T) {
 
 	server := NewServer(store, lc, nil, nil)
 	ctx := context.Background()
-	resp, err := server.RequestTransfer(ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), true))
+	resp, err := requestAndRun(t, server, ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), true))
 	if err != nil {
 		t.Fatalf("RequestTransfer(stage=true) error = %v", err)
 	}
@@ -285,7 +318,7 @@ func TestCancelStagedTransfer_FromStaged(t *testing.T) {
 
 	server := NewServer(store, lc, nil, nil)
 	ctx := context.Background()
-	if _, err := server.RequestTransfer(ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), true)); err != nil {
+	if _, err := requestAndRun(t, server, ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), true)); err != nil {
 		t.Fatalf("RequestTransfer(stage=true) error = %v", err)
 	}
 
@@ -326,7 +359,7 @@ func TestCancelStagedTransfer_FromPending(t *testing.T) {
 
 	server := NewServer(store, lc, nil, nil)
 	ctx := context.Background()
-	if _, err := server.RequestTransfer(ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), true)); err != nil {
+	if _, err := requestAndRun(t, server, ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), true)); err != nil {
 		t.Fatalf("RequestTransfer(stage=true) error = %v", err)
 	}
 	if _, err := server.ConfirmStagedTransfer(ctx, &pb.ConfirmStagedTransferRequest{Id: testutil.ID("xfer1")}); err != nil {
@@ -356,7 +389,7 @@ func TestRequestReversal_OfCommittedTransfer(t *testing.T) {
 
 	server := NewServer(store, lc, nil, nil)
 	ctx := context.Background()
-	if _, err := server.RequestTransfer(ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), false)); err != nil {
+	if _, err := requestAndRun(t, server, ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), false)); err != nil {
 		t.Fatalf("RequestTransfer() error = %v", err)
 	}
 	events, err := store.Load(ctx, AggregateType, testutil.ID("xfer1"))
@@ -369,7 +402,7 @@ func TestRequestReversal_OfCommittedTransfer(t *testing.T) {
 	}
 	destTokenID := committed.GetDestinations()[0].GetToTokenId()
 
-	resp, err := server.RequestReversal(ctx, &pb.RequestReversalRequest{
+	resp, err := reverseAndRun(t, server, ctx, &pb.RequestReversalRequest{
 		Id: testutil.ID("rev1"), TransferId: testutil.ID("xfer1"), Reason: "customer disputed",
 	})
 	if err != nil {
@@ -415,11 +448,11 @@ func TestReversal_OfManyToOneProducesOneToMany(t *testing.T) {
 
 	server := NewServer(store, lc, nil, nil)
 	ctx := context.Background()
-	if _, err := server.RequestTransfer(ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), false)); err != nil {
+	if _, err := requestAndRun(t, server, ctx, transferRequest(testutil.ID("xfer1"), testutil.ID("w1"), testutil.ID("w2"), usd(400), false)); err != nil {
 		t.Fatalf("RequestTransfer() error = %v", err)
 	}
 
-	if _, err := server.RequestReversal(ctx, &pb.RequestReversalRequest{Id: testutil.ID("rev1"), TransferId: testutil.ID("xfer1"), Reason: "reverse it all"}); err != nil {
+	if _, err := reverseAndRun(t, server, ctx, &pb.RequestReversalRequest{Id: testutil.ID("rev1"), TransferId: testutil.ID("xfer1"), Reason: "reverse it all"}); err != nil {
 		t.Fatalf("RequestReversal() error = %v", err)
 	}
 

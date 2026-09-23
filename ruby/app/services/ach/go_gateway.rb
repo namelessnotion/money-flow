@@ -23,7 +23,7 @@ module Services
     class GoGateway
       DEFAULT_URL = 'http://localhost:8080/twirp'
 
-      # Where a Transaction stands once Go has run its saga as far as it can.
+      # Where a Transaction stands, as Go last recorded it.
       class Outcome < T::Struct
         # A Transaction::V1::TransactionState enum name, e.g. :TRANSACTION_STATE_STARTED.
         const :state, Symbol
@@ -83,13 +83,15 @@ module Services
         refused!(response.data&.cancel_staged_transfer_rejected)
       end
 
-      # Runs the Transaction's saga forward from what its Transfers now say —
-      # the shadow leg after a settlement, the rollback after a return — and
-      # answers where it then stands.
+      # Where the Transaction stands, straight from Go.
+      #
+      # The authoritative answer, which is the point of asking: the projection
+      # lags and is never the truth, so anything that has to be sure before it
+      # acts reads here. Submit is the one that has to be sure.
       sig { params(transaction_id: String).returns(Outcome) }
-      def resume(transaction_id)
-        request = Transaction::V1::ResumeTransactionRequest.new(id: transaction_id)
-        data = retrying { T.unsafe(@transaction_client).resume_transaction(request) }.data
+      def state(transaction_id)
+        request = Transaction::V1::GetTransactionStateRequest.new(id: transaction_id)
+        data = retrying { T.unsafe(@transaction_client).get_transaction_state(request) }.data
         Outcome.new(state: data.state, reason: data.reason)
       end
 

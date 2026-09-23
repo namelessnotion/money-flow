@@ -15,7 +15,9 @@ import (
 	walletpb "github.com/namelessnotion/money_flow/go/gen/proto/wallet/v1"
 	"github.com/namelessnotion/money_flow/go/internal/eventstore"
 	"github.com/namelessnotion/money_flow/go/internal/ledger"
+	"github.com/namelessnotion/money_flow/go/internal/saga"
 	"github.com/namelessnotion/money_flow/go/internal/testutil"
+	"github.com/namelessnotion/money_flow/go/internal/transfer"
 )
 
 type okPinger struct{}
@@ -65,10 +67,22 @@ func TestHolderServiceOverHTTP(t *testing.T) {
 // the TigerBeetle-backed services are wired correctly end to end.
 func newTestServerWithLedger(t *testing.T) (*httptest.Server, *ledger.FakeClient) {
 	t.Helper()
-	lc := ledger.NewFakeClient()
-	srv := httptest.NewServer(newMux(eventstore.NewMemoryStore(), okPinger{}, lc))
-	t.Cleanup(srv.Close)
+	srv, lc, _ := newTestServerWithStore(t)
 	return srv, lc
+}
+
+// newTestServerWithStore also hands back the store, so a test can stand up an
+// orchestrator over it. That is not a convenience: since the async cutover
+// nothing an HTTP call does advances a saga, so proving money moved needs the
+// other half of the system — which in production is a separate process over
+// this same store (go/docs/adr/0003 on why cmd/orchestrator is its own binary).
+func newTestServerWithStore(t *testing.T) (*httptest.Server, *ledger.FakeClient, eventstore.Store) {
+	t.Helper()
+	lc := ledger.NewFakeClient()
+	store := eventstore.NewMemoryStore()
+	srv := httptest.NewServer(newMux(store, okPinger{}, lc))
+	t.Cleanup(srv.Close)
+	return srv, lc, store
 }
 
 func TestTokenServiceOverHTTP(t *testing.T) {
@@ -118,7 +132,7 @@ func TestOperationServiceOverHTTP(t *testing.T) {
 func TestTransferServiceOverHTTP(t *testing.T) {
 	t.Parallel()
 
-	srv, lc := newTestServerWithLedger(t)
+	srv, lc, store := newTestServerWithStore(t)
 	walletClient := walletpb.NewWalletServiceProtobufClient(srv.URL, srv.Client())
 	tokenClient := tokenpb.NewTokenServiceProtobufClient(srv.URL, srv.Client())
 	transferClient := transferpb.NewTransferServiceProtobufClient(srv.URL, srv.Client())
@@ -160,9 +174,21 @@ func TestTransferServiceOverHTTP(t *testing.T) {
 		t.Fatalf("result = %v, want TransferRequestAccepted", resp.GetResult())
 	}
 
-	// The saga runs synchronously within RequestTransfer, so by the time the
-	// HTTP response above came back the whole thing — mint, debit, credit —
-	// already committed; confirm via the shared ledger.
+	// Accepting is all the call did: no money has moved yet, and asserting that
+	// is what would notice dispatch creeping back into the handler.
+	if balance, _, _ := ledger.AccountBalance(ctx, lc, testutil.ID("t1")); balance != 1000 {
+		t.Errorf("t1 balance = %d, want 1000 — RequestTransfer records the acceptance and nothing else", balance)
+	}
+
+	// The other half of the system, over the same store, the way
+	// cmd/orchestrator runs beside cmd/server. Folding the acceptance this call
+	// published is what actually moves the money.
+	orchestrator := saga.Wire(store, lc).Orchestrator()
+	if err := orchestrator.Handle(ctx, saga.Trigger{
+		AggregateType: transfer.AggregateType, AggregateID: testutil.ID("xfer1"),
+	}); err != nil {
+		t.Fatalf("Handle(transfer) error = %v", err)
+	}
 	if balance, _, _ := ledger.AccountBalance(ctx, lc, testutil.ID("t1")); balance != 600 {
 		t.Errorf("t1 balance = %d, want 600 (1000 - 400)", balance)
 	}
