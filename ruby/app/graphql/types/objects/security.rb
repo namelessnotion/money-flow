@@ -78,7 +78,11 @@ module Types
         Sequel[:offering][:state].as(:offering_state),
         Sequel[:draw][:state].as(:draw_state),
         Sequel.function(:coalesce, Sequel[:draw][:state_changed_at],
-                        Sequel[:draw][:updated_at]).as(:draw_changed_at)
+                        Sequel[:draw][:updated_at]).as(:draw_changed_at),
+        # Whether any Repayment against this Security has completed, as a
+        # correlated EXISTS so a page answers `stage` without one Repayment
+        # query per row.
+        Services::Securities::Stage.completed_repayments(Sequel[:securities][:id]).exists.as(:repaid_anything)
       ].freeze,
       T::Array[Sequel::SQL::AliasedExpression]
     )
@@ -109,6 +113,17 @@ module Types
       return nil unless UUID.match?(id)
 
       dataset.where(Sequel[:securities][:id] => id).first
+    end
+
+    # A condition matching `column` to a Security id, or nothing at all for an
+    # id that is not a uuid — the same rule `find` follows, for the fields that
+    # filter another table by Security.
+    sig do
+      params(column: Sequel::SQL::QualifiedIdentifier, id: String)
+        .returns(T.any(T::Hash[Sequel::SQL::QualifiedIdentifier, String], FalseClass))
+    end
+    def self.matching(column, id)
+      UUID.match?(id) && { column => id }
     end
 
     sig { returns(T.nilable(String)) }

@@ -13,8 +13,8 @@ clear_ach_deposits:
   description: Originate clearing Transactions for ACH deposits 3 business days after completion
 
 # Hands every ready ACH entry to the provider: those whose real leg the read
-# model has seen staged and that carry no provider reference yet
-# (Services::Ach::SubmitDue). Since the async cutover this is the only thing
+# model has seen staged and that carry no provider reference yet — and, for one
+# that does, finishes confirming its leg with Go (Services::Ach::SubmitDue). Since the async cutover this is the only thing
 # that submits — Initiate accepts the Transaction and stops, because at that
 # moment a withdrawal's funding leg has not run and there is nothing to be sure
 # of (go/docs/adr/0006, ruby/docs/adr/0008).

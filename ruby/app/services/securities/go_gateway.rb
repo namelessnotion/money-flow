@@ -28,38 +28,6 @@ module Services
     class GoGateway
       DEFAULT_URL = 'http://localhost:8080/twirp'
 
-      # Where a Transaction stands once Go has run its saga as far as it can.
-      class Outcome < T::Struct
-        # A Transaction::V1::TransactionState enum name, e.g. :TRANSACTION_STATE_COMPLETED.
-        const :state, Symbol
-        # Why, when Go gave a reason; empty otherwise.
-        const :reason, String
-
-        sig { returns(T::Boolean) }
-        def started? = state == :TRANSACTION_STATE_STARTED
-
-        # Nothing a Security originates stages, so the whole DAG normally runs
-        # to completion inside the call that started it.
-        sig { returns(T::Boolean) }
-        def completed? = state == :TRANSACTION_STATE_COMPLETED
-
-        # Rejected outright, or rolling back, or rolled back, or stuck partway
-        # through a rollback. Every one of these means the command did not do
-        # what was asked, and the last needs a person.
-        FAILED = T.let(
-          %i[
-            TRANSACTION_STATE_REJECTED
-            TRANSACTION_STATE_ROLLBACK_STARTED
-            TRANSACTION_STATE_ROLLED_BACK
-            TRANSACTION_STATE_ROLLBACK_FAILED
-          ].freeze,
-          T::Array[Symbol]
-        )
-
-        sig { returns(T::Boolean) }
-        def failed? = FAILED.include?(state)
-      end
-
       sig do
         params(
           transaction_client: Transaction::V1::TransactionServiceClient,
@@ -82,23 +50,6 @@ module Services
       def start_transaction(request)
         response = retrying { T.unsafe(@transaction_client).start_initializing_transaction(request) }
         refused!(response.data&.transaction_rejected)
-      end
-
-      # Where the Transaction stands, straight from Go rather than from the
-      # projection.
-      #
-      # No securities service calls this. They record their intent, ask Go to
-      # accept the Transaction, and read the outcome off the projection like
-      # every other lifecycle fact (go/docs/adr/0006) — nothing here has to be
-      # sure of anything before acting, the way an ACH entry about to reach a
-      # provider does. It stays because an operator tool or a future service
-      # that does need authority should have somewhere to get it, and because
-      # the alternative is each caller inventing its own.
-      sig { params(transaction_id: String).returns(Outcome) }
-      def state(transaction_id)
-        request = Transaction::V1::GetTransactionStateRequest.new(id: transaction_id)
-        data = retrying { T.unsafe(@transaction_client).get_transaction_state(request) }.data
-        Outcome.new(state: data.state, reason: data.reason)
       end
 
       # Opens `specs` as Wallets on a Holder that already exists — a Security's

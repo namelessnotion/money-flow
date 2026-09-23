@@ -17,17 +17,18 @@ module Services
     # ledger to move is therefore not a scheduling choice — it is the only place
     # the ADR 0004 guarantee can still be made.
     #
-    # An entry is a candidate when the read model has seen its real leg reach
-    # **staged** and the row carries no provider reference yet. Staged is the
-    # load-bearing half: for a withdrawal the real leg sits behind the
-    # dependency edge on the funding leg, so it cannot be staged unless funding
-    # committed. Submit then confirms with Go before anything leaves. See its
-    # own comment for why that pairing is stronger than the single check it
-    # replaced.
+    # An entry is a candidate while the read model has seen its real leg at
+    # **staged**. That is the load-bearing condition: for a withdrawal the real
+    # leg sits behind the dependency edge on the funding leg, so it cannot be
+    # staged unless funding committed. Submit then confirms with Go before
+    # anything leaves. See its own comment for why that pairing is stronger
+    # than the single check it replaced.
     #
-    # A row with a provider reference is never a candidate again — that column
-    # is the record of what was sent, the way `disbursements` is, and not a flag
-    # anything sets deliberately.
+    # A row with a provider reference stays a candidate only for as long as its
+    # leg is still staged: the provider has it, and Submit finishes the Go
+    # confirmation a failure left undone rather than sending it again. That
+    # column is the record of what was sent, the way `disbursements` is, and
+    # not a flag anything sets deliberately.
     #
     # Being a sweep, it catches up on its own after any outage: nothing is
     # scheduled per entry that could be lost, and an entry it could not submit
@@ -66,20 +67,19 @@ module Services
 
       private
 
-      # Unsubmitted entries whose real leg the read model has seen staged.
+      # Entries whose real leg the read model has seen staged.
       T::Sig::WithoutRuntime.sig { params(id: T.nilable(String)).returns(T::Array[Models::AchTransaction]) }
       def candidates(id)
-        scope = staged_and_unsubmitted
+        scope = staged
         scope = scope.where(ACH[:id] => id) if id
         scope.select_all(:ach_transactions).order(ACH[:created_at]).all
       end
 
       T::Sig::WithoutRuntime.sig { returns(Models::AchTransaction::PrivateDataset) }
-      def staged_and_unsubmitted
+      def staged
         Models::AchTransaction.dataset
                               .join(Sequel[:transfer_projections].as(:real), aggregate_id: ACH[:real_transfer_id])
-                              .where(ACH[:provider_reference] => nil,
-                                     REAL[:state] => Types::Enums::TransferState::Staged.serialize)
+                              .where(REAL[:state] => Types::Enums::TransferState::Staged.serialize)
       end
 
       sig { params(id: String, submitted: T::Array[String], failed: T::Hash[String, String]).void }

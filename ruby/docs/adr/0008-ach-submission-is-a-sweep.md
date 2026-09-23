@@ -56,7 +56,13 @@ the cutover `STARTED` is reachable before any money has moved at all.
 
 5. **`provider_reference` is the terminator, and it is Ruby's guard rather than Go's.** It is written
    as soon as the provider gives it and before Go is told anything, because an entry the provider
-   holds must always be traceable; it is also what takes the row out of the candidate set for good.
+   holds must always be traceable; it is also what stops the entry ever being handed to the provider
+   a second time. It does not take the row out of the candidate set on its own: Go's confirmation
+   comes after it and can fail, leaving the provider holding an entry whose real leg is still
+   `staged`. While the read model sees that, the sweep keeps the row and only finishes the
+   confirmation — `ConfirmStagedTransfer` answers a leg already pending as confirmed, so repeating it
+   while the projection catches up is safe. Leaving the row once the reference was written would
+   strand the leg at `staged`, and the network's settlement would then find no pending leg to post.
    This departs from ADR 0001 decision 4, which puts idempotency in Go — deliberately, because the
    effect is *outside the ledger* and Go cannot dedupe it. Resubmission safety within the crash
    window between the provider call and the write is the `Provider` port's contract; the entry

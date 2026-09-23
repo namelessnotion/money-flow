@@ -82,10 +82,10 @@ module Services
       # or rolled back is not held.
       COMPLETE = T.let({ Sequel[:transaction_projections][:state] => COMPLETED }.freeze, T::Hash[T.untyped, String])
 
-      SECURITY = T.let(Sequel[:subscriptions][:security_id], T.untyped)
-      SUBSCRIBER = T.let(Sequel[:subscriptions][:investor_entity_id], T.untyped)
-      REPAID_SECURITY = T.let(Sequel[:repayments][:security_id], T.untyped)
-      HOLDER = T.let(Sequel[:disbursements][:investor_entity_id], T.untyped)
+      SECURITY = T.let(Sequel[:subscriptions][:security_id], Sequel::SQL::QualifiedIdentifier)
+      SUBSCRIBER = T.let(Sequel[:subscriptions][:investor_entity_id], Sequel::SQL::QualifiedIdentifier)
+      REPAID_SECURITY = T.let(Sequel[:repayments][:security_id], Sequel::SQL::QualifiedIdentifier)
+      HOLDER = T.let(Sequel[:disbursements][:investor_entity_id], Sequel::SQL::QualifiedIdentifier)
 
       # Principal bought, by Security then investor, each ordered by entity id.
       sig { params(security_ids: T::Array[String]).returns(T::Hash[String, T::Hash[Integer, Integer]]) }

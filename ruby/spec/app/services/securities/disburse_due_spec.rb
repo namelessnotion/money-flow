@@ -147,6 +147,59 @@ RSpec.describe Services::Securities::DisburseDue do
     expect(Models::Disbursement.all.map(&:repayment_id)).to eq([first.id])
   end
 
+  describe 'a Repayment it has already allocated' do
+    def seen_paid(paid, holder)
+      create(:transaction_projection, state: 'completed',
+                                      aggregate_id: Services::Securities::Disburse.transaction_id(paid.id, holder.id))
+    end
+
+    it 'leaves it alone once every holder has been seen paid, even when that repaid the Security in full' do
+      # Nobody holds anything any more, so re-splitting it now would have no
+      # proportion to split by. It must not be re-split at all.
+      alice = holds(100_000)
+      paid = repayment(principal: 100_000, interest: 0)
+      sweep.call
+      seen_paid(paid, alice)
+
+      result = sweep.call
+
+      expect(result.failed).to be_empty
+      expect(result.disbursed).to be_empty
+    end
+
+    it 'does not re-read holdings for it on later runs' do
+      alice = holds(100_000)
+      paid = repayment
+      allow(Services::Securities::Allocation).to receive(:for).and_call_original
+      sweep.call
+      seen_paid(paid, alice)
+
+      2.times { sweep.call }
+
+      expect(Services::Securities::Allocation).to have_received(:for).once
+    end
+
+    it 'retries a holder it could not pay at the share first allocated, though others have since been paid' do
+      alice = holds(50_000)
+      bob = holds(50_000)
+      paid = repayment(principal: 100_000, interest: 0)
+      allow(disburse).to receive(:call).and_wrap_original do |original, **kwargs|
+        raise Services::Securities::Unavailable, 'go is down' if kwargs[:share].investor_entity_id == bob.id
+
+        original.call(**kwargs)
+      end
+      sweep.call
+      seen_paid(paid, alice)
+      allow(disburse).to receive(:call).and_call_original
+
+      result = sweep.call
+
+      expect(result.failed).to be_empty
+      expect(Models::Disbursement.where(repayment_id: paid.id, investor_entity_id: bob.id).first.principal_minor_units)
+        .to eq(50_000)
+    end
+  end
+
   describe 'an interest-only repayment' do
     it 'sends a payout with no retirement leg, because Go refuses a zero-amount Transfer' do
       holds(100_000)

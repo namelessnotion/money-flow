@@ -32,6 +32,10 @@ module Services
     # one Transaction per holder (ruby/docs/adr/0007). The Borrower gets the
     # cleared cash to pay from the ordinary way — an ACH deposit that cleared.
     class RecordRepayment < BaseService
+      # A Repayment in one of these states moved nothing, so its principal is
+      # not spoken for.
+      FAILED_STATES = T.let(Stage::FAILED.map(&:serialize).freeze, T::Array[String])
+
       sig { params(gateway: GoGateway).void }
       def initialize(gateway: GoGateway.new)
         super()
@@ -62,10 +66,38 @@ module Services
 
         ensure_drawn!(security)
 
-        outstanding = Positions.outstanding_principal(security)
+        outstanding = unclaimed_principal(security)
         return if principal <= outstanding
 
         raise NotRepayable, "#{security.id} has #{outstanding} principal outstanding, not #{principal}"
+      end
+
+      # What the Borrower still owes that no earlier Repayment already covers:
+      # everything sold, less the principal of every Repayment that has not
+      # failed. Measured against Repayments rather than completed Disbursements,
+      # because a Repayment's principal is spoken for from the moment it is
+      # recorded — counting only what has been disbursed would let two
+      # Repayments in flight together repay more than is owed, and the second
+      # would strand its money in the repayment wallet with nobody left to pay.
+      #
+      # One the projection has not seen yet counts as spoken for. That can
+      # briefly refuse a retry after a rejection, which is the safe way round.
+      sig { params(security: Models::Security).returns(Integer) }
+      def unclaimed_principal(security)
+        Positions.subscribed(security) - claimed_principal(security)
+      end
+
+      sig { params(security: Models::Security).returns(Integer) }
+      def claimed_principal(security)
+        Integer(
+          DB[:repayments]
+            .left_join(:transaction_projections, aggregate_id: :id)
+            .where(Sequel[:repayments][:security_id] => security.id)
+            # Coalesced so a Repayment not yet projected (a null state) is kept:
+            # NOT IN against a null is null, which would drop it.
+            .exclude(Sequel.function(:coalesce, Sequel[:transaction_projections][:state], '') => FAILED_STATES)
+            .sum(Sequel[:repayments][:principal_minor_units]) || 0
+        )
       end
 
       sig { params(security: Models::Security).void }

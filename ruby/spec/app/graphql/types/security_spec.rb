@@ -74,6 +74,33 @@ RSpec.describe Types::Security do
       expect(data['stages']).to include({ 'name' => 'FUNDED', 'status' => 'DONE' })
     end
 
+    def repaid(security, state)
+      repayment = create(:repayment, security: security)
+      create(:transaction_projection, aggregate_id: repayment.id, state: state) if state
+    end
+
+    it 'reads as repaying once a Repayment against it has completed' do
+      security = offered(world.security)
+      holds(security, 100_000)
+      repaid(security, 'completed')
+
+      data = execute(query, { 'id' => security.id }).dig('data', 'security')
+
+      expect(data['stages']).to include({ 'name' => 'REPAYING', 'status' => 'DONE' })
+    end
+
+    { 'rejected' => 'rejected', 'not yet seen' => nil }.each do |label, state|
+      it "is not repaying on a Repayment that is #{label}, because nothing has arrived" do
+        security = offered(world.security)
+        holds(security, 100_000)
+        repaid(security, state)
+
+        data = execute(query, { 'id' => security.id }).dig('data', 'security')
+
+        expect(data['stages']).to include({ 'name' => 'REPAYING', 'status' => 'WAITING' })
+      end
+    end
+
     it 'names both parties' do
       security = offered(world.security)
 
@@ -131,6 +158,14 @@ RSpec.describe Types::Security do
       expect(sqls.count { |s| s.include?('FROM "disbursements"') }).to eq(1)
     end
 
+    it 'reads whether each Security has been repaid without one query per row' do
+      4.times { offered(securities_world.security) }
+
+      sqls = capture_sql { execute(query) }
+
+      expect(sqls.count { |s| s.include?('FROM "repayments"') }).to eq(1)
+    end
+
     it 'reads every named party in one query, not one per row' do
       3.times { offered(securities_world.security) }
 
@@ -156,6 +191,17 @@ RSpec.describe Types::Security do
 
       expect(result['errors']).to be_nil
       expect(result.dig('data', 'securities', 'nodes')).to be_empty
+    end
+  end
+
+  describe 'a Security’s subscriptions and repayments' do
+    %w[subscriptions repayments].each do |field|
+      it "matches nothing in #{field} for a security id that is not a uuid, rather than erroring" do
+        result = execute("query { #{field}(securityId: \"not-a-uuid\") { nodes { id } } }")
+
+        expect(result['errors']).to be_nil
+        expect(result.dig('data', field, 'nodes')).to be_empty
+      end
     end
   end
 end

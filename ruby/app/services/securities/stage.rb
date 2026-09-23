@@ -57,7 +57,7 @@ module Services
         const :subscribed_minor_units, Integer
         # What is still owed across every holder, once drawn.
         const :outstanding_principal_minor_units, Integer
-        # Whether any Repayment has been recorded against it.
+        # Whether any Repayment against it has completed (see completed_repayments).
         const :repaid_anything, T::Boolean
 
         sig { returns(T::Boolean) }
@@ -158,26 +158,42 @@ module Services
       def self.snapshot_of(security)
         from(security, Positions.of(security),
              offering: projected(security.offering_transaction_id),
-             draw: projected(security.draw_transaction_id))
+             draw: projected(security.draw_transaction_id),
+             repaid_anything: !completed_repayments(security.id).empty?)
       end
 
       # The same, from what a caller already has: a row that arrived with its
-      # projections joined on, and the Positions it already loaded. Lets a
-      # GraphQL type answer `stage` without re-reading either, and keeps
-      # Snapshot's fields the business layer's business rather than the type's.
+      # projections and its has-any-Repayment flag joined on, and the Positions
+      # it already loaded. Lets a GraphQL type answer `stage` without re-reading
+      # any of them, and keeps Snapshot's fields the business layer's business
+      # rather than the type's.
       sig do
         params(security: Models::Security, positions: T::Array[Positions::Position],
-               offering: T.nilable(TransactionState), draw: T.nilable(TransactionState)).returns(Snapshot)
+               offering: T.nilable(TransactionState), draw: T.nilable(TransactionState),
+               repaid_anything: T::Boolean).returns(Snapshot)
       end
-      def self.from(security, positions, offering:, draw:)
+      def self.from(security, positions, offering:, draw:, repaid_anything:)
         Snapshot.new(
           offering_state: offering,
           draw_state: draw,
           principal_minor_units: security.principal_minor_units,
           subscribed_minor_units: positions.sum(&:principal_minor_units),
           outstanding_principal_minor_units: positions.sum(&:outstanding_principal_minor_units),
-          repaid_anything: Models::Repayment.where(security_id: security.id).any?
+          repaid_anything: repaid_anything
         )
+      end
+
+      # The Repayments against `security_id` that the read model has seen
+      # complete — what `repaid_anything` means. A rejected or rolled-back one
+      # moved nothing, and one not yet seen has not arrived as far as anyone
+      # here can tell. `security_id` may be a column, so GraphQL can correlate
+      # it against a page of Securities in one query.
+      sig { params(security_id: T.any(String, Sequel::SQL::QualifiedIdentifier)).returns(Sequel::Dataset) }
+      def self.completed_repayments(security_id)
+        DB[:repayments]
+          .join(:transaction_projections, aggregate_id: :id)
+          .where(Sequel[:repayments][:security_id] => security_id,
+                 Sequel[:transaction_projections][:state] => TransactionState::Completed.serialize)
       end
 
       sig { params(transaction_id: T.nilable(String)).returns(T.nilable(TransactionState)) }

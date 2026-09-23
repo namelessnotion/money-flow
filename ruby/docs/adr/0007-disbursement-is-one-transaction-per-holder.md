@@ -84,6 +84,11 @@ This is also Ruby's second follow-on chain, so ADR 0001 requires deciding what t
    order its inputs arrive in — which is why `Positions` orders by entity id rather than leaving it to
    callers, where forgetting it would be silent.
 
+   Deterministic arithmetic is not enough on its own, because its inputs move: a Repayment's own payouts
+   reduce the very holdings it was split by. So the sweep splits a Repayment once, records every holder's
+   row before sending any, and on every later run works from those rows rather than re-splitting. Once each
+   row has been seen, the Repayment is not read again.
+
 5. **The invariants are asserted, not merely tested.** `ProRata.allocate` checks that its parts sum to
    exactly the total; `Allocation.for` checks each bucket separately and that no holder's principal share
    exceeds what they hold. A split that quietly loses a minor unit is the failure these exist to prevent, and

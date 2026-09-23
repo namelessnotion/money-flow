@@ -62,9 +62,10 @@ proto:
 	    --twirp_out=go/gen/proto --twirp_opt=paths=source_relative \
 	    --ruby_out=ruby/gen/proto \
 	    $$f || exit 1; \
-	  grep -q '^service ' $$f && protoc -I proto --twirp_ruby_out=ruby/gen/proto $$f; \
-	done; \
-	true
+	  if grep -q '^service ' $$f; then \
+	    protoc -I proto --twirp_ruby_out=ruby/gen/proto $$f || exit 1; \
+	  fi; \
+	done
 
 # Publish money_flow_dev to Kafka (docs/adr/0001): cdc-up registers the
 # Debezium connector; cdc-down removes it, its publication and the

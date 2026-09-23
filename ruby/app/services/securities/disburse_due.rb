@@ -18,6 +18,15 @@ module Services
     # One sent but not yet seen is sent again, which Go dedupes by its derived
     # id.
     #
+    # **A Repayment is split once.** The first run that reaches it allocates it
+    # against holdings as they stand and records every holder's row before
+    # sending any; every later run works from those rows. Re-splitting on each
+    # run would weigh it against holdings its own payouts have since reduced —
+    # a holder retried after the others were paid would be owed more than they
+    # hold, and once a Security is fully repaid there is nothing left to weigh
+    # by at all. It also keeps the sweep's work to the Repayments that still
+    # have somebody to pay: one with every row seen is not read again.
+    #
     # Being a sweep, it catches up on its own after any outage: nothing is
     # scheduled per Repayment that could be lost.
     #
@@ -68,20 +77,32 @@ module Services
 
       private
 
-      # Repayments the read model has seen complete.
+      # Repayments the read model has seen complete that are not yet split, or
+      # have a holder's Disbursement it has not seen.
       sig { params(repayment_id: T.nilable(String)).returns(T::Array[Models::Repayment]) }
       def due(repayment_id)
         seen = DB[:transaction_projections].where(state: COMPLETED).select(:aggregate_id)
-        scope = Models::Repayment.where(id: seen)
+        scope = Models::Repayment.where(id: seen).where(Sequel.|(Sequel.~(id: split), { id: unseen_share }))
         scope = scope.where(id: repayment_id) if repayment_id
         scope.order(:created_at).all
+      end
+
+      sig { returns(Sequel::Dataset) }
+      def split = DB[:disbursements].select(:repayment_id)
+
+      sig { returns(Sequel::Dataset) }
+      def unseen_share
+        DB[:disbursements]
+          .left_join(:transaction_projections, aggregate_id: :id)
+          .where(Sequel[:transaction_projections][:aggregate_id] => nil)
+          .select(Sequel[:disbursements][:repayment_id])
       end
 
       sig do
         params(repayment: Models::Repayment, disbursed: T::Array[String], failed: T::Hash[String, String]).void
       end
       def disburse_all(repayment, disbursed, failed)
-        Allocation.for(repayment).each do |share|
+        shares_of(repayment).each do |share|
           next if already_seen?(repayment, share)
 
           attempt(repayment, share, disbursed, failed)
@@ -91,6 +112,26 @@ module Services
         # the sweep's: the rest still go out.
         failed[repayment.id] = "#{e.class}: #{e.message}"
         @logger.error("securities disbursement failed to allocate #{repayment.id}: #{failed[repayment.id]}")
+      end
+
+      # The split recorded the first time, or — the first time — a fresh one,
+      # every row recorded before any is sent so a failure part-way through
+      # cannot lose a holder from it.
+      sig { params(repayment: Models::Repayment).returns(T::Array[Allocation::Share]) }
+      def shares_of(repayment)
+        recorded = Models::Disbursement.where(repayment_id: repayment.id).order(:investor_entity_id).all
+        return recorded.map { |row| share_from(row) } unless recorded.empty?
+
+        shares = Allocation.for(repayment)
+        DB.transaction { shares.each { |share| @disburse.record_share(repayment: repayment, share: share) } }
+        shares
+      end
+
+      sig { params(row: Models::Disbursement).returns(Allocation::Share) }
+      def share_from(row)
+        Allocation::Share.new(investor_entity_id: row.investor_entity_id,
+                              principal_minor_units: row.principal_minor_units,
+                              interest_minor_units: row.interest_minor_units)
       end
 
       # Seen in any state is left alone. Rejected or rolled back needs a

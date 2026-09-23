@@ -82,8 +82,37 @@ RSpec.describe Services::Ach::SubmitDue do
   it 'never submits a second time for an entry the provider already holds' do
     ach(submitted: true)
 
-    expect(sweep.call.submitted).to be_empty
+    sweep.call
+
     expect(provider).not_to have_received(:submit)
+  end
+
+  # The reference is saved before Go is told, so Go can fail in between. The
+  # provider then holds an entry whose real leg is still staged, and the next
+  # sweep has to finish the confirmation or the network's settlement would
+  # find no pending leg to post.
+  it 'confirms a staged leg the provider already holds, which a failed confirmation left behind' do
+    row = ach
+    allow(transfer_client).to receive(:confirm_staged_transfer).and_raise(Faraday::ConnectionFailed, 'down')
+    expect(sweep.call.failed.keys).to eq([row.id])
+
+    confirmed = []
+    allow(transfer_client).to receive(:confirm_staged_transfer) do |req|
+      confirmed << req.id
+      transfer_pending(req.id)
+    end
+
+    expect(sweep.call.failed).to be_empty
+    expect(confirmed).to eq([row.real_transfer_id])
+    expect(provider).to have_received(:submit).once
+  end
+
+  it 'leaves an entry the provider holds alone once the read model has seen its leg move past staged' do
+    ach(real_leg: 'pending', submitted: true)
+
+    sweep.call
+
+    expect(transfer_client).not_to have_received(:confirm_staged_transfer)
   end
 
   it 'submits a deposit on the same condition, with no branch of its own' do

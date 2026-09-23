@@ -34,11 +34,22 @@ module Services
       end
       def call(repayment:, share:)
         security = Allocation.security_of(repayment)
-        ids = ids_for(repayment, share)
 
-        disbursement = perform { record(repayment, share, ids) }
+        disbursement = record_share(repayment: repayment, share: share)
         start_transaction!(security, share, disbursement)
         disbursement
+      end
+
+      # Records one holder's share without sending it, or returns the row
+      # already recorded for that pair. The sweep records every share of a
+      # Repayment before sending any, so its split is fixed once and later runs
+      # work from these rows instead of re-splitting against holdings that
+      # have since moved.
+      sig do
+        params(repayment: Models::Repayment, share: Allocation::Share).returns(Models::Disbursement)
+      end
+      def record_share(repayment:, share:)
+        perform { record(repayment, share, ids_for(repayment, share)) }
       end
 
       # The Transaction id for one holder's share of one Repayment. Public so

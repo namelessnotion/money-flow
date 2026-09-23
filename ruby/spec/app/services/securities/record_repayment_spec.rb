@@ -76,6 +76,32 @@ RSpec.describe Services::Securities::RecordRepayment do
         .to raise_error(Services::Securities::NotRepayable, /has 100000 principal outstanding/)
     end
 
+    describe 'principal an earlier Repayment already covers' do
+      it 'counts a Repayment not yet disbursed, so two cannot together repay more than is owed' do
+        repay(principal: 60_000, interest: 0)
+
+        expect { repay(principal: 50_000, interest: 0) }
+          .to raise_error(Services::Securities::NotRepayable, /has 40000 principal outstanding/)
+      end
+
+      it 'counts one already disbursed exactly once' do
+        paid = repay(principal: 60_000, interest: 0)
+        create(:transaction_projection, aggregate_id: paid.id, state: 'completed')
+        settled = create(:disbursement, repayment: paid, investor: world.investor,
+                                        principal_minor_units: 60_000, interest_minor_units: 0)
+        create(:transaction_projection, aggregate_id: settled.id, state: 'completed')
+
+        expect(repay(principal: 40_000, interest: 0).principal_minor_units).to eq(40_000)
+      end
+
+      it 'frees the principal of one Go rejected, which repaid nothing' do
+        refused = repay(principal: 100_000, interest: 0)
+        create(:transaction_projection, aggregate_id: refused.id, state: 'rejected')
+
+        expect(repay(principal: 100_000, interest: 0).principal_minor_units).to eq(100_000)
+      end
+    end
+
     it 'refuses a payment of nothing, which has no leg to send' do
       expect { repay(principal: 0, interest: 0) }
         .to raise_error(Services::Securities::InvalidAmount, /nothing has no leg/)

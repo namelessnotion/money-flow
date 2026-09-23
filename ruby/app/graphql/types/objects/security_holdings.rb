@@ -58,7 +58,8 @@ module Types
       @snapshot ||= Services::Securities::Stage.from(
         object, held,
         offering: Types::Enums::TransactionState.try_deserialize(object[:offering_state]),
-        draw: Types::Enums::TransactionState.try_deserialize(object[:draw_state])
+        draw: Types::Enums::TransactionState.try_deserialize(object[:draw_state]),
+        repaid_anything: object[:repaid_anything] == true
       )
     end
   end

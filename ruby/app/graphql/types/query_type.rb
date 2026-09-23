@@ -116,14 +116,14 @@ module Types
     T::Sig::WithoutRuntime.sig { params(security_id: String).returns(Models::Subscription::PrivateDataset) }
     def subscriptions(security_id:)
       Types::Subscription.dataset
-                         .where(Sequel[:subscriptions][:security_id] => security_id)
+                         .where(Types::Security.matching(Sequel[:subscriptions][:security_id], security_id))
                          .order(Sequel[:subscriptions][:created_at], Sequel[:subscriptions][:id])
     end
 
     T::Sig::WithoutRuntime.sig { params(security_id: String).returns(Models::Repayment::PrivateDataset) }
     def repayments(security_id:)
       Types::Repayment.dataset
-                      .where(Sequel[:repayments][:security_id] => security_id)
+                      .where(Types::Security.matching(Sequel[:repayments][:security_id], security_id))
                       .order(Sequel[:repayments][:created_at], Sequel[:repayments][:id])
     end
 

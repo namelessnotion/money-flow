@@ -39,9 +39,12 @@ module Services
     #
     # The provider reference is persisted as soon as the provider gives it, and
     # before Go is told anything: an entry the provider holds must always be
-    # traceable. It is also the record that this entry was sent, which is what
-    # takes the row out of SubmitDue's candidates for good — no "submitted"
-    # flag, the same way `disbursements` keeps no "already disbursed" one.
+    # traceable. It is also the record that this entry was sent — no
+    # "submitted" flag, the same way `disbursements` keeps no "already
+    # disbursed" one — so a row carrying it is never handed to the provider
+    # again. Go can still fail after it is saved, though, which leaves the
+    # provider holding an entry whose real leg is still staged; while the read
+    # model sees it staged, each call finishes that confirmation instead.
     #
     # Unlike every other guard in this codebase, that one is Ruby's rather than
     # Go's, and it has to be: the effect is outside the ledger, so Go cannot
@@ -59,7 +62,7 @@ module Services
       def call(ach_transaction_id:)
         ach = Models::AchTransaction[ach_transaction_id] ||
               raise(NotFound, "no ACH transaction #{ach_transaction_id}")
-        return ach unless ach.provider_reference.nil?
+        return finish_confirmation(ach) unless ach.provider_reference.nil?
 
         require_staged!(ach)
         require_running!(ach)
@@ -69,6 +72,21 @@ module Services
 
       private
 
+      # The provider already holds the entry, so the only step that can be left
+      # is confirming the real leg. Go answers a leg that is already pending as
+      # confirmed, so repeating this while the projection catches up is safe;
+      # one the read model has seen move on needs nothing.
+      sig { params(ach: Models::AchTransaction).returns(Models::AchTransaction) }
+      def finish_confirmation(ach)
+        @go.confirm_staged(ach.real_transfer_id) if staged?(ach)
+        ach
+      end
+
+      sig { params(ach: Models::AchTransaction).returns(T::Boolean) }
+      def staged?(ach)
+        Models::TransferProjection[ach.real_transfer_id]&.state == Types::Enums::TransferState::Staged.serialize
+      end
+
       # The read model's half of the gate. It may lag Go but it cannot lead it:
       # every state it holds is one Go actually reached, under the projection's
       # monotonic guard (ruby/docs/adr/0001). SubmitDue selects on this already;
@@ -76,9 +94,9 @@ module Services
       # SubmitNow does.
       sig { params(ach: Models::AchTransaction).void }
       def require_staged!(ach)
-        state = Models::TransferProjection[ach.real_transfer_id]&.state
-        return if state == Types::Enums::TransferState::Staged.serialize
+        return if staged?(ach)
 
+        state = Models::TransferProjection[ach.real_transfer_id]&.state
         raise NotSubmittable,
               "#{ach.id}'s real leg is #{state || 'not yet seen'}, not staged; nothing may reach the provider yet"
       end
