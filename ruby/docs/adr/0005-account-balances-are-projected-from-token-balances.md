@@ -34,6 +34,9 @@ Three read paths were considered:
    is skipped, so a retried saga step adds nothing.
 3. **Recording runs before the saga step's own event.** If it fails, the step is retried: TigerBeetle answers
    `Exists`, and the recording runs again. Publication is at least once, with no gap.
+   _Amended 2026-09-24 by [go ADR 0010](../../../go/docs/adr/0010-facts-decided-together-share-a-commit.md):_
+   a saga step now records these balances in the same atomic write as its own outcome, so they land with it
+   rather than before it. Still at least once, with no gap. Per-Token order (decision 2) is unchanged.
 4. **Ruby keeps the highest-sequence balance per Token** in `token_balance_projections`, in one guarded upsert
    (`Consumer::BalanceProjector`). `Account.balances` sums those rows by `wallet_uuid` and currency. One grouped
    query serves a whole page of Accounts (`Sources::AccountBalances`, through `GraphQL::Dataloader`).

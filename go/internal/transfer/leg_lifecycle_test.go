@@ -6,10 +6,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
 	sharedpb "github.com/namelessnotion/money_flow/go/gen/proto/shared/v1"
+	tokenpb "github.com/namelessnotion/money_flow/go/gen/proto/token/v1"
 	pb "github.com/namelessnotion/money_flow/go/gen/proto/transfer/v1"
 	"github.com/namelessnotion/money_flow/go/internal/eventstore"
 	"github.com/namelessnotion/money_flow/go/internal/ledger"
@@ -118,11 +120,12 @@ func TestImmediateTransfer_RecordsItsLegsOnItsOwnStreamOnly(t *testing.T) {
 		t.Errorf("transfer stream = %v, want %v", got, want)
 	}
 
-	// accept, prepare (mint + legs), commit claim, one balance per Token
-	// touched (source and destination), TransferCommitted.
+	// accept, prepare (mint + legs + the commit claim), then
+	// TransferCommitted together with the balance of every Token it moved
+	// (go/docs/adr/0010).
 	commits, written := store.snapshot()
-	if commits != 6 {
-		t.Errorf("commits = %d, want 6", commits)
+	if commits != 3 {
+		t.Errorf("commits = %d, want 3", commits)
 	}
 	if !slices.Equal(written, legAggregateTypes()) {
 		t.Errorf("wrote to aggregate types %v, want only %v", written, legAggregateTypes())
@@ -161,7 +164,13 @@ func TestStagedTransfer_RecordsItsLegsOnItsOwnStreamOnly(t *testing.T) {
 	if got := eventTypes(mustEvents(t, base, transferID)); !slices.Equal(got, want) {
 		t.Errorf("transfer stream = %v, want %v", got, want)
 	}
-	if _, written := store.snapshot(); !slices.Equal(written, legAggregateTypes()) {
+	// accept, prepare with the stage claim, TransferStaged with balances,
+	// TransferPending, commit claim, TransferCommitted with balances.
+	commits, written := store.snapshot()
+	if commits != 6 {
+		t.Errorf("commits = %d, want 6", commits)
+	}
+	if !slices.Equal(written, legAggregateTypes()) {
 		t.Errorf("wrote to aggregate types %v, want only %v", written, legAggregateTypes())
 	}
 }
@@ -335,5 +344,168 @@ func TestCancelAcceptedTransfer_CancelsAPreparedTransferInOneCommit(t *testing.T
 	}
 	if commits, _ := store.snapshot(); commits != 1 {
 		t.Errorf("commits = %d, want 1", commits)
+	}
+}
+
+// A caller that loses the race to a step's outcome — a second
+// CancelStagedTransfer, a Transaction rollback redelivered beside the first —
+// reaches the step after the Transfer has already moved on. It must find
+// nothing left to do: no claim on a finished Transfer, no second submission
+// to TigerBeetle.
+func TestSagaSteps_ClaimNothingOnceTheTransferHasMovedOn(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		stage  bool
+		finish func(ctx context.Context, s *Server, transferID string) error
+		again  func(ctx context.Context, s *Server, transferID string) error
+	}{
+		"cancelStaged after the cancel landed": {
+			stage: true,
+			finish: func(ctx context.Context, s *Server, transferID string) error {
+				_, err := s.CancelStagedTransfer(ctx, &pb.CancelStagedTransferRequest{Id: transferID, Reason: "first"})
+				return err
+			},
+			again: func(ctx context.Context, s *Server, transferID string) error {
+				return s.cancelStaged(ctx, transferID, "second")
+			},
+		},
+		"commit after the commit landed": {
+			stage:  false,
+			finish: func(context.Context, *Server, string) error { return nil },
+			again: func(ctx context.Context, s *Server, transferID string) error {
+				return s.commit(ctx, transferID)
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store := eventstore.NewMemoryStore()
+			fake := ledger.NewFakeClient()
+			from, to := fundedWallets(t, store, fake)
+			lc := &createTransfersCountingClient{Client: fake}
+			server := NewServer(store, lc, nil, nil)
+			ctx := context.Background()
+			transferID := testutil.ID("xfer-moved-on")
+			if _, err := requestAndRun(t, server, ctx, transferRequest(transferID, from, to, usd(400), tc.stage)); err != nil {
+				t.Fatalf("RequestTransfer() error = %v", err)
+			}
+			if err := tc.finish(ctx, server, transferID); err != nil {
+				t.Fatalf("finish: %v", err)
+			}
+			before := len(mustEvents(t, store, transferID))
+			submitted := lc.count()
+
+			if err := tc.again(ctx, server, transferID); err != nil {
+				t.Fatalf("second call error = %v, want nil", err)
+			}
+			if got := len(mustEvents(t, store, transferID)); got != before {
+				t.Errorf("stream grew from %d to %d events: a finished Transfer was claimed again", before, got)
+			}
+			if got := lc.count(); got != submitted {
+				t.Errorf("ledger.CreateTransfers called %d more times, want 0", got-submitted)
+			}
+		})
+	}
+}
+
+// balanceRacingStore lands a concurrent TokenBalanceRecorded on raceTokenID
+// just before the first atomic write carrying a TransferCommitted — another
+// Transfer's step recording the same, shared source Token — so that write
+// loses on the Token's stream.
+type balanceRacingStore struct {
+	eventstore.Store
+	raceTokenID string
+	once        sync.Once
+	raced       bool
+}
+
+func (s *balanceRacingStore) AppendAtomic(ctx context.Context, writes ...eventstore.StreamWrite) error {
+	for _, w := range writes {
+		if w.AggregateType != AggregateType || len(w.Events) == 0 || eventstore.EventType(w.Events[0]) != eventstore.EventType(&pb.TransferCommitted{}) {
+			continue
+		}
+		s.once.Do(func() {
+			events, err := s.Load(ctx, token.AggregateType, s.raceTokenID)
+			if err != nil {
+				return
+			}
+			s.raced = s.Append(ctx, token.AggregateType, s.raceTokenID, int64(len(events)),
+				&tokenpb.TokenBalanceRecorded{Id: s.raceTokenID, Currency: "USD", PostedMinorUnits: 1}) == nil
+		})
+	}
+	return s.Store.AppendAtomic(ctx, writes...)
+}
+
+// A step's outcome and the balances it moved land together, so losing the
+// race on a shared Token's stream retries both: the outcome is recorded once,
+// and the Token's last balance is still the ledger's, read after the balance
+// that beat it.
+func TestCommit_RetriesTheOutcomeWithItsBalancesWhenAShareTokenMoves(t *testing.T) {
+	t.Parallel()
+	base := eventstore.NewMemoryStore()
+	lc := ledger.NewFakeClient()
+	from, to := fundedWallets(t, base, lc)
+	store := &balanceRacingStore{Store: base, raceTokenID: testutil.ID("t1")}
+	server := NewServer(store, lc, nil, nil)
+	ctx := context.Background()
+
+	transferID := testutil.ID("xfer-balance-race")
+	if _, err := requestAndRun(t, server, ctx, transferRequest(transferID, from, to, usd(400), false)); err != nil {
+		t.Fatalf("RequestTransfer() error = %v", err)
+	}
+	if !store.raced {
+		t.Fatal("the concurrent balance never landed; the test proved nothing")
+	}
+
+	committed := 0
+	for _, e := range mustEvents(t, base, transferID) {
+		if e.EventType == eventstore.EventType(&pb.TransferCommitted{}) {
+			committed++
+		}
+	}
+	if committed != 1 {
+		t.Errorf("TransferCommitted recorded %d times, want 1", committed)
+	}
+	assertBalanceRecorded(t, base, testutil.ID("t1"), 600, 0, 0)
+}
+
+// prepare() claims the step that follows it in the same write as
+// TransferPrepared (go/docs/adr/0010), so a driver that dies between the two
+// leaves a claim behind, not an unclaimed Prepared Transfer. That claim is
+// abandoned like any other: once stale, the same step takes it over and the
+// Transfer carries on.
+func TestPrepare_ClaimsTheNextStepSoACrashedDispatchIsTakenOver(t *testing.T) {
+	// Deliberately not t.Parallel(): mutates claimStaleAfter.
+	defer swapClaimStaleAfter(20 * time.Millisecond)()
+
+	store := eventstore.NewMemoryStore()
+	lc := ledger.NewFakeClient()
+	from, to := fundedWallets(t, store, lc)
+	server := NewServer(store, lc, nil, nil)
+	ctx := context.Background()
+	transferID := testutil.ID("xfer-crashed-after-prepare")
+	if _, err := server.RequestTransfer(ctx, transferRequest(transferID, from, to, usd(400), true)); err != nil {
+		t.Fatalf("RequestTransfer() error = %v", err)
+	}
+
+	// The driver prepares, then dies before staging.
+	if _, err := server.prepare(ctx, transferID); err != nil {
+		t.Fatalf("prepare() error = %v", err)
+	}
+	want := []string{
+		eventstore.EventType(&pb.TransferRequestAccepted{}),
+		eventstore.EventType(&pb.TransferPrepared{}),
+		eventstore.EventType(&pb.StagingTransferStarted{}),
+	}
+	if got := eventTypes(mustEvents(t, store, transferID)); !slices.Equal(got, want) {
+		t.Fatalf("after prepare() the stream is %v, want %v", got, want)
+	}
+
+	time.Sleep(2 * claimStaleAfter)
+	if err := server.Resume(ctx, transferID); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	if state := currentStateOf(t, store, transferID); state != stateStaged {
+		t.Errorf("state = %v, want staged: the abandoned claim should have been taken over", state)
 	}
 }

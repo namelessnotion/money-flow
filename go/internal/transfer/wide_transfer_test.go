@@ -92,9 +92,7 @@ func (f wideTransferFixture) prepare(t *testing.T, server *Server, transferID st
 	}); err != nil {
 		t.Fatalf("seed TransferRequestAccepted: %v", err)
 	}
-	if err := server.prepare(ctx, transferID); err != nil {
-		t.Fatalf("prepare(): %v", err)
-	}
+	prepareUnclaimed(t, ctx, server, transferID)
 }
 
 func TestCommit_TransferWiderThanOneLedgerBatchCommits(t *testing.T) {
