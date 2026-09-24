@@ -7,9 +7,45 @@ package ledger
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 )
+
+// BatchMax is the most accounts or transfers one CreateAccounts or
+// CreateTransfers call may carry. It is TigerBeetle's per-request ceiling
+// under the smallest request size any replica we run uses: `--development`
+// (docker/tigerbeetle/entrypoint.sh) shrinks a request to 32 KiB, which after
+// the message header and the multi-batch trailer holds 253 128-byte events —
+// measured against 0.17.9, and pinned by
+// TestRealClient_BatchMaxLinkedTransfersFitOneRequest. A production replica's
+// 1 MiB request holds 8189, so this is conservative there, deliberately:
+// every replica in a cluster must share one batch size, and the code must run
+// against both.
+//
+// A linked chain cannot span requests, so BatchMax is also the longest chain
+// any caller can submit. A caller with more to apply atomically has to build
+// that atomicity itself (go/docs/adr/0008).
+const BatchMax = 253
+
+// ErrInvalidRequest marks a CreateAccounts or CreateTransfers call refused as
+// a whole, before anything was applied, for a reason no retry can change: a
+// batch over BatchMax, a batch ending mid-chain, a malformed id, an unknown
+// currency, or TigerBeetle itself reporting the request too large. Contrast a
+// per-entry rejection, which comes back as a result code, and a transport
+// error, which is worth retrying.
+var ErrInvalidRequest = errors.New("ledger: invalid request")
+
+// ErrBatchTooLarge is ErrInvalidRequest for a batch over BatchMax.
+var ErrBatchTooLarge = fmt.Errorf("%w: batch exceeds BatchMax (%d)", ErrInvalidRequest, BatchMax)
+
+// checkBatchSize refuses a batch over BatchMax.
+func checkBatchSize(n int) error {
+	if n > BatchMax {
+		return fmt.Errorf("%w: got %d", ErrBatchTooLarge, n)
+	}
+	return nil
+}
 
 // AccountFlags mirrors the subset of TigerBeetle account flags this domain
 // needs. Linked chains this account's creation to the next one in the same
@@ -148,11 +184,14 @@ type Client interface {
 	// CreateAccounts submits a batch of account-creation requests. Entries
 	// with Flags.Linked set are chained to the following entry so the whole
 	// run of linked entries succeeds or fails together; the last entry in
-	// any linked chain must not set Flags.Linked.
+	// any linked chain must not set Flags.Linked. At most BatchMax entries;
+	// an error wrapping ErrInvalidRequest means nothing was applied and
+	// resubmitting the same batch cannot succeed.
 	CreateAccounts(ctx context.Context, accounts []Account) ([]AccountResult, error)
 
 	// CreateTransfers submits a batch of transfers. Entries with Linked set
-	// are chained the same way as CreateAccounts.
+	// are chained the same way as CreateAccounts, under the same BatchMax
+	// and ErrInvalidRequest contract.
 	CreateTransfers(ctx context.Context, transfers []Transfer) ([]TransferResult, error)
 
 	// Balances looks up every given account in one round trip (chunked

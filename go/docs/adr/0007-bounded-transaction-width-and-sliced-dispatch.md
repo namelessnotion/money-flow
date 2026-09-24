@@ -61,6 +61,12 @@ for every other aggregate sharing it, so one pathological Transaction becomes a 
 slice through with no chunking, and a linked chain cannot span batches. `lookupBatchMax = 8189`
 exists, but only for reads. The cap keeps the ceiling unreachable rather than discovered.
 
+> **Wrong, found 2026-09-23 by [ADR 0008](0008-transfer-legs-span-ledger-batches.md).** The cap counts
+> Transfers. The ceiling counts legs, and one Transfer drawing on a Wallet of many small Tokens has one leg
+> per Token. A 276-leg security draw hit it and halted the orchestrator. The ceiling is now guarded where it
+> lives: `ledger.BatchMax` (253 under `--development`), with wide Transfers reserving before they post. This
+> reason for the cap no longer stands. The other three do.
+
 ## Why the slice needs no cursor
 
 **Every slice that reports more work has appended at least one event.** `readyToRun` returns only

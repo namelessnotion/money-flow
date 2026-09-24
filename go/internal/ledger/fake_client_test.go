@@ -2,6 +2,7 @@ package ledger_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"uuid"
 
@@ -501,5 +502,47 @@ func TestBalance_PostedNet(t *testing.T) {
 	}
 	if _, err := (ledger.Balance{CreditsPosted: 1 << 63}).PostedNet(); err == nil {
 		t.Errorf("PostedNet: want an overflow error for credits beyond int64")
+	}
+}
+
+// The fake holds callers to the same per-call ceiling as the real client, so
+// a saga that would overflow TigerBeetle's batch fails its unit tests rather
+// than the orchestrator.
+func TestFakeClient_CreateTransfers_BatchLargerThanBatchMaxIsAnInvalidRequest(t *testing.T) {
+	t.Parallel()
+	c := ledger.NewFakeClient()
+	debit, credit := newAccount(t, ledger.AccountFlags{}), newAccount(t, ledger.AccountFlags{})
+	mustCreateAccounts(t, c, debit, credit)
+
+	batch := make([]ledger.Transfer, ledger.BatchMax+1)
+	for i := range batch {
+		batch[i] = ledger.Transfer{
+			ID: newID(t), DebitAccountID: debit.ID, CreditAccountID: credit.ID,
+			MinorUnits: 1, Currency: "USD", Kind: ledger.TransferKindRegular,
+		}
+	}
+	if _, err := c.CreateTransfers(context.Background(), batch); !errors.Is(err, ledger.ErrInvalidRequest) {
+		t.Fatalf("CreateTransfers(BatchMax+1) error = %v, want ErrInvalidRequest", err)
+	}
+	if balance, _, _ := ledger.AccountBalance(context.Background(), c, credit.ID); balance != 0 {
+		t.Fatalf("credit balance = %d, want 0: nothing may be applied", balance)
+	}
+
+	if results, err := c.CreateTransfers(context.Background(), batch[:ledger.BatchMax]); err != nil {
+		t.Fatalf("CreateTransfers(BatchMax) error = %v, want nil", err)
+	} else if results[len(results)-1].Result != ledger.TransferResultOK {
+		t.Fatalf("last of BatchMax: got %v, want OK", results[len(results)-1].Result)
+	}
+}
+
+func TestFakeClient_CreateAccounts_BatchLargerThanBatchMaxIsAnInvalidRequest(t *testing.T) {
+	t.Parallel()
+	c := ledger.NewFakeClient()
+	accounts := make([]ledger.Account, ledger.BatchMax+1)
+	for i := range accounts {
+		accounts[i] = newAccount(t, ledger.AccountFlags{})
+	}
+	if _, err := c.CreateAccounts(context.Background(), accounts); !errors.Is(err, ledger.ErrInvalidRequest) {
+		t.Fatalf("CreateAccounts(BatchMax+1) error = %v, want ErrInvalidRequest", err)
 	}
 }

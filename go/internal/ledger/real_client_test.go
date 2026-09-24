@@ -2,6 +2,7 @@ package ledger_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strconv"
 	"testing"
@@ -150,5 +151,95 @@ func TestRealClient_PendingTransferLifecycle(t *testing.T) {
 
 	if balance, found, err := ledger.AccountBalance(ctx, c, credit.ID); err != nil || !found || balance != 500 {
 		t.Fatalf("AccountBalance(credit) after post: balance=%d found=%v err=%v, want 500/true/nil", balance, found, err)
+	}
+}
+
+// createAccountsInBatches creates n fresh USD accounts, BatchMax at a time,
+// and returns them.
+func createAccountsInBatches(t *testing.T, c ledger.Client, n int) []ledger.Account {
+	t.Helper()
+	accounts := make([]ledger.Account, n)
+	for i := range accounts {
+		accounts[i] = ledger.Account{ID: uuid.NewV7().String(), Currency: "USD"}
+	}
+	for start := 0; start < n; start += ledger.BatchMax {
+		if _, err := c.CreateAccounts(context.Background(), accounts[start:min(start+ledger.BatchMax, n)]); err != nil {
+			t.Fatalf("CreateAccounts: %v", err)
+		}
+	}
+	return accounts
+}
+
+// TestRealClient_BatchMaxLinkedTransfersFitOneRequest pins BatchMax to the
+// replica the tests run against. The dockerized TigerBeetle starts with
+// --development, which shrinks its request to 32 KiB; a BatchMax any larger
+// makes this fail with TigerBeetle's own "too much data" — the error that
+// halted the orchestrator on a 276-leg Transfer.
+func TestRealClient_BatchMaxLinkedTransfersFitOneRequest(t *testing.T) {
+	c := testRealClient(t)
+	ctx := context.Background()
+
+	sources := createAccountsInBatches(t, c, ledger.BatchMax)
+	dest := createAccountsInBatches(t, c, 1)[0]
+	chain := make([]ledger.Transfer, ledger.BatchMax)
+	for i := range chain {
+		chain[i] = ledger.Transfer{
+			ID: uuid.NewV7().String(), DebitAccountID: sources[i].ID, CreditAccountID: dest.ID,
+			MinorUnits: 1, Currency: "USD", Kind: ledger.TransferKindPending, Timeout: 3600,
+			Linked: i < len(chain)-1,
+		}
+	}
+	results, err := c.CreateTransfers(ctx, chain)
+	if err != nil {
+		t.Fatalf("CreateTransfers(%d linked): %v", len(chain), err)
+	}
+	for _, r := range results {
+		if r.Result != ledger.TransferResultOK {
+			t.Fatalf("leg %d: got %v, want OK", r.Index, r.Result)
+		}
+	}
+}
+
+// TestRealClient_BatchLargerThanBatchMaxIsAnInvalidRequest: a batch over the
+// limit is refused before anything reaches TigerBeetle, as an error a caller
+// can recognise as permanent rather than retry.
+func TestRealClient_BatchLargerThanBatchMaxIsAnInvalidRequest(t *testing.T) {
+	c := testRealClient(t)
+	ctx := context.Background()
+
+	sources := createAccountsInBatches(t, c, ledger.BatchMax+1)
+	dest := createAccountsInBatches(t, c, 1)[0]
+	batch := make([]ledger.Transfer, ledger.BatchMax+1)
+	for i := range batch {
+		batch[i] = ledger.Transfer{
+			ID: uuid.NewV7().String(), DebitAccountID: sources[i].ID, CreditAccountID: dest.ID,
+			MinorUnits: 1, Currency: "USD", Kind: ledger.TransferKindRegular,
+		}
+	}
+	if _, err := c.CreateTransfers(ctx, batch); !errors.Is(err, ledger.ErrInvalidRequest) {
+		t.Fatalf("CreateTransfers(BatchMax+1) error = %v, want ErrInvalidRequest", err)
+	}
+	if balance, _, err := ledger.AccountBalance(ctx, c, dest.ID); err != nil || balance != 0 {
+		t.Fatalf("dest balance = %d (err %v), want 0: nothing may be applied", balance, err)
+	}
+}
+
+// TestRealClient_BalancesSpansSeveralLookupRequests reads more accounts than
+// one --development lookup request carries (2031 16-byte ids), which the old
+// 1 MiB-derived chunk size of 8189 did not split.
+func TestRealClient_BalancesSpansSeveralLookupRequests(t *testing.T) {
+	c := testRealClient(t)
+
+	accounts := createAccountsInBatches(t, c, 4100)
+	ids := make([]string, len(accounts))
+	for i, a := range accounts {
+		ids[i] = a.ID
+	}
+	balances, err := c.Balances(context.Background(), ids)
+	if err != nil {
+		t.Fatalf("Balances(%d): %v", len(ids), err)
+	}
+	if len(balances) != len(ids) {
+		t.Fatalf("Balances returned %d accounts, want %d", len(balances), len(ids))
 	}
 }

@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"uuid"
@@ -79,12 +80,28 @@ func (c *RealClient) Close() {
 func idToUint128(id string) (tb.Uint128, error) {
 	u, err := uuid.Parse(id)
 	if err != nil {
-		return tb.Uint128{}, fmt.Errorf("ledger: %q is not a valid UUID: %w", id, err)
+		return tb.Uint128{}, fmt.Errorf("%w: %q is not a valid UUID: %w", ErrInvalidRequest, id, err)
 	}
 	return tb.BytesToUint128(u), nil
 }
 
+// requestError classifies an error tigerbeetle-go returned for a whole
+// request. ErrTooMuchData is the replica refusing the request's size, which
+// the client checks before sending anything, so it is permanent and nothing
+// was applied: it can only mean a replica configured with a smaller request
+// than BatchMax assumes. Everything else (eviction, shutdown, release
+// mismatch) is left for the caller to retry.
+func requestError(op string, err error) error {
+	if errors.Is(err, tb.ErrTooMuchData) {
+		return fmt.Errorf("ledger: %s: %w: %w", op, ErrInvalidRequest, err)
+	}
+	return fmt.Errorf("ledger: %s: %w", op, err)
+}
+
 func (c *RealClient) CreateAccounts(_ context.Context, accounts []Account) ([]AccountResult, error) {
+	if err := checkBatchSize(len(accounts)); err != nil {
+		return nil, err
+	}
 	tbAccounts := make([]tb.Account, len(accounts))
 	for i, a := range accounts {
 		id, err := idToUint128(a.ID)
@@ -93,7 +110,7 @@ func (c *RealClient) CreateAccounts(_ context.Context, accounts []Account) ([]Ac
 		}
 		ledgerID, err := LedgerID(a.Currency)
 		if err != nil {
-			return nil, fmt.Errorf("ledger: account %q: %w", a.ID, err)
+			return nil, fmt.Errorf("%w: account %q: %w", ErrInvalidRequest, a.ID, err)
 		}
 		flags := tb.AccountFlags{
 			Linked:                     a.Flags.Linked,
@@ -110,7 +127,7 @@ func (c *RealClient) CreateAccounts(_ context.Context, accounts []Account) ([]Ac
 
 	results, err := c.tb.CreateAccounts(tbAccounts)
 	if err != nil {
-		return nil, fmt.Errorf("ledger: CreateAccounts: %w", err)
+		return nil, requestError("CreateAccounts", err)
 	}
 	out := make([]AccountResult, len(results))
 	for i, r := range results {
@@ -140,6 +157,9 @@ func accountResultCode(status tb.CreateAccountStatus) AccountResultCode {
 }
 
 func (c *RealClient) CreateTransfers(_ context.Context, transfers []Transfer) ([]TransferResult, error) {
+	if err := checkBatchSize(len(transfers)); err != nil {
+		return nil, err
+	}
 	tbTransfers := make([]tb.Transfer, len(transfers))
 	for i, t := range transfers {
 		id, err := idToUint128(t.ID)
@@ -156,7 +176,7 @@ func (c *RealClient) CreateTransfers(_ context.Context, transfers []Transfer) ([
 		}
 		ledgerID, err := LedgerID(t.Currency)
 		if err != nil {
-			return nil, fmt.Errorf("ledger: transfer %q: %w", t.ID, err)
+			return nil, fmt.Errorf("%w: transfer %q: %w", ErrInvalidRequest, t.ID, err)
 		}
 
 		var pendingID tb.Uint128
@@ -189,7 +209,7 @@ func (c *RealClient) CreateTransfers(_ context.Context, transfers []Transfer) ([
 
 	results, err := c.tb.CreateTransfers(tbTransfers)
 	if err != nil {
-		return nil, fmt.Errorf("ledger: CreateTransfers: %w", err)
+		return nil, requestError("CreateTransfers", err)
 	}
 	out := make([]TransferResult, len(results))
 	for i, r := range results {
@@ -241,10 +261,12 @@ func transferResultCode(status tb.CreateTransferStatus) TransferResultCode {
 	}
 }
 
-// lookupBatchMax is how many accounts one LookupAccounts request can return:
-// TigerBeetle's 1 MiB message minus its 256-byte header, over 128 bytes per
-// Account.
-const lookupBatchMax = 8189
+// lookupBatchMax is how many accounts one LookupAccounts request can ask for
+// under `--development`'s 32 KiB request (see BatchMax): 16-byte ids after the
+// header and trailer, measured against 0.17.9. A 1 MiB production replica is
+// instead bound by its reply, 8189 128-byte Accounts; this is the smaller of
+// the two, for the same reason BatchMax is.
+const lookupBatchMax = 2031
 
 func (c *RealClient) Balances(_ context.Context, accountIDs []string) (map[string]Balance, error) {
 	// Keyed back by the caller's own spelling of each id, not a re-rendered
