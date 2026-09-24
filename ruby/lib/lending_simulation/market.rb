@@ -13,8 +13,9 @@ module LendingSimulation
   #
   # Each day, in order: Investors top up; new loans are offered; Investors
   # auto-invest into what is open; fully subscribed Securities are drawn to
-  # their Borrowers; loans due pay off and are disbursed to their holders; and
-  # now and then an Investor withdraws.
+  # their Borrowers, who withdraw the money to spend on the property; loans
+  # due pay off from a deposit of the sale's proceeds and are disbursed to
+  # their holders; and now and then an Investor withdraws.
   class Market
     Role = Types::Enums::EntityRole
 

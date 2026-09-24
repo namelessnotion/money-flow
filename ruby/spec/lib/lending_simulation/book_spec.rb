@@ -18,22 +18,20 @@ RSpec.describe LendingSimulation::Book do
     expect(book.withdrawable(7)).to eq(5_000)
   end
 
-  it 'spends and receives on the platform in cleared cash only' do
-    # Securities Transactions move cleared cash and never the real-money cash
-    # wallet a withdrawal's real leg draws on.
+  it 'spends and receives on the platform on both sides' do
+    # Every Securities money leg has a cash leg beside it (ruby/docs/adr/0009).
     book.deposit(7, 5_000)
     book.spend(7, 1_200)
     book.receive(7, 300)
 
-    expect(book.cleared(7)).to eq(4_100)
-    expect(book.withdrawable(7)).to eq(4_100)
+    expect([book.cleared(7), book.cash(7)]).to eq([4_100, 4_100])
   end
 
-  it 'lets no more leave than the cash wallet backs, however much has been received' do
-    book.deposit(7, 1_000)
-    book.receive(7, 500) # interest, say
+  it 'lets money received on the platform leave again' do
+    # A Borrower's Draw, an Investor's interest.
+    book.receive(7, 500)
 
-    expect(book.withdrawable(7)).to eq(1_000)
+    expect(book.withdrawable(7)).to eq(500)
   end
 
   it 'takes a withdrawal out of both' do

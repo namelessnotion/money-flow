@@ -7,12 +7,11 @@ module LendingSimulation
   # cleared cash gets a Subscription that rolls back, and a healthy market
   # should never cause one.
   #
-  # Two balances, because the ledger keeps two. **Cleared** is the cleared_cash
-  # wallet that every securities Transaction moves. **Cash** is the real-money
-  # wallet: only ACH moves it, and a withdrawal's real leg draws on it. So what
-  # can leave is the smaller of the two. Money received on the platform (a
-  # Draw, a Disbursement) is spendable there but cannot be withdrawn beyond
-  # what was deposited.
+  # Two balances, because the ledger keeps two sides (ruby/docs/adr/0009).
+  # **Cleared** is cleared_cash, what Funding draws on; **cash** is the
+  # real-money wallet a withdrawal's real leg draws on. Every movement here
+  # moves both, so they never part — which is exactly what the Report checks
+  # the ledger against, one side at a time.
   #
   # A mirror, not an authority: it changes only once the Transaction that
   # moved the money is seen complete, and the Report reconciles it against
@@ -34,6 +33,8 @@ module LendingSimulation
     sig { params(entity_id: Integer).returns(Integer) }
     def cash(entity_id) = @cash.fetch(entity_id, 0)
 
+    # Funding draws on cleared cash and the real leg on cash; the smaller
+    # bounds what can leave. The two are kept equal, so it is either.
     sig { params(entity_id: Integer).returns(Integer) }
     def withdrawable(entity_id) = [cleared(entity_id), cash(entity_id)].min
 
@@ -55,18 +56,22 @@ module LendingSimulation
       @cash[entity_id] = cash(entity_id) - amount_minor_units
     end
 
-    # Money paid out on the platform: a Subscription, a Repayment.
+    # Money paid out on the platform: a Subscription, a Repayment. Its money
+    # leg and cash leg take it out of both.
     sig { params(entity_id: Integer, amount_minor_units: Integer).void }
     def spend(entity_id, amount_minor_units)
       ensure_covered!(entity_id, amount_minor_units, cleared(entity_id))
       @cleared[entity_id] = cleared(entity_id) - amount_minor_units
+      @cash[entity_id] = cash(entity_id) - amount_minor_units
     end
 
     # Money received on the platform: a Draw, a Disbursement, a Subscription
-    # credited back because it did not complete.
+    # credited back because it did not complete. Into both, and so
+    # withdrawable.
     sig { params(entity_id: Integer, amount_minor_units: Integer).void }
     def receive(entity_id, amount_minor_units)
       @cleared[entity_id] = cleared(entity_id) + amount_minor_units
+      @cash[entity_id] = cash(entity_id) + amount_minor_units
     end
 
     private

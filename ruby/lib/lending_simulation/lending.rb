@@ -25,12 +25,8 @@ module LendingSimulation
       poisson(@world.profile.market.offerings_per_day).times { offer_one }
     end
 
-    # Every fully subscribed Security's escrow goes to its Borrower.
-    #
-    # The Borrower keeps it on the platform rather than withdrawing it to
-    # spend on the property: securities Transactions move cleared cash only,
-    # never the cash wallet an ACH withdrawal's real leg draws on, so drawn
-    # money cannot leave today (see Book).
+    # Every fully subscribed Security's escrow goes to its Borrower, who
+    # withdraws it to their bank to spend on the property.
     sig { void }
     def draw
       funded = @world.loans.values.select { |loan| loan.funded? && loan.drawn_day.nil? }
@@ -38,15 +34,16 @@ module LendingSimulation
 
       @world.platform.draw(funded.map(&:security_id))
       funded.each { |loan| drawn(loan) }
+      @world.withdraw(taken_to_bank(funded))
     end
 
-    # Loans due today: the Borrower deposits the interest (the sale's profit)
-    # and repays principal and interest, which is disbursed to the holders.
+    # Loans due today: the Borrower deposits the sale's proceeds — principal
+    # and interest — and repays both, which is disbursed to the holders.
     sig { void }
     def pay_off
       due = @world.loans.values.select { |loan| loan.payoff_day == @world.day }
       interest = due.to_h { |loan| [loan, interest_on(loan)] }
-      @world.deposit(owed_by_borrower(interest))
+      @world.deposit(sale_proceeds(interest))
       interest.each { |loan, amount| repay(loan, amount) }
     end
 
@@ -62,11 +59,24 @@ module LendingSimulation
                                            remaining_minor_units: terms.principal_minor_units)
     end
 
-    # What each Borrower deposits: the interest on the loans they pay off.
+    # What each Borrower takes to the bank once drawn: all of it, to spend on
+    # the property.
+    sig { params(loans: T::Array[Loan]).returns(T::Hash[Integer, Integer]) }
+    def taken_to_bank(loans) = by_borrower(loans.to_h { |loan| [loan, loan.terms.principal_minor_units] })
+
+    # What each Borrower deposits at payoff: the sale's proceeds, principal
+    # and interest on the loans they pay off.
     sig { params(interest: T::Hash[Loan, Integer]).returns(T::Hash[Integer, Integer]) }
-    def owed_by_borrower(interest)
+    def sale_proceeds(interest)
+      by_borrower(interest.to_h { |loan, amount| [loan, loan.terms.principal_minor_units + amount] })
+    end
+
+    # Per-loan amounts, summed per Borrower: one ACH entry each, and none for
+    # nothing.
+    sig { params(amounts: T::Hash[Loan, Integer]).returns(T::Hash[Integer, Integer]) }
+    def by_borrower(amounts)
       owed = Hash.new(0)
-      interest.each { |loan, amount| owed[loan.borrower_id] += amount }
+      amounts.each { |loan, amount| owed[loan.borrower_id] += amount }
       owed.select { |_id, amount| amount.positive? }
     end
 
