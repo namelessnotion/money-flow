@@ -1,6 +1,6 @@
 .PHONY: up down restart migrate ssl proto cdc-up cdc-down orchestrator-up orchestrator-down orchestrator-logs \
 	consumer-up consumer-down consumer-logs events resume resume-open jobs-up jobs-down jobs-logs clear-ach-now submit-ach-now \
-	simulate-lending
+	disburse-now simulate-lending
 
 up:
 	docker compose up -d
@@ -124,8 +124,8 @@ consumer-logs:
 	docker compose logs -f ruby-consumer
 
 # Resque worker + scheduler (ruby/config/resque_schedule.yml) and their Redis.
-# The scheduler enqueues the ACH clearing sweep hourly on weekdays; the worker
-# runs it. clear-ach-now enqueues one sweep immediately.
+# The scheduler enqueues the recurring sweeps; the worker runs them. The *-now
+# targets below enqueue one sweep immediately.
 jobs-up:
 	docker compose up -d redis resque-worker resque-scheduler
 
@@ -145,6 +145,13 @@ submit-ach-now:
 clear-ach-now:
 	docker compose exec resque-worker bundle exec ruby -e \
 	  'require "./lib/resque_boot"; ResqueBoot.load!; Resque.enqueue(Jobs::ClearAchDeposits); puts "enqueued"'
+
+# Runs the repayment disbursement sweep immediately rather than waiting up to
+# five minutes. Pays every completed Repayment not yet disbursed; to disburse
+# one Repayment, use the disburseRepaymentNow mutation (ruby/docs/adr/0007).
+disburse-now:
+	docker compose exec resque-worker bundle exec ruby -e \
+	  'require "./lib/resque_boot"; ResqueBoot.load!; Resque.enqueue(Jobs::DisburseRepayments); puts "enqueued"'
 
 # Plays out a Groundfloor-like lending market through the real stack
 # (ruby/lib/lending_simulation.rb): needs Go, the orchestrator, CDC and the

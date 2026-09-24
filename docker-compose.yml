@@ -128,7 +128,9 @@ services:
   # Resque worker for the `ach` and `securities` queues: runs
   # Jobs::SubmitAchEntries and Jobs::ClearAchDeposits, which hand entries to the
   # provider and originate clearing Transactions in Go, plus
-  # Jobs::DisburseRepayments. Same image as `ruby`. Every one of them reads the
+  # Jobs::DisburseRepayments. QUEUE must name every queue a job in
+  # ruby/app/jobs declares (`def self.queue`) — one missing here is enqueued by
+  # the scheduler and never run. Same image as `ruby`. Every one of them reads the
   # projection the consumer builds, so it needs `make cdc-up` and
   # `make consumer-up` to do anything at all.
   resque-worker:
@@ -139,7 +141,7 @@ services:
       DATABASE_URL: postgres://money_flow:money_flow@postgres:5432/money_flow_dev?sslmode=disable
       DB_HOST: postgres
       REDIS_URL: redis://redis:6379/0
-      QUEUE: ach
+      QUEUE: ach,securities
       TRANSACTION_SERVICE_URL: http://go:8080/twirp
       TRANSFER_SERVICE_URL: http://go:8080/twirp
     command: ["bundle", "exec", "rake", "resque:work"]
@@ -152,8 +154,8 @@ services:
       - ./ruby:/app
 
   # resque-scheduler: enqueues the recurring jobs in
-  # ruby/config/resque_schedule.yml (the ACH clearing sweep, hourly on
-  # weekdays, Eastern time) for resque-worker to run.
+  # ruby/config/resque_schedule.yml (ACH submission and clearing, repayment
+  # disbursement) for resque-worker to run.
   resque-scheduler:
     build:
       context: .
