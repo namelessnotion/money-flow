@@ -6,12 +6,14 @@ require_relative 'wallets'
 
 module Services
   module Securities
-    # How one Investor's fractional purchase is built: the two Transfers Go
+    # How one Investor's fractional purchase is built: the three Transfers Go
     # runs for it, and the order it runs them in.
     #
     # The **claim leg** moves claims out of the Security's Supply into the
     # Investor's `investment` account. The **money leg** moves the Investor's
-    # cleared cash into the Security's Escrow, and waits for the claim leg.
+    # cleared cash into the Security's Escrow, and its **cash leg** moves the
+    # real money behind it from the Investor's `cash` into the Security's
+    # (ruby/docs/adr/0009). Both wait for the claim leg.
     #
     # That order is the whole design (ruby/docs/adr/0006). `security_supply` is
     # the hot wallet: every concurrent purchase of this Security draws on it,
@@ -29,6 +31,10 @@ module Services
     # Had the money leg been a root, every lost race would reverse a committed
     # Investor payment instead.
     #
+    # The cash leg is the money leg's sibling rather than its child: with the
+    # two sides kept in step, an Investor with the cleared cash has the cash,
+    # so chaining them would only add a dispatch round trip.
+    #
     # The cost, stated rather than hidden: a child behind a dependency edge
     # gets no pre-flight at all, so an Investor short of cleared cash gets a
     # Transaction that initializes and then rolls back rather than one refused
@@ -40,24 +46,18 @@ module Services
       FACTORY_NAME = 'security_purchase'
       # Bumped whenever the legs or their order change, so Go's record of each
       # Transaction says which shape ran.
-      FACTORY_VERSION = '1'
+      # 1 moved cleared cash only, leaving the Investor's `cash` holding money
+      # they had spent.
+      FACTORY_VERSION = '2'
 
       AccountType = Types::Enums::AccountType
-
-      # Which wallet each side of the purchase contributes.
-      OF_SECURITY = T.let(
-        [AccountType::SecuritySupply, AccountType::SecurityEscrow].freeze, T::Array[AccountType]
-      )
-      OF_INVESTOR = T.let(
-        [AccountType::Investment, AccountType::ClearedCash].freeze, T::Array[AccountType]
-      )
 
       const :claim_transfer_id, String
       const :money_transfer_id, String
       const :supply_wallet_id, String
-      const :escrow_wallet_id, String
       const :investment_wallet_id, String
-      const :cleared_cash_wallet_id, String
+      const :investor_money, Leg::MoneyWallets
+      const :escrow_money, Leg::MoneyWallets
 
       # `accounts` is the Security's and the Investor's, concatenated — each
       # scope is resolved separately, so neither can answer for the other.
@@ -71,16 +71,13 @@ module Services
         ).returns(PurchaseShape)
       end
       def self.for(security:, investor_entity_id:, accounts:, claim_transfer_id:, money_transfer_id:)
-        # Safe to merge the two scopes' answers: no type appears in both, and
-        # each was resolved against only the accounts that belong to it.
-        wallets = Wallets.of_security(security.id, OF_SECURITY, accounts)
-                         .merge(Wallets.of_entity(investor_entity_id, OF_INVESTOR, accounts))
-
         new(claim_transfer_id: claim_transfer_id, money_transfer_id: money_transfer_id,
-            supply_wallet_id: wallets.fetch(AccountType::SecuritySupply),
-            escrow_wallet_id: wallets.fetch(AccountType::SecurityEscrow),
-            investment_wallet_id: wallets.fetch(AccountType::Investment),
-            cleared_cash_wallet_id: wallets.fetch(AccountType::ClearedCash))
+            supply_wallet_id: Wallets.of_security(security.id, [AccountType::SecuritySupply], accounts)
+                                     .fetch(AccountType::SecuritySupply),
+            investment_wallet_id: Wallets.of_entity(investor_entity_id, [AccountType::Investment], accounts)
+                                         .fetch(AccountType::Investment),
+            investor_money: Wallets.money_of_entity(investor_entity_id, accounts),
+            escrow_money: Wallets.money_of_security(security.id, AccountType::SecurityEscrow, accounts))
       end
 
       sig { params(transaction_id: String, amount_minor_units: Integer).returns(T.untyped) }
@@ -89,26 +86,25 @@ module Services
           id: transaction_id,
           factory_name: FACTORY_NAME,
           factory_version: FACTORY_VERSION,
-          transfers: {
-            claim_transfer_id => claim_leg(amount_minor_units),
-            money_transfer_id => money_leg(amount_minor_units)
-          },
-          transfer_dependency: Leg.after(money_transfer_id, claim_transfer_id)
+          transfers: transfers(amount_minor_units),
+          transfer_dependency: Leg.after(Leg.money_ids(money_transfer_id), claim_transfer_id)
         )
       end
 
       private
 
+      sig { params(amount_minor_units: Integer).returns(T::Hash[String, T.untyped]) }
+      def transfers(amount_minor_units)
+        { claim_transfer_id => claim_leg(amount_minor_units) }.merge(
+          Leg.money(id: money_transfer_id, amount_minor_units: amount_minor_units,
+                    from: investor_money, to: escrow_money)
+        )
+      end
+
       sig { params(amount_minor_units: Integer).returns(T.untyped) }
       def claim_leg(amount_minor_units)
         Leg.transfer(id: claim_transfer_id, amount_minor_units: amount_minor_units,
                      from: supply_wallet_id, to: investment_wallet_id)
-      end
-
-      sig { params(amount_minor_units: Integer).returns(T.untyped) }
-      def money_leg(amount_minor_units)
-        Leg.transfer(id: money_transfer_id, amount_minor_units: amount_minor_units,
-                     from: cleared_cash_wallet_id, to: escrow_wallet_id)
       end
     end
   end

@@ -30,7 +30,8 @@ module Services
     #
     # Disbursing it to the holders is not this service's job: that is a sweep,
     # one Transaction per holder (ruby/docs/adr/0007). The Borrower gets the
-    # cleared cash to pay from the ordinary way — an ACH deposit that cleared.
+    # money to pay from the ordinary way — an ACH deposit that cleared — or
+    # keeps drawn money on the platform to repay from.
     class RecordRepayment < BaseService
       # A Repayment in one of these states moved nothing, so its principal is
       # not spoken for.

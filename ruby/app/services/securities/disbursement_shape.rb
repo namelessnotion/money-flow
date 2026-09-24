@@ -14,7 +14,10 @@ module Services
     # mirror, which is what brings that control wallet's standing negative back
     # towards zero as a Security is repaid. The **payout leg** moves principal
     # plus interest from the Security's repayment wallet into the Investor's
-    # cleared cash, and waits for the retirement leg.
+    # cleared cash, and its **cash leg** moves the real money behind it from
+    # the Security's cash into the Investor's (ruby/docs/adr/0009) — without
+    # which an Investor could never withdraw what they earned. Both wait for
+    # the retirement leg.
     #
     # The exact mirror of a purchase, for the same reason: the claim is the
     # scarce, ledger-enforced thing. `investment` permits neither direction, so
@@ -24,8 +27,9 @@ module Services
     # leg Go's accept-time pre-flight can see, since the other is gated.
     #
     # **An interest-only Repayment retires nothing, so it has no retirement leg
-    # at all** and the payout leg becomes the root. The leg is absent rather
-    # than zero, and that was once the difference between survivable and not:
+    # at all** and the payout leg and its cash leg become roots. The leg is
+    # absent rather than zero, and that was once the difference between
+    # survivable and not:
     # Go turned a zero-amount Transfer into a transport error the saga
     # swallowed, stranding the Transaction in Started with nothing to explain
     # it. Go now refuses such a leg at accept time instead, as one recorded
@@ -36,15 +40,16 @@ module Services
       FACTORY_NAME = 'security_disbursement'
       # Bumped whenever the legs or their order change, so Go's record of each
       # Transaction says which shape ran.
-      FACTORY_VERSION = '1'
+      # 1 paid cleared cash only, so an Investor could never withdraw it.
+      FACTORY_VERSION = '2'
 
       AccountType = Types::Enums::AccountType
 
       const :payout_transfer_id, String
       const :investment_wallet_id, String
       const :control_wallet_id, String
-      const :repayment_wallet_id, String
-      const :cleared_cash_wallet_id, String
+      const :repayment_money, Leg::MoneyWallets
+      const :investor_money, Leg::MoneyWallets
       # Absent when no principal is repaid; see the class comment.
       const :retirement_transfer_id, T.nilable(String)
 
@@ -61,22 +66,19 @@ module Services
       end
       def self.for(security:, investor_entity_id:, accounts:, payout_transfer_id:, retirement_transfer_id:)
         of_issuer = Wallets.of_entity(security.issuer_entity_id, [AccountType::IssuerControl], accounts)
-        of_security = Wallets.of_security(security.id, [AccountType::SecurityRepayment], accounts)
-        of_investor = Wallets.of_entity(
-          investor_entity_id, [AccountType::Investment, AccountType::ClearedCash], accounts
-        )
+        of_investor = Wallets.of_entity(investor_entity_id, [AccountType::Investment], accounts)
 
         new(payout_transfer_id: payout_transfer_id, retirement_transfer_id: retirement_transfer_id,
             investment_wallet_id: of_investor.fetch(AccountType::Investment),
-            cleared_cash_wallet_id: of_investor.fetch(AccountType::ClearedCash),
             control_wallet_id: of_issuer.fetch(AccountType::IssuerControl),
-            repayment_wallet_id: of_security.fetch(AccountType::SecurityRepayment))
+            repayment_money: Wallets.money_of_security(security.id, AccountType::SecurityRepayment, accounts),
+            investor_money: Wallets.money_of_entity(investor_entity_id, accounts))
       end
 
       # `principal_minor_units` is what this holder gets back of what they lent;
-      # `interest_minor_units` is what they earned on it. The payout leg moves
-      # both together — the split is recorded on the `disbursements` row rather
-      # than in the ledger.
+      # `interest_minor_units` is what they earned on it. The payout leg and its
+      # cash leg each move both together — the split is recorded on the
+      # `disbursements` row rather than in the ledger.
       sig do
         params(transaction_id: String, principal_minor_units: Integer, interest_minor_units: Integer)
           .returns(T.untyped)
@@ -93,8 +95,9 @@ module Services
           factory_version: FACTORY_VERSION,
           transfers: transfers(payout, principal_minor_units, retirement),
           # With no principal to retire there is nothing to wait for, so the
-          # payout leg is the root and gets the pre-flight itself.
-          transfer_dependency: retirement ? Leg.after(payout_transfer_id, retirement) : {}
+          # payout leg and its cash leg are roots and get the pre-flight
+          # themselves.
+          transfer_dependency: retirement ? Leg.after(Leg.money_ids(payout_transfer_id), retirement) : {}
         )
       end
 
@@ -122,10 +125,8 @@ module Services
           .returns(T::Hash[String, T.untyped])
       end
       def transfers(payout, principal_minor_units, retirement)
-        legs = {
-          payout_transfer_id => Leg.transfer(id: payout_transfer_id, amount_minor_units: payout,
-                                             from: repayment_wallet_id, to: cleared_cash_wallet_id)
-        }
+        legs = Leg.money(id: payout_transfer_id, amount_minor_units: payout,
+                         from: repayment_money, to: investor_money)
         return legs unless retirement
 
         legs.merge(

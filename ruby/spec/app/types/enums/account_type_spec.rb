@@ -8,7 +8,8 @@ RSpec.describe Types::Enums::AccountType do
     # strings are persisted in accounts.type and sent as a Wallet's name.
     expect(described_class.values.map(&:serialize)).to contain_exactly(
       'bank', 'bank_control', 'debit_card', 'uncleared_cash', 'cleared_cash', 'cash', 'gain', 'loss',
-      'investment', 'issuer_control', 'security_supply', 'security_escrow', 'security_repayment'
+      'investment', 'issuer_control', 'security_supply', 'security_escrow', 'security_repayment',
+      'security_cash'
     )
   end
 
@@ -33,6 +34,13 @@ RSpec.describe Types::Enums::AccountType do
       # what refuses an oversubscription once the minted supply is exhausted.
       expect(described_class::SecuritySupply.allows).to eq(:ALLOWS_NONE)
       expect(described_class::Investment.allows).to eq(:ALLOWS_NONE)
+    end
+
+    it "never lets a Security's cash pay out more real money than was paid into it" do
+      # The cash-side twin of escrow and repayment: a Draw or Disbursement
+      # whose cash leg would overdraw it is refused, just as its cleared side
+      # would be.
+      expect(described_class::SecurityCash.allows).to eq(:ALLOWS_NONE)
     end
 
     it 'permits neither direction for everything else' do
@@ -94,7 +102,8 @@ RSpec.describe Types::Enums::AccountType do
       # Those are opened per Security by Services::Securities::IssueOffering,
       # and accounts_security_scoped_types refuses one with no security_id.
       scoped = [
-        described_class::SecuritySupply, described_class::SecurityEscrow, described_class::SecurityRepayment
+        described_class::SecuritySupply, described_class::SecurityEscrow, described_class::SecurityRepayment,
+        described_class::SecurityCash
       ]
 
       Types::Enums::EntityRole.each_value do |role|

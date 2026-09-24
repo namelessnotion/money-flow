@@ -36,12 +36,12 @@ RSpec.describe Services::Securities::IssueOffering do
     expect(security.issuer_entity_id).to eq(issuer.id)
   end
 
-  it "opens the Security's three wallets on its Issuer's holder" do
+  it "opens the Security's four wallets on its Issuer's holder" do
     security = issue
     accounts = Models::Account.where(security_id: security.id).all
 
     expect(accounts.map(&:type))
-      .to contain_exactly('security_supply', 'security_escrow', 'security_repayment')
+      .to contain_exactly('security_supply', 'security_escrow', 'security_repayment', 'security_cash')
     expect(accounts.map(&:entity_id).uniq).to eq([issuer.id])
   end
 
@@ -72,7 +72,7 @@ RSpec.describe Services::Securities::IssueOffering do
     # ALLOWS_NONE is what gives the supply Token debits_must_not_exceed_credits,
     # which is the oversubscription control.
     expect(allows).to eq('security_supply' => :ALLOWS_NONE, 'security_escrow' => :ALLOWS_NONE,
-                         'security_repayment' => :ALLOWS_NONE)
+                         'security_repayment' => :ALLOWS_NONE, 'security_cash' => :ALLOWS_NONE)
     expect(sent.wallets.map(&:wallet_id))
       .to match_array(Models::Account.where(security_id: security.id).all.map(&:wallet_uuid))
   end

@@ -25,6 +25,17 @@ The Transfer that records the same movement in the clearing accounts: `bank_cont
 deposit, `cleared_cash → bank_control` on a withdrawal. On a deposit it depends on the real leg, and runs only
 once the real leg has posted. On a withdrawal it runs first: see *Funding*.
 
+**Cash side** and **cleared side**
+The two sides of the ledger every party keeps money on. The cash side is the real money the platform holds
+for a party: an entity's `cash`, or a Security's **Security cash**. The cleared side says how much of it may
+be spent: an entity's `uncleared_cash` and `cleared_cash`, or a Security's Escrow and Repayment wallets. A
+real leg moves the cash side and a shadow leg moves the cleared side. Anything that moves money between two
+parties inside the platform moves both by the same amount, so an entity's `cash` never holds less than its
+cleared cash, and a withdrawal that is funded can always be paid
+([ADR 0009](docs/adr/0009-securities-money-moves-cash-too.md)).
+
+_Avoid_: reading both sides of one party as two amounts of money. They are the same money, seen twice.
+
 **Funding**
 A withdrawal's shadow leg, which moves its amount out of cleared cash into bank control before the real leg
 is even staged. Without enough cleared cash the whole Transaction is refused outright before anything reaches
@@ -115,27 +126,40 @@ The Transfer moving claims out of a Security's Supply into the Investor's `inves
 of a Subscription's DAG and runs first, so an oversubscription is settled before any Investor money moves.
 
 **Money leg**
-The Transfer moving the Investor's cleared cash into the Security's **Escrow**. It waits for the claim leg,
-and so is never pre-flighted: a shortfall surfaces as a Transaction that initialized and then rolled back,
-which `Purchase` learns by resuming it.
+In a Securities Transaction, the Transfer that moves money on the cleared side. For a Subscription it moves
+the Investor's cleared cash into the Security's **Escrow**. It waits for the claim leg, so it is never
+pre-flighted: a shortfall shows up as a Transaction that initialized and then rolled back, which the
+projection reports.
+
+**Cash leg**
+The Transfer beside every money leg: the same amount, between the same two parties, on the cash side. Its
+id is derived from its money leg's, and it has the same parents in the DAG. `Leg.money` builds the two
+together, and never one alone.
+
+_Avoid_: "real leg" for the cash leg. A real leg crosses the bank boundary, and no Securities leg does.
 
 **Escrow**
 Investor money a Security holds between purchase and **Draw**, in its `security_escrow` Wallet.
 
+**Security cash**
+The real money a Security holds, in its `security_cash` Wallet: the cash side of its Escrow and its
+Repayment wallet together. It always equals the two combined. It is one Wallet rather than two, because
+Escrow and Repayment already keep each phase's money apart.
+
 **Draw**
-Moving a fully-subscribed Security's escrowed money to the Borrower's cleared cash. Its own Go Transaction
-(`security_draw`), started by an operator rather than by a Subscription completing — nothing in the platform
-reacts to one. Getting that money to a real bank is an ordinary ACH withdrawal from the Borrower's own cleared
-cash; the Draw does not cross the bank boundary.
+Moving a fully-subscribed Security's escrowed money to the Borrower, on both sides: Escrow to the Borrower's
+cleared cash, and Security cash to the Borrower's `cash`. Its own Go Transaction (`security_draw`), started by
+an operator rather than by a Subscription completing — nothing in the platform reacts to one. Getting that
+money to a real bank is an ordinary ACH withdrawal; the Draw does not cross the bank boundary.
 
 _Avoid_: "disbursement" for the Draw — that word is the Investor side. _Avoid_ "funding": that is already the
 ACH withdrawal's word.
 
 **Repayment**
 One payment from the Borrower into a Security, split into a principal portion and an interest portion. Its own
-Go Transaction (`security_repayment`) with one leg, which collects both as a single amount — the split is a
-business fact, recorded on the row where the Allocation reads it. The Borrower gets the cleared cash to pay
-from the ordinary way: an ACH deposit that has cleared.
+Go Transaction (`security_repayment`) with a money leg and its cash leg, each collecting both parts as a
+single amount — the split is a business fact, recorded on the row where the Allocation reads it. The Borrower
+pays from money on the platform: drawn money they kept, or an ACH deposit that has cleared.
 
 **Interest**
 Simple interest on outstanding principal, actual/365, at the Security's rate in basis points, accruing from the
@@ -159,7 +183,7 @@ to exactly the Repayment and the same Repayment always splits the same way
 
 **Disbursement**
 One holder's share of one Repayment: a Go Transaction (`security_disbursement`) that retires that much of their
-claim and pays them the money. One per holder, never a fan-out across all of them, originated by a scheduled
+claim and pays them the money, on both sides, so they can withdraw it. One per holder, never a fan-out across all of them, originated by a scheduled
 sweep with an id derived from the Repayment and the Investor.
 
 _Avoid_: "payout" alone — a Disbursement retires a claim as well as paying money, and forgetting the retirement

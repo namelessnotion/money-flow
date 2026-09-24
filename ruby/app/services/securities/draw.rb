@@ -29,8 +29,10 @@ module Services
     # Ruby through the projection like every other lifecycle fact
     # (go/docs/adr/0006). Services::Securities::Stage is where it shows up.
     #
-    # Getting that money out to a real bank is an ordinary ACH withdrawal from
-    # the Borrower's own cleared cash. The Draw does not cross the boundary.
+    # Getting that money out to a real bank is an ordinary ACH withdrawal. The
+    # Draw does not cross the boundary, but it moves the Borrower's `cash` as
+    # well as their cleared cash, which is what that withdrawal's real leg
+    # draws on (ruby/docs/adr/0009).
     class Draw < BaseService
       sig { params(gateway: GoGateway).void }
       def initialize(gateway: GoGateway.new)

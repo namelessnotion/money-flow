@@ -2,6 +2,7 @@
 # typed: strict
 
 require_relative 'errors'
+require_relative 'leg'
 
 module Services
   module Securities
@@ -10,7 +11,7 @@ module Services
     # Go moves value between.
     #
     # Two scopes, because accounts come in two kinds now: an entity's own
-    # (security_id null) and a Security's three (security_id set). They share a
+    # (security_id null) and a Security's four (security_id set). They share a
     # table and, for a Security and its Issuer, a Holder — so a lookup that did
     # not say which it meant could answer with the wrong one. That is the whole
     # reason the security_id column exists, and the reason this does not reuse
@@ -41,6 +42,28 @@ module Services
       def self.of_entity(entity_id, needed, accounts)
         in_scope = accounts.select { |account| account.security_id.nil? && account.entity_id == entity_id }
         resolve(needed, in_scope, "entity #{entity_id}")
+      end
+
+      # Where the named entity holds money: its cleared cash, and the cash
+      # behind it.
+      sig { params(entity_id: Integer, accounts: T::Array[Models::Account]).returns(Leg::MoneyWallets) }
+      def self.money_of_entity(entity_id, accounts)
+        wallets = of_entity(entity_id, [AccountType::ClearedCash, AccountType::Cash], accounts)
+        Leg::MoneyWallets.new(cleared: wallets.fetch(AccountType::ClearedCash), cash: wallets.fetch(AccountType::Cash))
+      end
+
+      # Where the named Security holds money for one purpose — `held_in` is
+      # its escrow or its repayment wallet — and the cash behind it. The one
+      # security_cash stands behind both, because the purpose wallets already
+      # keep escrowed money from paying a Disbursement; the cash side only has
+      # to say how much real money the Security holds.
+      sig do
+        params(security_id: String, held_in: AccountType, accounts: T::Array[Models::Account])
+          .returns(Leg::MoneyWallets)
+      end
+      def self.money_of_security(security_id, held_in, accounts)
+        wallets = of_security(security_id, [held_in, AccountType::SecurityCash], accounts)
+        Leg::MoneyWallets.new(cleared: wallets.fetch(held_in), cash: wallets.fetch(AccountType::SecurityCash))
       end
 
       # The wallet backing each of the `needed` types among `accounts` that

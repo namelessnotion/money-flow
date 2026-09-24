@@ -60,10 +60,11 @@ module SecuritiesWorld
     World.new(issuer: issuer, borrower: borrower, investor: investor, security: security)
   end
 
-  # The three Wallets an offering opens, on its Issuer's Holder.
+  # The Wallets an offering opens, on its Issuer's Holder — the same list
+  # Services::Securities::IssueOffering opens, so the two cannot drift.
   def open_security_wallets(issuer, security)
-    %w[security_supply security_escrow security_repayment].each do |type|
-      create(:account, entity: issuer, security: security, type: type)
+    Services::Securities::IssueOffering::WALLETS.each do |type|
+      create(:account, entity: issuer, security: security, type: type.serialize)
     end
   end
 end

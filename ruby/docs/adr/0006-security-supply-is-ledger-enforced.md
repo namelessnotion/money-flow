@@ -77,6 +77,11 @@ all.
    repays from cleared cash; reaching a real bank is the existing ACH withdrawal and ACH deposit-plus-clearing.
    Nothing here stages, so a Transaction runs to completion inside the call that starts it.
 
+   > **Amended 2026-09-23: the boundary claim holds, but the reachability claim did not.** These shapes moved
+   > cleared cash only, and an ACH withdrawal's real leg draws on `cash`. So a Borrower could not withdraw a
+   > Draw, and an Investor could not withdraw a Disbursement. [ADR 0009](0009-securities-money-moves-cash-too.md)
+   > gives every money leg a cash leg and gives each Security a `security_cash` Wallet.
+
 10. **The Draw is operator-initiated**, not a reaction to the last Subscription completing. See ADR 0007 for
     what that buys.
 

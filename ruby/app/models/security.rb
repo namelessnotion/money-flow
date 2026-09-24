@@ -13,7 +13,7 @@ module Models
     many_to_one :issuer, class: 'Models::Entity', key: :issuer_entity_id
     many_to_one :borrower, class: 'Models::Entity', key: :borrower_entity_id
 
-    # The Security's own three wallets. Its Issuer's accounts are not among
+    # The Security's own four wallets. Its Issuer's accounts are not among
     # them — those hang off the entity, with a null security_id.
     one_to_many :accounts
 
