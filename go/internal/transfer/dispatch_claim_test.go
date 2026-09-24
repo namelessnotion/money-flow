@@ -14,7 +14,6 @@ import (
 	pb "github.com/namelessnotion/money_flow/go/gen/proto/transfer/v1"
 	"github.com/namelessnotion/money_flow/go/internal/eventstore"
 	"github.com/namelessnotion/money_flow/go/internal/ledger"
-	"github.com/namelessnotion/money_flow/go/internal/operation"
 	"github.com/namelessnotion/money_flow/go/internal/testutil"
 )
 
@@ -153,10 +152,10 @@ func seedPreparedTransfer(t *testing.T, ctx context.Context, s *Server, store ev
 // the claim, this test's barrier makes that race certain instead of
 // occasional, and the second submitBatch call would legitimately be
 // rejected as a duplicate reservation, driving one goroutine into
-// compensate() -> operation.Fail() while the other's already-in-flight
-// operation.Stage() lands on an Operation operation/server.go now refuses
-// to also mark Staged — exactly the "already operation.v1.Failed, cannot
-// also become operation.v1.Staged" halt this session's stress test hit.
+// compensate() (TransferFailed) while the other's already-in-flight stage()
+// goes on to record TransferStaged — exactly the "already Failed, cannot
+// also become Staged" halt go/docs/adr/0005's stress test hit, which
+// appendSagaStep's transitions guard now refuses on the Transfer itself.
 func TestStage_ConcurrentDispatchConvergesWithoutDoubleSubmission(t *testing.T) {
 	t.Parallel()
 	base := eventstore.NewMemoryStore()
@@ -351,17 +350,18 @@ func TestStage_OrphanedClaimDoesNotBlockRetry(t *testing.T) {
 // stream *after* a marker has landed (but before its winner has finished)
 // used to see the same pre-claim coarse state and win an independent claim
 // on the *next* sequence slot — racing the still-in-flight first one
-// against the same Operations. Concretely: CancelAcceptedTransfer wins
+// against the same legs. Concretely: CancelAcceptedTransfer wins
 // CancellingPreparedTransferStarted; every event on a Transfer's own stream
 // — including that marker itself — is published to transfer-events
 // (go/docs/adr/0001), so the orchestrator's Resume fires on it and used to
-// win a fresh StagingTransferStarted claim and call operation.Stage while
-// the cancel was still running: the exact "already Cancelled, cannot also
-// become Staged" contradiction this decision exists to prevent.
+// win a fresh StagingTransferStarted claim and reserve every leg in
+// TigerBeetle while the cancel was still running: the exact "already
+// Cancelled, cannot also become Staged" contradiction this decision exists
+// to prevent.
 //
 // This test seeds that in-flight marker directly (standing in for "the
-// cancel RPC's claim landed but operation.Cancel/appendSagaStep haven't run
-// yet") and calls stage() concurrently — simulating the re-entrant Resume —
+// cancel RPC's claim landed but its appendSagaStep hasn't run yet") and
+// calls stage() concurrently — simulating the re-entrant Resume —
 // asserting it blocks in claimForDispatch rather than taking its own claim,
 // never touches TigerBeetle, and converges to whatever the in-flight
 // caller's real resolution turns out to be once that lands.
@@ -418,18 +418,8 @@ func TestStage_DoesNotRaceAFreshInFlightClaimFromADifferentTransition(t *testing
 	}
 
 	// Now let the cancel actually finish, the way cancelPrepared() itself
-	// would: cancel every Operation, then append the terminal event.
-	legs, _, err := server.loadLegs(ctx, transferID)
-	if err != nil {
-		t.Fatalf("loadLegs() error = %v", err)
-	}
-	if err := forEachOperation(legs, func(operationID string) error {
-		_, err := operation.Cancel(ctx, store, operationID, "test")
-		return err
-	}); err != nil {
-		t.Fatalf("operation.Cancel() error = %v", err)
-	}
-	if err := server.appendSagaStep(ctx, transferID, &pb.PreparedTransferCancelled{Id: transferID}); err != nil {
+	// would: append the terminal event.
+	if err := server.appendSagaStep(ctx, transferID, &pb.PreparedTransferCancelled{Id: transferID, Reason: "test"}); err != nil {
 		t.Fatalf("appendSagaStep(PreparedTransferCancelled) error = %v", err)
 	}
 
@@ -535,17 +525,8 @@ func TestStage_SeesALiveClaimBehindAConfirmStagedTransferRejection(t *testing.T)
 		t.Fatalf("ledger.CreateTransfers called %d times while the original claim was still live, want 0", got)
 	}
 
-	// Let the original stage() finish, the way stage() itself would.
-	legs, _, err := server.loadLegs(ctx, transferID)
-	if err != nil {
-		t.Fatalf("loadLegs() error = %v", err)
-	}
-	if err := forEachOperation(legs, func(operationID string) error {
-		_, err := operation.Stage(ctx, store, operationID)
-		return err
-	}); err != nil {
-		t.Fatalf("operation.Stage() error = %v", err)
-	}
+	// Let the original stage() finish, the way stage() itself would once its
+	// reservations landed.
 	if err := server.appendSagaStep(ctx, transferID, &pb.TransferStaged{Id: transferID}); err != nil {
 		t.Fatalf("appendSagaStep(TransferStaged) error = %v", err)
 	}
@@ -737,7 +718,7 @@ func seedAbandonedClaim(t *testing.T, store eventstore.Store, lc ledger.Client, 
 
 // An abandoned claim can only be taken over by the same transition
 // (go/docs/adr/0005): the crashed winner may have already half-applied its
-// step — some Operations Cancelled, say — and a different transition's side
+// step — some chains voided in TigerBeetle, say — and a different transition's side
 // effects on top of that are the contradiction this decision prevents.
 // stage() over an abandoned cancel claim must refuse, loudly, without
 // touching TigerBeetle or the stream.

@@ -20,7 +20,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	holderpb "github.com/namelessnotion/money_flow/go/gen/proto/holder/v1"
-	operationpb "github.com/namelessnotion/money_flow/go/gen/proto/operation/v1"
 	tokenpb "github.com/namelessnotion/money_flow/go/gen/proto/token/v1"
 	transactionpb "github.com/namelessnotion/money_flow/go/gen/proto/transaction/v1"
 	transferpb "github.com/namelessnotion/money_flow/go/gen/proto/transfer/v1"
@@ -28,14 +27,13 @@ import (
 	"github.com/namelessnotion/money_flow/go/internal/eventstore"
 	"github.com/namelessnotion/money_flow/go/internal/holder"
 	"github.com/namelessnotion/money_flow/go/internal/ledger"
-	"github.com/namelessnotion/money_flow/go/internal/operation"
 	"github.com/namelessnotion/money_flow/go/internal/saga"
 	"github.com/namelessnotion/money_flow/go/internal/token"
 	"github.com/namelessnotion/money_flow/go/internal/wallet"
 )
 
 const (
-	defaultDatabaseURL          = "postgres://money_flow:money_flow@localhost:5432/money_flow_dev?sslmode=disable"
+	defaultDatabaseURL = "postgres://money_flow:money_flow@localhost:5432/money_flow_dev?sslmode=disable"
 	// defaultDatabaseMaxConns is deliberately an explicit, environment-
 	// independent number rather than pgxpool's own default (max(4,
 	// runtime.NumCPU())): that default ties this server's throughput ceiling
@@ -141,7 +139,6 @@ func newMux(store eventstore.Store, health pinger, tb ledger.Client) *http.Serve
 	holderServer := holderpb.NewHolderServiceServer(holder.NewServer(store))
 	walletServer := walletpb.NewWalletServiceServer(wallet.NewServer(store))
 	tokenServer := tokenpb.NewTokenServiceServer(token.NewServer(store, tb))
-	operationServer := operationpb.NewOperationServiceServer(operation.NewServer(store))
 
 	// saga.Wire ties transfer and transaction to each other — transfer needs
 	// transaction's IsOpen/Exists checkers, transaction needs the transfer
@@ -155,7 +152,6 @@ func newMux(store eventstore.Store, health pinger, tb ledger.Client) *http.Serve
 	mux.Handle(holderServer.PathPrefix(), holderServer)
 	mux.Handle(walletServer.PathPrefix(), walletServer)
 	mux.Handle(tokenServer.PathPrefix(), tokenServer)
-	mux.Handle(operationServer.PathPrefix(), operationServer)
 	mux.Handle(transactionServer.PathPrefix(), transactionServer)
 	mux.Handle(transferServer.PathPrefix(), transferServer)
 

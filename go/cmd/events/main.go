@@ -1,6 +1,6 @@
 // Command events prints Go's event log as it is written, so what one request
-// sets off — an ACH Transaction's saga, its Transfers, their Operations,
-// Tokens and Wallets — can be watched as it happens.
+// sets off — an ACH Transaction's saga, its Transfers, their Tokens and
+// Wallets — can be watched as it happens.
 //
 // It reads the events table directly rather than the CDC topics, so it needs
 // only Postgres: no Debezium connector, no Kafka. It is read-only.
@@ -31,7 +31,6 @@ import (
 
 	// Linked in so every event type is registered for decoding.
 	_ "github.com/namelessnotion/money_flow/go/gen/proto/holder/v1"
-	_ "github.com/namelessnotion/money_flow/go/gen/proto/operation/v1"
 	_ "github.com/namelessnotion/money_flow/go/gen/proto/token/v1"
 	_ "github.com/namelessnotion/money_flow/go/gen/proto/transaction/v1"
 	_ "github.com/namelessnotion/money_flow/go/gen/proto/transfer/v1"
@@ -50,7 +49,7 @@ func main() {
 		last   = flag.Int64("last", 0, "start this many events back from the end of the log")
 		types  = flag.String("types", "", "comma-separated aggregate types to show, e.g. transaction,transfer")
 		id     = flag.String("id", "", "show only aggregates whose id contains this fragment")
-		follow = flag.String("follow", "", "show one Transaction with its Transfers, Operations and Reversals, "+
+		follow = flag.String("follow", "", "show one Transaction with its Transfers and Reversals, "+
 			"from its first event unless -from or -last says otherwise")
 		asJSON   = flag.Bool("json", false, "print one JSON object per event")
 		payload  = flag.Bool("payload", true, "show each event's decoded payload")

@@ -27,7 +27,6 @@ var idColors = []string{"\x1b[33m", "\x1b[34m", "\x1b[35m", "\x1b[36m", "\x1b[91
 var typeColors = map[string]string{
 	"transaction": "\x1b[1;35m",
 	"transfer":    "\x1b[1;36m",
-	"operation":   "\x1b[34m",
 	"token":       "\x1b[33m",
 	"wallet":      "\x1b[32m",
 	"holder":      "\x1b[37m",

@@ -41,9 +41,8 @@ func abortedRetry(transactionID string) error {
 
 // transferClient is a narrow interface over exactly the transfer.Server
 // methods the saga drives, called in-process as plain Go — never over
-// Twirp/HTTP, the same reason transfer/saga.go calls
-// operation.Stage/Perform/Cancel/Fail directly instead of through
-// operation.Server's RPC surface. ConfirmStagedTransfer/PostPendingTransfer
+// Twirp/HTTP: an in-process call within one bounded context needs no wire
+// format. ConfirmStagedTransfer/PostPendingTransfer
 // are deliberately absent: ruby calls those directly on a staged child's own
 // id, and the Transfer events they write are what wake the owning Transaction
 // (see saga.Orchestrator's handleTransfer) — never through Transaction.
