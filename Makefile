@@ -1,6 +1,6 @@
 .PHONY: up down restart migrate ssl proto cdc-up cdc-down orchestrator-up orchestrator-down orchestrator-logs \
 	consumer-up consumer-down consumer-logs events resume resume-open jobs-up jobs-down jobs-logs clear-ach-now submit-ach-now \
-	disburse-now simulate-lending
+	disburse-now simulate simulate-lending
 
 up:
 	docker compose up -d
@@ -152,6 +152,14 @@ clear-ach-now:
 disburse-now:
 	docker compose exec resque-worker bundle exec ruby -e \
 	  'require "./lib/resque_boot"; ResqueBoot.load!; Resque.enqueue(Jobs::DisburseRepayments); puts "enqueued"'
+
+# Benchmarks the Go backend under load and then checks the ledger balances
+# (go/cmd/simulate): needs the orchestrator and CDC up, since nothing settles
+# without them. Runs in the go container, as it links TigerBeetle's native
+# client. Pass flags through ARGS, e.g.
+#   make simulate ARGS="-entities 150 -transactions 2000 -concurrency 32 -seed 42"
+simulate:
+	docker compose exec -T go go run ./cmd/simulate $(ARGS)
 
 # Plays out a Groundfloor-like lending market through the real stack
 # (ruby/lib/lending_simulation.rb): needs Go, the orchestrator, CDC and the
