@@ -19,9 +19,9 @@ import (
 // first; shadow (a never-provisioned Bank Control Wallet -> Uncleared,
 // mint_source) is rejected at accept time (mint_source skips the balance
 // check, so a not-found Wallet is the realistic failure here). Rollback
-// must trigger automatically, abandon shadow (never requested), and
-// reverse real — all synchronously within the one StartInitializingTransaction
-// call, since nothing here is staged.
+// must trigger automatically and reverse real. Shadow moved no money, so its
+// failure is all there is to record about it: nothing rolls it back
+// (go/docs/adr/0013).
 func TestMidDAGFailure_TriggersReverseTopologicalRollback(t *testing.T) {
 	t.Parallel()
 	store := eventstore.NewMemoryStore()
@@ -68,17 +68,13 @@ func TestMidDAGFailure_TriggersReverseTopologicalRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("foldChildStates() error = %v", err)
 	}
-	if children[shadowID] != childRolledBack {
-		t.Fatalf("shadow child state = %v, want rolled_back", children[shadowID])
+	if children[shadowID] != childFailed {
+		t.Fatalf("shadow child state = %v, want failed: it moved no money, so nothing rolls it back", children[shadowID])
 	}
 	if children[realID] != childRolledBack {
 		t.Fatalf("real child state = %v, want rolled_back", children[realID])
 	}
 
-	shadowMethod, _ := rolledBackMethod(t, events, shadowID)
-	if shadowMethod != pb.RollbackMethod_ROLLBACK_METHOD_ABANDONED {
-		t.Errorf("shadow rollback method = %v, want ABANDONED (never requested)", shadowMethod)
-	}
 	realMethod, realReversalID := rolledBackMethod(t, events, realID)
 	if realMethod != pb.RollbackMethod_ROLLBACK_METHOD_REVERSED {
 		t.Errorf("real rollback method = %v, want REVERSED", realMethod)
@@ -194,8 +190,8 @@ func TestRollbackFailure_ReachesTransactionRollbackFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("foldChildStates() error = %v", err)
 	}
-	if children[failID] != childRolledBack {
-		t.Errorf("fail child state = %v, want rolled_back (abandoned; still resolved despite the other child being stuck)", children[failID])
+	if children[failID] != childFailed {
+		t.Errorf("fail child state = %v, want failed (resolved by its own failure, despite the other child being stuck)", children[failID])
 	}
 	if children[realID] != childRollbackFailed {
 		t.Errorf("real child state = %v, want rollback_failed", children[realID])

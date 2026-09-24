@@ -8,9 +8,11 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	pb "github.com/namelessnotion/money_flow/go/gen/proto/transaction/v1"
+	transferpb "github.com/namelessnotion/money_flow/go/gen/proto/transfer/v1"
 	"github.com/namelessnotion/money_flow/go/internal/eventstore"
 	"github.com/namelessnotion/money_flow/go/internal/ledger"
 	"github.com/namelessnotion/money_flow/go/internal/testutil"
+	"github.com/namelessnotion/money_flow/go/internal/transfer"
 )
 
 // seedInitialized writes spec's TransactionInitialized straight onto the
@@ -59,14 +61,17 @@ func independentRoots(n int) map[string]*pb.Transfer {
 	return out
 }
 
-// requestedAndFailed seeds childID as a child that was requested and failed
-// on its own. It moved no money, so rolling it back is one append to
-// ABANDONED that reaches into no transferClient.
-func requestedAndFailed(txnID, childID string) []proto.Message {
-	return []proto.Message{
-		&pb.TransferRequestedWithinTransaction{Id: txnID, TransferId: childID},
-		&pb.TransferFailedWithinTransaction{Id: txnID, TransferId: childID, Reason: "seeded as failed"},
+// requestedAndRejected seeds childID as a child the Transaction requested and
+// whose Transfer was rejected, without the Transaction having recorded that
+// yet. Rolling it back reads the rejection off the Transfer's own stream and
+// records ABANDONED: one append, reaching into no transferClient.
+func requestedAndRejected(t *testing.T, store eventstore.Store, txnID, childID string) []proto.Message {
+	t.Helper()
+	if err := store.Append(context.Background(), transfer.AggregateType, childID, 0,
+		&transferpb.TransferRequestRejected{Id: childID, Reason: "seeded as rejected"}); err != nil {
+		t.Fatalf("seed rejected transfer %s: %v", childID, err)
 	}
+	return []proto.Message{&pb.TransferRequestedWithinTransaction{Id: txnID, TransferId: childID}}
 }
 
 func childrenOf(t *testing.T, store eventstore.Store, txnID string) map[string]childState {
@@ -244,13 +249,13 @@ func TestRollbackNext_NeverReportsFailedWhileAChildCouldStillBeReversed(t *testi
 		specs := independentRoots(slicedChildren)
 		seedInitialized(t, store, txnID, specs)
 
-		// Every child failed on its own (so rolling one back is an append to
-		// ABANDONED and needs no transferClient), and all but one is already
+		// Every child's Transfer was rejected (so rolling one back is an append
+		// to ABANDONED and needs no transferClient), and all but one is already
 		// stuck.
 		var reversible string
 		seeded := []proto.Message{&pb.TransactionStarted{Id: txnID}}
 		for childID := range specs {
-			seeded = append(seeded, requestedAndFailed(txnID, childID)...)
+			seeded = append(seeded, requestedAndRejected(t, store, txnID, childID)...)
 		}
 		seeded = append(seeded, &pb.TransactionRollbackStarted{Id: txnID, Reason: "seeded"})
 		for childID := range specs {
@@ -342,14 +347,14 @@ func TestRollbackNext_StopsAtTheSliceBoundary(t *testing.T) {
 	specs := independentRoots(slicedChildren)
 	seedInitialized(t, store, txnID, specs)
 
-	// Failed children moved no money, so rolling one back is an append to
+	// Rejected children moved no money, so rolling one back is an append to
 	// ABANDONED and reaches into no transferClient — which is what lets this
 	// count slices without a ledger.
 	seeded := []proto.Message{
 		&pb.TransactionStarted{Id: txnID},
 	}
 	for childID := range specs {
-		seeded = append(seeded, requestedAndFailed(txnID, childID)...)
+		seeded = append(seeded, requestedAndRejected(t, store, txnID, childID)...)
 	}
 	seeded = append(seeded, &pb.TransactionRollbackStarted{Id: txnID, Reason: "seeded"})
 	appendAll(t, store, txnID, seeded...)
@@ -394,7 +399,7 @@ func TestRollbackNext_SlicedRollbackCompletesAcrossResumes(t *testing.T) {
 
 	seeded := []proto.Message{&pb.TransactionStarted{Id: txnID}}
 	for childID := range specs {
-		seeded = append(seeded, requestedAndFailed(txnID, childID)...)
+		seeded = append(seeded, requestedAndRejected(t, store, txnID, childID)...)
 	}
 	seeded = append(seeded, &pb.TransactionRollbackStarted{Id: txnID, Reason: "seeded"})
 	appendAll(t, store, txnID, seeded...)

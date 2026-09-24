@@ -318,23 +318,27 @@ func (s *Server) appendSagaStep(ctx context.Context, transactionID string, event
 		return nil
 	}
 
-	// A child's outcome that decides the Transaction's own — the last child
-	// completing, the last rollback landing — is appended together with that
-	// outcome: nothing has to happen in between, so a second commit would
-	// only cost another WAL flush (go/docs/adr/0010). Only a child's outcome:
-	// an RPC's own decision (StartTransactionRollback) is recorded alone and
-	// left for the orchestrator to act on (go/docs/adr/0006).
+	// Whatever a child's outcome decides for the Transaction itself is
+	// appended together with that outcome, and so is whatever that decides in
+	// turn: a failure starts the rollback, and a rollback with nothing left to
+	// undo concludes; the last child completing completes it. Nothing has to
+	// happen in between, so a second commit would only cost another WAL flush
+	// (go/docs/adr/0010, 0013). Only a child's outcome: an RPC's own decision
+	// (StartTransactionRollback) is recorded alone and left for the
+	// orchestrator to act on (go/docs/adr/0006).
 	pending := []proto.Message{event}
 	if wantChildID != "" {
-		after, err := withPending(events, transactionID, event)
-		if err != nil {
-			return err
-		}
-		switch concluded, err := conclusion(after, transactionID); {
-		case err != nil:
-			return err
-		case concluded != nil:
-			pending = append(pending, concluded)
+		after := events
+		for next := event; next != nil; {
+			if after, err = withPending(after, transactionID, next); err != nil {
+				return err
+			}
+			if next, err = consequence(after, transactionID); err != nil {
+				return err
+			}
+			if next != nil {
+				pending = append(pending, next)
+			}
 		}
 	}
 
@@ -362,7 +366,7 @@ func (s *Server) appendSagaStep(ctx context.Context, transactionID string, event
 //   - TransactionRollbackStarted, while Initialized or Started. Nothing rolls
 //     back from Completed.
 //   - a child's rollback fact, while the Transaction is rolling back.
-//   - a conclusion, while the stream still concludes exactly that.
+//   - a conclusion, while the stream's consequence is still exactly that.
 //
 // Dispatch intents (TransferRequestedWithinTransaction) are not here:
 // they are appended against the fold that chose them (recordIntents), because
@@ -387,11 +391,11 @@ func stillDecidable(events []eventstore.Event, transactionID string, event proto
 		return top == stateRollbackStarted, nil
 
 	case *pb.TransactionCompleted, *pb.TransactionRolledBack, *pb.TransactionRollbackFailed:
-		concluded, err := conclusion(events, transactionID)
+		next, err := consequence(events, transactionID)
 		if err != nil {
 			return false, err
 		}
-		return concluded != nil && eventstore.EventType(concluded) == eventstore.EventType(event), nil
+		return next != nil && eventstore.EventType(next) == eventstore.EventType(event), nil
 
 	default:
 		return false, fmt.Errorf("transaction %q: %s is not a step appendSagaStep records", transactionID, eventstore.EventType(event))
@@ -399,7 +403,7 @@ func stillDecidable(events []eventstore.Event, transactionID string, event proto
 }
 
 // withPending is events as they would read once event is appended after
-// them, for deciding what event itself concludes.
+// them, for deciding what event itself has as a consequence.
 func withPending(events []eventstore.Event, transactionID string, event proto.Message) ([]eventstore.Event, error) {
 	payload, err := proto.Marshal(event)
 	if err != nil {
@@ -411,13 +415,15 @@ func withPending(events []eventstore.Event, transactionID string, event proto.Me
 	}), nil
 }
 
-// conclusion is the Transaction's own outcome, if events alone decide it
-// now, and nil if they do not: every child resolved and none failed while
-// Started (TransactionCompleted), or nothing left to roll back and nothing
-// still being reversed while RollingBack (TransactionRolledBack, or
-// TransactionRollbackFailed if some child could not be). It is the one place
-// those endings are decided, for runSaga and appendSagaStep alike.
-func conclusion(events []eventstore.Event, transactionID string) (proto.Message, error) {
+// consequence is the Transaction-level step events alone decide next, and nil
+// if they decide none. While Started, a failed child starts the rollback
+// (TransactionRollbackStarted), and every child completed completes the
+// Transaction (TransactionCompleted). While rolling back, nothing left to roll
+// back and nothing still being reversed concludes it (TransactionRolledBack,
+// or TransactionRollbackFailed if some child could not be). None of these
+// waits on a side effect, so this is the one place they are decided, for
+// runSaga and appendSagaStep alike.
+func consequence(events []eventstore.Event, transactionID string) (proto.Message, error) {
 	switch topLevelState(events) {
 	case stateStarted:
 		transfers, _, err := decodeSpec(events)
@@ -428,7 +434,16 @@ func conclusion(events []eventstore.Event, transactionID string) (proto.Message,
 		if err != nil {
 			return nil, err
 		}
-		if _, failed := firstFailed(children); failed || !allTerminal(transfers, children) {
+		if failedID, failed := firstFailed(children); failed {
+			reason, err := failureReason(events, failedID)
+			if err != nil {
+				return nil, err
+			}
+			return &pb.TransactionRollbackStarted{
+				Id: transactionID, Reason: fmt.Sprintf("child %q failed: %s", failedID, reason),
+			}, nil
+		}
+		if !allTerminal(transfers, children) {
 			return nil, nil
 		}
 		return &pb.TransactionCompleted{Id: transactionID}, nil
@@ -528,24 +543,11 @@ func (s *Server) runSaga(ctx context.Context, transactionID string) error {
 				continue
 			}
 
-			if failedID, ok := firstFailed(children); ok {
-				reason, err := failureReason(events, failedID)
-				if err != nil {
-					return err
-				}
-				if err := s.appendSagaStep(ctx, transactionID, &pb.TransactionRollbackStarted{
-					Id: transactionID, Reason: fmt.Sprintf("child %q failed: %s", failedID, reason),
-				}); err != nil {
-					return err
-				}
-				continue
-			}
-
-			switch concluded, err := conclusion(events, transactionID); {
+			switch next, err := consequence(events, transactionID); {
 			case err != nil:
 				return err
-			case concluded != nil:
-				if err := s.appendSagaStep(ctx, transactionID, concluded); err != nil {
+			case next != nil:
+				if err := s.appendSagaStep(ctx, transactionID, next); err != nil {
 					return err
 				}
 				continue
@@ -607,7 +609,7 @@ func (s *Server) runSaga(ctx context.Context, transactionID string) error {
 			default:
 				// Nothing left to roll back and nothing in flight: rolled back,
 				// or — when blocked — stuck on a child that could not be.
-				concluded, err := conclusion(events, transactionID)
+				concluded, err := consequence(events, transactionID)
 				if err != nil {
 					return err
 				}
@@ -913,16 +915,21 @@ type rollbackPlan struct {
 }
 
 // planRollback reads a rollback's next move off the fold. Pure, so that
-// rollbackNext acting on it and conclusion deciding the rollback is over
+// rollbackNext acting on it and consequence deciding the rollback is over
 // cannot disagree.
+//
+// A child already recorded as Failed counts as resolved without a rollback
+// record of its own. Its Transfer was rejected, failed or cancelled, so it
+// moved no money and there is nothing to undo; the failure already on the
+// stream says everything a rollback record would (go/docs/adr/0013).
 func planRollback(transfers map[string]*pb.Transfer, deps map[string]*pb.TransferIdList, children map[string]childState) rollbackPlan {
-	rolledBack := make(map[string]bool, len(children))
+	resolved := make(map[string]bool, len(children))
 	inFlight := make(map[string]bool, len(children))
 	var plan rollbackPlan
 	for id, st := range children {
 		switch st {
-		case childRolledBack:
-			rolledBack[id] = true
+		case childRolledBack, childFailed:
+			resolved[id] = true
 		case childRollbackRequested:
 			inFlight[id] = true
 		case childRollbackFailed:
@@ -931,7 +938,7 @@ func planRollback(transfers map[string]*pb.Transfer, deps map[string]*pb.Transfe
 	}
 	plan.inFlight = len(inFlight) > 0
 
-	ready := readyToRollback(transfers, deps, touchedSet(children), rolledBack, inFlight)
+	ready := readyToRollback(transfers, deps, touchedSet(children), resolved, inFlight)
 
 	// Filter before slicing, not inside the loop, and the difference is not
 	// stylistic. A child already recorded as stuck is skipped without
@@ -957,8 +964,11 @@ func planRollback(transfers map[string]*pb.Transfer, deps map[string]*pb.Transfe
 // rollbackChild picks the rollback action for one ready child from its LIVE
 // transfer.Outcome: Committed -> RequestReversal; Staged/Pending ->
 // CancelStagedTransfer; InFlight (Accepted/Prepared) ->
-// CancelAcceptedTransfer; already recorded as Failed, already Failed/Cancelled
-// on its own, or rejected at accept -> nothing left to undo, ABANDONED.
+// CancelAcceptedTransfer; Failed/Cancelled on its own, or rejected at accept,
+// since the Transaction last looked -> nothing left to undo, ABANDONED.
+//
+// Only a Requested or Completed child is ever ready: planRollback counts one
+// already recorded as Failed as resolved, so it never reaches here.
 //
 // A Requested child with no Transfer yet is an intent whose driver has not
 // made the request, or is making it now (go/docs/adr/0011). The request is
@@ -968,9 +978,8 @@ func planRollback(transfers map[string]*pb.Transfer, deps map[string]*pb.Transfe
 // rollback concluded, with nothing left to undo it.
 func (s *Server) rollbackChild(ctx context.Context, transactionID string, spec *pb.Transfer, state childState) error {
 	if state != childRequested && state != childCompleted {
-		return s.appendSagaStep(ctx, transactionID, &pb.TransferRolledBackWithinTransaction{
-			Id: transactionID, TransferId: spec.GetId(), Method: pb.RollbackMethod_ROLLBACK_METHOD_ABANDONED,
-		})
+		return fmt.Errorf("transaction %q: rollbackChild: child %q is in state %d, which planRollback never offers",
+			transactionID, spec.GetId(), state)
 	}
 
 	outcome, err := transfer.Outcome(ctx, s.store, spec.GetId())

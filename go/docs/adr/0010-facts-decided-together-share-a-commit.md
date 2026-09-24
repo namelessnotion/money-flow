@@ -8,6 +8,9 @@
 - **See also:** [ADR 0009](0009-operations-are-transfer-legs-not-aggregates.md), the previous round of this work,
   which removed events. [ADR 0005](0005-saga-dispatch-claim-prevents-double-invocation.md) defines the claims,
   one of which now moves into `prepare()`.
+- **Amended 2026-09-24 by** [ADR 0013](0013-a-childs-failure-starts-the-rollback-in-the-same-commit.md): decision 3
+  now also starts a rollback in the append of the child failure that decides it, and `conclusion` is renamed
+  `consequence`.
 
 ## Context
 
