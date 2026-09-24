@@ -105,3 +105,10 @@ offers one today, deliberately.
 > of band. It is not a way to skip a message: it touches no offsets and the halted message stays uncommitted.
 > What it does is let an operator move the aggregates a halt (or a publication gap) stranded, without waiting
 > for a trigger that may never come. Skipping a message by hand remains undecided and unoffered.
+
+> **A deterministic ledger refusal no longer reaches this decision (2026-09-23, [ADR 0008](0008-transfer-legs-span-ledger-batches.md)).**
+> Retrying helps only with a fault that can pass. A request TigerBeetle can never accept (`ledger.ErrInvalidRequest`)
+> is not one, so the Transfer saga now fails the Transfer on it, and its Transaction compensates, instead of
+> returning it to be retried into a halt. The halt still exists for what really needs a person, including a
+> Transfer that has partly posted. The steps to recover from a halt are in
+> [`docs/saga-orchestrator.md`](../../../docs/saga-orchestrator.md#recovering-from-a-halt).

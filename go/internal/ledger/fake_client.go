@@ -2,14 +2,14 @@ package ledger
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"sync"
 )
 
 // ErrBatchEndsInLinkedChain is returned when the last entry of a batch has
 // Linked set — a chain has to end on an unlinked entry, so a batch that
 // ends mid-chain is a programming error, not a runtime outcome.
-var ErrBatchEndsInLinkedChain = errors.New("ledger: batch's last entry has Linked set")
+var ErrBatchEndsInLinkedChain = fmt.Errorf("%w: batch's last entry has Linked set", ErrInvalidRequest)
 
 // storedAccount is an Account as FakeClient retains it: economic identity
 // (currency, the two mutually-exclusive flags) plus running totals. Linked
@@ -111,6 +111,9 @@ func linkedRuns(n int, isLinked func(i int) bool) ([][]int, error) {
 }
 
 func (c *FakeClient) CreateAccounts(_ context.Context, accounts []Account) ([]AccountResult, error) {
+	if err := checkBatchSize(len(accounts)); err != nil {
+		return nil, err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -169,6 +172,9 @@ func (c *FakeClient) CreateAccounts(_ context.Context, accounts []Account) ([]Ac
 }
 
 func (c *FakeClient) CreateTransfers(_ context.Context, transfers []Transfer) ([]TransferResult, error) {
+	if err := checkBatchSize(len(transfers)); err != nil {
+		return nil, err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

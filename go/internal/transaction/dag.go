@@ -15,18 +15,15 @@ import (
 // maxTransfersPerTransaction caps how wide one Transaction may be. It is a
 // circuit breaker, not a design constraint: every shape this system builds is
 // one or two legs, so a request anywhere near this limit is a caller that has
-// lost track of what it is assembling. Two independent reasons, either
-// sufficient on its own:
+// lost track of what it is assembling. The reason is rollback blast radius:
+// the Transaction is the unit of rollback, so an N-child Transaction failing
+// is N reversals, each a whole Transfer running its own saga (ADR 0002).
+// TransactionRollbackFailed is a terminal that requires a person, and
+// bounding N bounds how much that person has to reconcile by hand.
 //
-//   - Rollback blast radius. The Transaction is the unit of rollback, so an
-//     N-child Transaction failing is N reversals, each a whole Transfer running
-//     its own saga (ADR 0002). TransactionRollbackFailed is a terminal that
-//     requires a person, and bounding N bounds how much that person has to
-//     reconcile by hand.
-//   - TigerBeetle's batch ceiling is unguarded below this point.
-//     ledger.CreateTransfers passes the caller's whole slice straight through
-//     with no chunking, and a linked chain cannot span batches. lookupBatchMax
-//     exists, but only for reads.
+// It does not guard TigerBeetle's batch ceiling, though ADR 0007 once said it
+// did: that ceiling counts legs, not Transfers, and one Transfer over a Wallet
+// of many Tokens reaches it alone. ledger.BatchMax guards it (ADR 0008).
 //
 // It does NOT make wide DAGs cheap — maxDispatchPerStep in saga.go is what
 // bounds the work of any one saga run. This bounds what may exist at all.
