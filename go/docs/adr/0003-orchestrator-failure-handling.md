@@ -113,10 +113,46 @@ offers one today, deliberately.
 > Transfer that has partly posted. The steps to recover from a halt are in
 > [`docs/saga-orchestrator.md`](../../../docs/saga-orchestrator.md#recovering-from-a-halt).
 
-> **Contention on a Token's balance stream follows the same rule (2026-09-24).** `token.RecordBalances`, which
-> every Transfer stage and commit calls through `recordTouched`, gave up after five lost races on one Token's
-> stream. With a funded source Token that every partition's Transfers debit at once, and no `mint_source`, the
-> ledger moves between attempts, so a loser's re-read rarely matches what just landed. The last of k recorders
-> then loses k−1 times, so any partition count above five could halt the orchestrator. It now uses the same
-> policy as prepare: no count bound, the same 1ms-to-50ms full-jitter wait, and a retry only when the Token's
-> stream has actually moved. A conflict with nothing landed is a fault, and the context ends the loop.
+> **Contention on a Wallet no longer reaches this decision either (2026-09-24).** Decision 2 assumes that a
+> failure outliving a few retries is a real fault. Losing an optimistic-concurrency race is not a fault: it
+> means another write *landed*. `transfer.prepare` used to hand the loss back after ten re-plans, and on a
+> native-Linux run that halted every partition. The run had 24 partitions and 150 seed Transfers all minting
+> their source from one reserve Wallet. With k Transfers preparing against one Wallet at once, the last to land
+> loses k−1 times. Since k grows with the partition count, adding partitions to scale made the halt *more*
+> likely. Restarting could not clear it, because the uncommitted backlog replays the same burst.
+>
+> Prepare now re-plans with no count bound, waiting a random slice of a window between re-plans. The window
+> doubles from 1ms up to 50ms. The loop's own guard is what keeps this from becoming the silent "retry forever"
+> this ADR rejects. A lost race is re-planned only if a stream the plan read has since moved. That covers a
+> Wallet it mints into and the Transfer's own stream. So every lap is paid for by someone else's progress, and a
+> hot Wallet drains instead of spinning. A conflict with nothing landed behind it is a fault. It still goes back
+> to the consumer, which retries and halts exactly as decided above. The loop's other exit is the context, so
+> shutdown is not held up. What remains unbounded is one Transfer's *latency* under a Wallet that never cools,
+> not the system's progress. That is watched through consumer-group lag, which this ADR already says to alert
+> on. The halt is not the signal for it.
+>
+> Two fixes fell out of taking the loop seriously:
+>
+> - **Each re-plan checks the Transfer is still accepted.** A cancel that landed mid-plan used to count as
+>   "Wallet moved". The re-plan then appended `TransferPrepared` after `AcceptedTransferCancelled`, and the
+>   cancelled Transfer went on to stage.
+> - **Minted Token ids are derived from the Transfer id** (`detid`), not generated. Minting creates the
+>   TigerBeetle account before the append that can lose. With fresh ids, every lost plan would have left an
+>   account behind; with derived ids, a re-plan answers `Exists`.
+>
+> Two alternatives were rejected:
+>
+> - **Having the consumer retry a "contention" error class without halting.** That puts back the retry-forever
+>   branch this ADR ruled out, at a 250ms-doubling scale meant for faults. It also cannot tell contention from a
+>   fault any better than a type assertion can, and it leaves `cmd/resume`, the other driver, without the fix.
+> - **Serializing prepares per Wallet.** A lock in one process covers neither `cmd/resume` nor a second
+>   orchestrator, so the re-plan loop would still be needed for correctness. Under optimistic concurrency a hot
+>   Wallet already admits one landed prepare per collision, the same rate a queue would. Revisit this if the
+>   work thrown away by losing plans shows up as a throughput cost.
+>
+> **The same rule covers a Token's balance stream.** `token.RecordBalances`, which every Transfer stage and
+> commit calls through `recordTouched`, gave up after five lost races on one Token's stream. Take a funded
+> source Token that every partition's Transfers debit at once, without `mint_source`. Its ledger moves between
+> attempts, so a loser's re-read rarely matches what just landed, and the last of k recorders loses k−1 times.
+> It now retries on the same terms as prepare: no count bound, the same 1ms-to-50ms wait, and a retry only
+> while the Token's stream has actually moved.
