@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
+	"time"
 
 	"github.com/twitchtv/twirp"
 	"google.golang.org/protobuf/proto"
@@ -13,10 +15,17 @@ import (
 	"github.com/namelessnotion/money_flow/go/internal/ledger"
 )
 
-// maxRecordAttempts bounds how many optimistic-concurrency races one Token's
-// balance recording may lose before giving up with an error. The caller (a
-// saga step) is retried as a whole, so giving up is safe.
-const maxRecordAttempts = 5
+// Between attempts, recordBalance waits a random slice of a window that
+// doubles from recordBackoffBase up to recordBackoffCap. The wait is there to
+// decorrelate recorders that just collided, so they don't all re-read into
+// the same collision again, not to outlast a fault, so its scale is one
+// recording (a store and a ledger round trip), not the orchestrator's retry
+// backoff. It matches transfer.prepare's re-plan backoff: the same policy
+// for the same kind of contention (go/docs/adr/0003, amended 2026-09-24).
+const (
+	recordBackoffBase = time.Millisecond
+	recordBackoffCap  = 50 * time.Millisecond
+)
 
 // tokenStream is one Token's stream as RecordBalances needs it: where to
 // append next, which Wallet the Token belongs to, and the last balance
@@ -65,11 +74,23 @@ func RecordBalances(ctx context.Context, store eventstore.Store, lc ledger.Clien
 
 // recordBalance appends one Token's observation, starting from a stream and
 // ledger read already made, and re-reading both on each lost race.
+//
+// A lost race is contention, not a fault: it means another recording landed
+// on the Token. So recordBalance keeps trying for as long as it keeps losing,
+// and a hot Token — a source every partition's Transfers debit at once —
+// drains rather than halting the orchestrator. No fixed number of attempts is
+// enough: while its ledger account keeps moving, a re-read rarely matches
+// what just landed, so the last of k recorders contending for one Token loses
+// k-1 times, and k grows with the orchestrator's partition count.
+//
+// Two things end the loop other than landing: ctx, and the check that a lost
+// race was lost *to* something. A conflict with nothing landed on the stream
+// is a fault, and goes back to the saga step to retry and halt over.
 func recordBalance(
 	ctx context.Context, store eventstore.Store, lc ledger.Client,
 	tokenID string, stream tokenStream, balances map[string]ledger.Balance,
 ) error {
-	for attempt := 1; ; attempt++ {
+	for attempt := 0; ; attempt++ {
 		event, err := balanceRecorded(tokenID, stream.walletID, balances)
 		if err != nil {
 			return err
@@ -77,23 +98,42 @@ func recordBalance(
 		if proto.Equal(event, stream.last) {
 			return nil
 		}
-		err = store.Append(ctx, AggregateType, tokenID, stream.seq, event)
+		conflict := store.Append(ctx, AggregateType, tokenID, stream.seq, event)
 		switch {
-		case err == nil:
+		case conflict == nil:
 			return nil
-		case !errors.Is(err, eventstore.ErrConcurrencyConflict):
-			return twirp.InternalErrorWith(err)
-		case attempt == maxRecordAttempts:
-			return twirp.InternalErrorWith(fmt.Errorf("token %q: recording balance: %w", tokenID, err))
+		case !errors.Is(conflict, eventstore.ErrConcurrencyConflict):
+			return twirp.InternalErrorWith(conflict)
 		}
 
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(recordBackoff(attempt)):
+		}
+		lost := stream.seq
 		if stream, err = loadTokenStream(ctx, store, tokenID); err != nil {
 			return err
+		}
+		if stream.seq == lost {
+			return twirp.InternalErrorWith(fmt.Errorf(
+				"token %q: recording balance: %w, yet its stream has not moved", tokenID, conflict))
 		}
 		if balances, err = lc.Balances(ctx, []string{tokenID}); err != nil {
 			return twirp.InternalErrorWith(fmt.Errorf("ledger: Balances: %w", err))
 		}
 	}
+}
+
+// recordBackoff is how long recordBalance waits before its attempt'th
+// re-read: a uniformly random slice of a window that doubles from
+// recordBackoffBase, capped at recordBackoffCap.
+func recordBackoff(attempt int) time.Duration {
+	window := recordBackoffCap
+	if attempt < 16 {
+		window = min(window, recordBackoffBase<<attempt)
+	}
+	return rand.N(window)
 }
 
 func balanceRecorded(tokenID, walletID string, balances map[string]ledger.Balance) (*pb.TokenBalanceRecorded, error) {

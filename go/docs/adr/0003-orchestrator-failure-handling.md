@@ -149,3 +149,10 @@ offers one today, deliberately.
 >   orchestrator, so the re-plan loop would still be needed for correctness. Under optimistic concurrency a hot
 >   Wallet already admits one landed prepare per collision, the same rate a queue would. Revisit this if the
 >   work thrown away by losing plans shows up as a throughput cost.
+>
+> **The same rule covers a Token's balance stream.** `token.RecordBalances`, which every Transfer stage and
+> commit calls through `recordTouched`, gave up after five lost races on one Token's stream. Take a funded
+> source Token that every partition's Transfers debit at once, without `mint_source`. Its ledger moves between
+> attempts, so a loser's re-read rarely matches what just landed, and the last of k recorders loses k−1 times.
+> It now retries on the same terms as prepare: no count bound, the same 1ms-to-50ms wait, and a retry only
+> while the Token's stream has actually moved.
