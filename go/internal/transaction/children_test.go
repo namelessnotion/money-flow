@@ -8,24 +8,33 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	pb "github.com/namelessnotion/money_flow/go/gen/proto/transaction/v1"
+	transferpb "github.com/namelessnotion/money_flow/go/gen/proto/transfer/v1"
 	"github.com/namelessnotion/money_flow/go/internal/eventstore"
 	"github.com/namelessnotion/money_flow/go/internal/testutil"
+	"github.com/namelessnotion/money_flow/go/internal/transfer"
 )
 
-// Every Transfer the Transaction asked for has a stream of its own and so can
-// be woken; a gated child was never asked for and has none.
+// Only a Transfer with a stream of its own can be woken. A gated child was
+// never asked for, and an intended one has not been asked for yet
+// (go/docs/adr/0011): neither has a stream.
 func TestChildTransferIDs_ListsRequestedChildrenAndReversalsOnly(t *testing.T) {
 	t.Parallel()
 	store := eventstore.NewMemoryStore()
 	ctx := context.Background()
 	txnID := testutil.ID("txn1")
-	a, gated, reversal := testutil.ID("a"), testutil.ID("gated"), testutil.ID("reversal")
+	a, gated, intended, reversal := testutil.ID("a"), testutil.ID("gated"), testutil.ID("intended"), testutil.ID("reversal")
 
+	for _, id := range []string{a, reversal} {
+		if err := store.Append(ctx, transfer.AggregateType, id, 0, &transferpb.TransferRequestAccepted{Id: id, TransactionId: txnID}); err != nil {
+			t.Fatalf("Append(transfer %s) error = %v", id, err)
+		}
+	}
 	if err := store.Append(ctx, AggregateType, txnID, 0,
 		&pb.TransactionInitialized{Id: txnID},
 		&pb.TransactionStarted{Id: txnID},
 		&pb.TransferRequestedWithinTransaction{Id: txnID, TransferId: a},
 		&pb.TransferGatedWithinTransaction{Id: txnID, TransferId: gated},
+		&pb.TransferRequestedWithinTransaction{Id: txnID, TransferId: intended},
 		&pb.TransferCompletedWithinTransaction{Id: txnID, TransferId: a},
 		&pb.TransactionRollbackStarted{Id: txnID},
 		&pb.TransferReversalRequestedWithinTransaction{Id: txnID, TransferId: a, ReversalId: reversal},
