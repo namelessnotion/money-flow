@@ -409,9 +409,10 @@ type ledgerRefusal struct {
 // submitBatch submits batch to TigerBeetle one linked chain per request, in
 // order, stopping at the first chain TigerBeetle refuses — a leg that isn't
 // OK or Exists, or the request as a whole refused as ledger.ErrInvalidRequest,
-// which no retry can change — and handing that refusal to onReject. Having
-// seen every chain accepted, it records the new balance of every Token the
-// batch touched (token.RecordBalances). stage, commit, and cancelStaged all
+// which no retry can change — and handing that refusal to onReject. It
+// records no balances when every chain is accepted: the step that submitted
+// the batch records them with its own outcome (recordOutcome). stage, commit,
+// and cancelStaged all
 // submit a batch this same way and only differ in what "refused" means for
 // them (stage/commit route it to compensate() as an internal-invariant
 // Failed; cancelStaged treats it as a plain internal error, since a void
@@ -445,10 +446,7 @@ func (s *Server) submitBatch(
 		}
 		return errBatchRejected
 	}
-	// Publish every touched Token's new balance before the saga step's own
-	// event: if this fails, the step is retried, TigerBeetle answers Exists,
-	// and the recording runs again — at-least-once without a gap.
-	return s.recordTouched(ctx, batch)
+	return nil
 }
 
 // submitChain submits chain, the c'th of its batch, returning the refusal if
@@ -472,7 +470,9 @@ func (s *Server) submitChain(ctx context.Context, chain []ledger.Transfer, c int
 	return nil, nil
 }
 
-// recordTouched records the balance of every Token batch touched.
+// recordTouched records the balance of every Token batch touched, one append
+// per Token — only for chains a refusal left applied, which no outcome of
+// their own will carry.
 func (s *Server) recordTouched(ctx context.Context, batch []ledger.Transfer) error {
 	touched := make([]string, 0, 2*len(batch))
 	for _, t := range batch {
@@ -481,33 +481,79 @@ func (s *Server) recordTouched(ctx context.Context, batch []ledger.Transfer) err
 	return token.RecordBalances(ctx, s.store, s.ledger, touched)
 }
 
-// appendSagaStep appends event as the next fact on transferID's own stream.
-// It converges when that fact is already the Transfer's latest outcome — a
+// appendSagaStep records event, a saga step's outcome with no ledger write
+// behind it, as the next fact on transferID's own stream (recordOutcome).
+func (s *Server) appendSagaStep(ctx context.Context, transferID string, event proto.Message) error {
+	return s.recordOutcome(ctx, transferID, event, nil)
+}
+
+// recordOutcome records event, a saga step's outcome, as the next fact on
+// transferID's own stream, together with the balance of every Token legs
+// name, in one atomic write (go/docs/adr/0010). The balances are what the
+// step's ledger write just did to those Tokens: recording them with the
+// outcome means the read side learns both at once, and a crash before the
+// write loses neither — the step is retried, TigerBeetle answers Exists, and
+// both are built again.
+//
+// It converges when event is already the Transfer's latest outcome — a
 // retried saga step, or another concurrent call driving the same Transfer,
 // already recorded it, perhaps with a client's *Rejected response landing on
 // top since — and refuses, as an internal error, any outcome the Transfer's
 // lifecycle (transitions) does not allow from where it stands.
-func (s *Server) appendSagaStep(ctx context.Context, transferID string, event proto.Message) error {
-	events, err := s.store.Load(ctx, AggregateType, transferID)
-	if err != nil {
-		return twirp.InternalErrorWith(err)
-	}
+//
+// Losing the append is contention, not a fault: another write landed on the
+// Transfer's stream or on one of its Tokens' — a busy source Token is shared
+// by every Transfer debiting it. It rebuilds against what landed and tries
+// again, for as long as it keeps losing to something (go/docs/adr/0003).
+func (s *Server) recordOutcome(ctx context.Context, transferID string, event proto.Message, legs []*pb.TransferLeg) error {
 	wantType := eventstore.EventType(event)
-	if latest, ok := latestOutcome(events); ok && latest.EventType == wantType {
-		return nil
+	for attempt := 0; ; attempt++ {
+		events, err := s.store.Load(ctx, AggregateType, transferID)
+		if err != nil {
+			return twirp.InternalErrorWith(err)
+		}
+		if latest, ok := latestOutcome(events); ok && latest.EventType == wantType {
+			return nil
+		}
+		if state := currentState(events); !slices.Contains(transitions[state], wantType) {
+			return twirp.InternalError(fmt.Sprintf(
+				"transfer %q: already %s, cannot also become %s", transferID, state, wantType))
+		}
+
+		writes, err := token.BalanceWrites(ctx, s.store, s.ledger, legTokens(legs))
+		if err != nil {
+			return err
+		}
+		writes = append(writes, eventstore.StreamWrite{
+			AggregateType: AggregateType, AggregateID: transferID, ExpectedSeq: int64(len(events)),
+			Events: []proto.Message{event},
+		})
+		switch err := s.store.AppendAtomic(ctx, writes...); {
+		case err == nil:
+			return nil
+		case !errors.Is(err, eventstore.ErrConcurrencyConflict):
+			return twirp.InternalErrorWith(err)
+		}
+		switch overtaken, err := s.overtaken(ctx, writes); {
+		case err != nil:
+			return err
+		case !overtaken:
+			return twirp.InternalError(fmt.Sprintf(
+				"transfer %q: recording %s conflicted, yet no stream it wrote to has moved", transferID, wantType))
+		}
+		if err := contention.Wait(ctx, attempt); err != nil {
+			return err
+		}
 	}
-	if state := currentState(events); !slices.Contains(transitions[state], wantType) {
-		return twirp.InternalError(fmt.Sprintf(
-			"transfer %q: already %s, cannot also become %s", transferID, state, wantType))
+}
+
+// legTokens is every Token legs move money between.
+func legTokens(legs []*pb.TransferLeg) []string {
+	ids := make([]string, 0, 2*len(legs))
+	for _, leg := range legs {
+		ids = append(ids, leg.GetSourceTokenId(), leg.GetDestTokenId())
 	}
-	switch err := s.store.Append(ctx, AggregateType, transferID, int64(len(events)), event); {
-	case err == nil:
-		return nil
-	case errors.Is(err, eventstore.ErrConcurrencyConflict):
-		return s.appendSagaStep(ctx, transferID, event)
-	default:
-		return twirp.InternalErrorWith(err)
-	}
+	return ids
 }
 
 // latestOutcome is the last event on events that advances currentState()'s
@@ -758,29 +804,44 @@ var errPlanOvertaken = errors.New("plan overtaken by a write to a stream it plan
 // preparing against one Wallet at once, the last to land loses k-1 times,
 // and k grows with the orchestrator's partition count.
 //
+// The same write claims the step that follows — stage() or commit(), by the
+// request's stage flag — and prepare() returns that claim for runSaga to go
+// straight on with (claimedStep). It returns nil when there was nothing left
+// to prepare.
+//
 // Two things end the loop other than landing: ctx, and tryPrepare's check
 // that a lost race was lost *to* something. A conflict nothing landed to
 // cause is a fault, and goes back to the driver to retry and halt over.
-func (s *Server) prepare(ctx context.Context, transferID string) error {
+func (s *Server) prepare(ctx context.Context, transferID string) (*claimedStep, error) {
 	for attempt := 0; ; attempt++ {
-		if err := s.tryPrepare(ctx, transferID); !errors.Is(err, errPlanOvertaken) {
-			return err
+		next, err := s.tryPrepare(ctx, transferID)
+		if !errors.Is(err, errPlanOvertaken) {
+			return next, err
 		}
 		if err := contention.Wait(ctx, attempt); err != nil {
-			return err
+			return nil, err
 		}
 	}
 }
 
+// claimedStep is the step prepare() claimed for the Transfer it prepared:
+// stage() when the request asked for staging, commit() otherwise, with the
+// claim at seq and the legs it recorded.
+type claimedStep struct {
+	seq   int64
+	legs  []*pb.TransferLeg
+	stage bool
+}
+
 // tryPrepare is one planning of prepare against the store as it stands now.
 // It reports errPlanOvertaken when its write lost to a different one.
-func (s *Server) tryPrepare(ctx context.Context, transferID string) error {
+func (s *Server) tryPrepare(ctx context.Context, transferID string) (*claimedStep, error) {
 	events, err := s.store.Load(ctx, AggregateType, transferID)
 	if err != nil {
-		return twirp.InternalErrorWith(err)
+		return nil, twirp.InternalErrorWith(err)
 	}
 	if len(events) == 0 {
-		return fmt.Errorf("transfer %q: no accepted event to prepare from", transferID)
+		return nil, fmt.Errorf("transfer %q: no accepted event to prepare from", transferID)
 	}
 	if currentState(events) != stateAccepted {
 		// Overtaken on the Transfer's own stream: a concurrent prepare of
@@ -788,11 +849,11 @@ func (s *Server) tryPrepare(ctx context.Context, transferID string) error {
 		// left to prepare, and planning anyway would append TransferPrepared
 		// after the cancel — a cancelled Transfer brought back to move money.
 		// runSaga reloads and carries on from wherever it now is.
-		return nil
+		return nil, nil
 	}
 	msg, err := events[0].Decode()
 	if err != nil {
-		return twirp.InternalErrorWith(err)
+		return nil, twirp.InternalErrorWith(err)
 	}
 
 	var legs []Leg
@@ -810,26 +871,26 @@ func (s *Server) tryPrepare(ctx context.Context, transferID string) error {
 			// accept" pattern.
 			rejection, err := validateMintSource(ctx, s.store, s.transactionExists, accepted.GetTransactionId(), accepted.GetFromWalletId())
 			if err != nil {
-				return err
+				return nil, err
 			}
 			if rejection != nil {
-				return fmt.Errorf("transfer %q: prepare: mint_source re-validation failed after accept: %s", transferID, rejection.GetReason())
+				return nil, fmt.Errorf("transfer %q: prepare: mint_source re-validation failed after accept: %s", transferID, rejection.GetReason())
 			}
 
 			srcSpec := mintSourceLeg(transferID, accepted.GetAmount())
 			srcWalletEvents, err := s.store.Load(ctx, wallet.AggregateType, accepted.GetFromWalletId())
 			if err != nil {
-				return twirp.InternalErrorWith(err)
+				return nil, twirp.InternalErrorWith(err)
 			}
 			writes, mintRejection, err := token.MintWrites(
 				ctx, s.store, s.ledger, accepted.GetFromWalletId(), srcWalletEvents,
 				[]token.MintSpec{srcSpec}, accepted.GetTransactionId(),
 			)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			if mintRejection != nil {
-				return fmt.Errorf("transfer %q: prepare: source mint rejected: %s", transferID, mintRejection.GetReason())
+				return nil, fmt.Errorf("transfer %q: prepare: source mint rejected: %s", transferID, mintRejection.GetReason())
 			}
 			srcMintWrites = writes
 			srcLegs = []Leg{{SourceTokenID: srcSpec.TokenID, Amount: accepted.GetAmount()}}
@@ -839,10 +900,10 @@ func (s *Server) tryPrepare(ctx context.Context, transferID string) error {
 				accepted.GetTransactionId(), s.isOpen,
 			)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			if rejection != nil {
-				return fmt.Errorf("transfer %q: prepare: re-selection failed after accept: %s", transferID, rejection.GetReason())
+				return nil, fmt.Errorf("transfer %q: prepare: re-selection failed after accept: %s", transferID, rejection.GetReason())
 			}
 			srcLegs = selected
 		}
@@ -850,16 +911,16 @@ func (s *Server) tryPrepare(ctx context.Context, transferID string) error {
 		destSpecs := planDestinations(transferID, accepted.GetAmount())
 		walletEvents, err := s.store.Load(ctx, wallet.AggregateType, accepted.GetToWalletId())
 		if err != nil {
-			return twirp.InternalErrorWith(err)
+			return nil, twirp.InternalErrorWith(err)
 		}
 		writes, mintRejection, err := token.MintWrites(
 			ctx, s.store, s.ledger, accepted.GetToWalletId(), walletEvents, destSpecs, accepted.GetTransactionId(),
 		)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if mintRejection != nil {
-			return fmt.Errorf("transfer %q: prepare: mint rejected: %s", transferID, mintRejection.GetReason())
+			return nil, fmt.Errorf("transfer %q: prepare: mint rejected: %s", transferID, mintRejection.GetReason())
 		}
 		mintWrites = append(srcMintWrites, writes...)
 
@@ -872,15 +933,15 @@ func (s *Server) tryPrepare(ctx context.Context, transferID string) error {
 	case *pb.ReversalRequestAccepted:
 		revLegs, rejection, err := reversalManifest(ctx, s.store, accepted.GetTransferId())
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if rejection != nil {
-			return fmt.Errorf("transfer %q: prepare: reversal manifest failed after accept: %s", transferID, rejection.GetReason())
+			return nil, fmt.Errorf("transfer %q: prepare: reversal manifest failed after accept: %s", transferID, rejection.GetReason())
 		}
 		legs = revLegs
 
 	default:
-		return fmt.Errorf("transfer %q: stream starts with %s, want an Accepted event", transferID, events[0].EventType)
+		return nil, fmt.Errorf("transfer %q: stream starts with %s, want an Accepted event", transferID, events[0].EventType)
 	}
 
 	// Each leg's ledger transfer id is generated per planning: only the plan
@@ -894,26 +955,40 @@ func (s *Server) tryPrepare(ctx context.Context, transferID string) error {
 		}
 	}
 
+	// The Transfer is prepared and its next step claimed in one write: the
+	// saga goes straight on to that step, so a separate claim would only cost
+	// another commit (go/docs/adr/0010). The claim sits right after
+	// TransferPrepared.
+	stage, err := stageRequested(events)
+	if err != nil {
+		return nil, err
+	}
+	var marker proto.Message = &pb.TransferCommittingStarted{Id: transferID}
+	if stage {
+		marker = &pb.StagingTransferStarted{Id: transferID}
+	}
+	next := &claimedStep{seq: int64(len(events)) + 2, legs: protoLegs, stage: stage}
+
 	writes := make([]eventstore.StreamWrite, 0, len(mintWrites)+1)
 	writes = append(writes, mintWrites...)
 	writes = append(writes, eventstore.StreamWrite{
 		AggregateType: AggregateType, AggregateID: transferID, ExpectedSeq: int64(len(events)),
-		Events: []proto.Message{&pb.TransferPrepared{Id: transferID, Legs: protoLegs}},
+		Events: []proto.Message{&pb.TransferPrepared{Id: transferID, Legs: protoLegs}, marker},
 	})
 
 	switch err := s.store.AppendAtomic(ctx, writes...); {
 	case err == nil:
-		return nil
+		return next, nil
 	case errors.Is(err, eventstore.ErrConcurrencyConflict):
 		switch overtaken, loadErr := s.overtaken(ctx, writes); {
 		case loadErr != nil:
-			return loadErr
+			return nil, loadErr
 		case !overtaken:
-			return fmt.Errorf("transfer %q: prepare: %w, yet no stream it planned against has moved", transferID, err)
+			return nil, fmt.Errorf("transfer %q: prepare: %w, yet no stream it planned against has moved", transferID, err)
 		}
-		return errPlanOvertaken
+		return nil, errPlanOvertaken
 	default:
-		return twirp.InternalErrorWith(err)
+		return nil, twirp.InternalErrorWith(err)
 	}
 }
 
@@ -966,7 +1041,12 @@ func (s *Server) stage(ctx context.Context, transferID string) error {
 	if !won {
 		return nil
 	}
+	return s.stageClaimed(ctx, transferID, claimedSeq, legs)
+}
 
+// stageClaimed is stage() once its claim is held at claimedSeq — taken by
+// stage() itself, or by prepare() in the same write as TransferPrepared.
+func (s *Server) stageClaimed(ctx context.Context, transferID string, claimedSeq int64, legs []*pb.TransferLeg) error {
 	if err := s.requireClaim(ctx, transferID, claimedSeq); err != nil {
 		if errors.Is(err, errClaimSuperseded) {
 			return nil
@@ -994,7 +1074,7 @@ func (s *Server) stage(ctx context.Context, transferID string) error {
 		}
 		return err
 	}
-	return s.appendSagaStep(ctx, transferID, &pb.TransferStaged{Id: transferID})
+	return s.recordOutcome(ctx, transferID, &pb.TransferStaged{Id: transferID}, legs)
 }
 
 // confirmStaged records TransferPending — a pure event-log write, called
@@ -1029,8 +1109,14 @@ func (s *Server) commit(ctx context.Context, transferID string) error {
 	}
 	// commit() needs the state itself (to pick immediate vs. posting mode,
 	// and as claimForDispatch's preClaimState below), which loadLegs
-	// doesn't expose — the one of the four callers that can't use it.
+	// doesn't expose — the one of the four callers that can't use it. A
+	// caller that reaches here after the Transfer moved on — it lost the
+	// race to a concurrent commit, or to a cancel — has nothing to do: taking
+	// the state it finds as preClaimState would claim a finished Transfer.
 	preClaimState := currentState(events)
+	if preClaimState != statePrepared && preClaimState != statePending {
+		return nil
+	}
 	posting := preClaimState == statePending
 
 	claimedSeq, won, err := s.claimForDispatch(ctx, transferID, preClaimState, &pb.TransferCommittingStarted{Id: transferID})
@@ -1040,7 +1126,13 @@ func (s *Server) commit(ctx context.Context, transferID string) error {
 	if !won {
 		return nil
 	}
+	return s.commitClaimed(ctx, transferID, claimedSeq, legs, posting)
+}
 
+// commitClaimed is commit() once its claim is held at claimedSeq — taken by
+// commit() itself, or, for an immediate Transfer, by prepare() in the same
+// write as TransferPrepared.
+func (s *Server) commitClaimed(ctx context.Context, transferID string, claimedSeq int64, legs []*pb.TransferLeg, posting bool) error {
 	if err := s.requireClaim(ctx, transferID, claimedSeq); err != nil {
 		if errors.Is(err, errClaimSuperseded) {
 			return nil
@@ -1060,7 +1152,7 @@ func (s *Server) commit(ctx context.Context, transferID string) error {
 		}
 		return err
 	}
-	return s.appendSagaStep(ctx, transferID, &pb.TransferCommitted{Id: transferID, Destinations: buildDestinations(legs)})
+	return s.recordOutcome(ctx, transferID, &pb.TransferCommitted{Id: transferID, Destinations: buildDestinations(legs)}, legs)
 }
 
 // moveMoney is commit()'s TigerBeetle half. done=true means a refusal was
@@ -1146,6 +1238,11 @@ func (s *Server) cancelStaged(ctx context.Context, transferID, reason string) er
 	if err != nil {
 		return err
 	}
+	if preClaimState != stateStaged && preClaimState != statePending {
+		// Moved on since the caller looked — most often a concurrent cancel
+		// that landed first. Nothing left to claim.
+		return nil
+	}
 	claimedSeq, won, err := s.claimForDispatch(ctx, transferID, preClaimState, &pb.CancellingStagedTransferStarted{Id: transferID, Reason: reason})
 	if err != nil {
 		return err
@@ -1172,7 +1269,7 @@ func (s *Server) cancelStaged(ctx context.Context, transferID, reason string) er
 		}
 		return err
 	}
-	return s.appendSagaStep(ctx, transferID, &pb.TransferCancelled{Id: transferID, Reason: reason})
+	return s.recordOutcome(ctx, transferID, &pb.TransferCancelled{Id: transferID, Reason: reason}, legs)
 }
 
 // compensate appends TransferFailed, carrying reason — our own ledger's
@@ -1297,8 +1394,21 @@ func (s *Server) runSaga(ctx context.Context, transferID string) error {
 		state := currentState(events)
 		switch state {
 		case stateAccepted:
-			if err := s.prepare(ctx, transferID); err != nil {
+			next, err := s.prepare(ctx, transferID)
+			if err != nil {
 				return err
+			}
+			// Nil when prepare() found nothing left to prepare; the reload
+			// below carries on from wherever the Transfer now is.
+			if next != nil {
+				if next.stage {
+					err = s.stageClaimed(ctx, transferID, next.seq, next.legs)
+				} else {
+					err = s.commitClaimed(ctx, transferID, next.seq, next.legs, false)
+				}
+				if err != nil {
+					return err
+				}
 			}
 		case statePrepared:
 			requiresStaging, err := stageRequested(events)

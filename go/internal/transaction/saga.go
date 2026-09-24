@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/twitchtv/twirp"
 	"google.golang.org/protobuf/proto"
@@ -315,13 +316,98 @@ func (s *Server) appendSagaStep(ctx context.Context, transactionID string, event
 		}
 	}
 
-	switch err := s.store.Append(ctx, AggregateType, transactionID, int64(len(events)), event); {
+	// A child's outcome that decides the Transaction's own — the last child
+	// completing, the last rollback landing — is appended together with that
+	// outcome: nothing has to happen in between, so a second commit would
+	// only cost another WAL flush (go/docs/adr/0010). Only a child's outcome:
+	// an RPC's own decision (StartTransactionRollback) is recorded alone and
+	// left for the orchestrator to act on (go/docs/adr/0006).
+	pending := []proto.Message{event}
+	if wantChildID != "" {
+		after, err := withPending(events, transactionID, event)
+		if err != nil {
+			return err
+		}
+		switch concluded, err := conclusion(after, transactionID); {
+		case err != nil:
+			return err
+		case concluded != nil:
+			pending = append(pending, concluded)
+		}
+	}
+
+	switch err := s.store.Append(ctx, AggregateType, transactionID, int64(len(events)), pending...); {
 	case err == nil:
 		return nil
 	case errors.Is(err, eventstore.ErrConcurrencyConflict):
 		return s.appendSagaStep(ctx, transactionID, event)
 	default:
 		return twirp.InternalErrorWith(err)
+	}
+}
+
+// withPending is events as they would read once event is appended after
+// them, for deciding what event itself concludes.
+func withPending(events []eventstore.Event, transactionID string, event proto.Message) ([]eventstore.Event, error) {
+	payload, err := proto.Marshal(event)
+	if err != nil {
+		return nil, twirp.InternalErrorWith(err)
+	}
+	return append(slices.Clone(events), eventstore.Event{
+		AggregateType: AggregateType, AggregateID: transactionID, Sequence: int64(len(events)) + 1,
+		EventType: eventstore.EventType(event), Payload: payload,
+	}), nil
+}
+
+// conclusion is the Transaction's own outcome, if events alone decide it
+// now, and nil if they do not: every child resolved and none failed while
+// Started (TransactionCompleted), or nothing left to roll back and nothing
+// still being reversed while RollingBack (TransactionRolledBack, or
+// TransactionRollbackFailed if some child could not be). It is the one place
+// those endings are decided, for runSaga and appendSagaStep alike.
+func conclusion(events []eventstore.Event, transactionID string) (proto.Message, error) {
+	switch topLevelState(events) {
+	case stateStarted:
+		transfers, _, err := decodeSpec(events)
+		if err != nil {
+			return nil, err
+		}
+		children, err := foldChildStates(events)
+		if err != nil {
+			return nil, err
+		}
+		if _, failed := firstFailed(children); failed || !allTerminal(transfers, children) {
+			return nil, nil
+		}
+		return &pb.TransactionCompleted{Id: transactionID}, nil
+
+	case stateRollbackStarted:
+		transfers, deps, err := decodeSpec(events)
+		if err != nil {
+			return nil, err
+		}
+		children, err := foldChildStates(events)
+		if err != nil {
+			return nil, err
+		}
+		plan := planRollback(transfers, deps, children)
+		if len(plan.candidates) > 0 || plan.inFlight {
+			return nil, nil
+		}
+		reason, err := rollbackStartedReason(events)
+		if err != nil {
+			return nil, err
+		}
+		if plan.anyFailed {
+			if reason == "" {
+				reason = "one or more children could not be rolled back; see TransferRollbackFailedWithinTransaction"
+			}
+			return &pb.TransactionRollbackFailed{Id: transactionID, Reason: reason}, nil
+		}
+		return &pb.TransactionRolledBack{Id: transactionID, Reason: reason}, nil
+
+	default:
+		return nil, nil
 	}
 }
 
@@ -404,8 +490,11 @@ func (s *Server) runSaga(ctx context.Context, transactionID string) error {
 				continue
 			}
 
-			if allTerminal(transfers, children) {
-				if err := s.appendSagaStep(ctx, transactionID, &pb.TransactionCompleted{Id: transactionID}); err != nil {
+			switch concluded, err := conclusion(events, transactionID); {
+			case err != nil:
+				return err
+			case concluded != nil:
+				if err := s.appendSagaStep(ctx, transactionID, concluded); err != nil {
 					return err
 				}
 				continue
@@ -464,24 +553,17 @@ func (s *Server) runSaga(ctx context.Context, transactionID string) error {
 				// resolved. Nothing to decide yet, and nothing may be claimed:
 				// stop here and resume when something asks again.
 				return nil
-			case blocked:
-				reason, err := rollbackStartedReason(events)
-				if err != nil {
-					return err
-				}
-				if reason == "" {
-					reason = "one or more children could not be rolled back; see TransferRollbackFailedWithinTransaction"
-				}
-				if err := s.appendSagaStep(ctx, transactionID, &pb.TransactionRollbackFailed{Id: transactionID, Reason: reason}); err != nil {
-					return err
-				}
-				continue
 			default:
-				reason, err := rollbackStartedReason(events)
+				// Nothing left to roll back and nothing in flight: rolled back,
+				// or — when blocked — stuck on a child that could not be.
+				concluded, err := conclusion(events, transactionID)
 				if err != nil {
 					return err
 				}
-				if err := s.appendSagaStep(ctx, transactionID, &pb.TransactionRolledBack{Id: transactionID, Reason: reason}); err != nil {
+				if concluded == nil {
+					return fmt.Errorf("transaction %q: rollback made no progress yet reached no conclusion (blocked=%v)", transactionID, blocked)
+				}
+				if err := s.appendSagaStep(ctx, transactionID, concluded); err != nil {
 					return err
 				}
 				continue
@@ -698,9 +780,42 @@ func (s *Server) reconcileRollbacks(
 func (s *Server) rollbackNext(
 	ctx context.Context, transactionID string, transfers map[string]*pb.Transfer, deps map[string]*pb.TransferIdList, children map[string]childState,
 ) (progressed, more, waiting, blocked bool, err error) {
+	plan := planRollback(transfers, deps, children)
+	candidates := plan.candidates
+	if len(candidates) > maxDispatchPerStep {
+		candidates, more = candidates[:maxDispatchPerStep], true
+	}
+
+	madeProgress := false
+	for _, childID := range candidates {
+		if err := s.rollbackChild(ctx, transactionID, transfers[childID], children[childID]); err != nil {
+			return false, false, false, false, err
+		}
+		madeProgress = true
+	}
+	if madeProgress {
+		return true, more, false, false, nil
+	}
+	return false, false, plan.inFlight, plan.anyFailed, nil
+}
+
+// rollbackPlan is where a rollback stands, read off the fold alone.
+type rollbackPlan struct {
+	// candidates are the children rollbackChild should act on next.
+	candidates []string
+	// inFlight is true while some child's Reversal has not resolved.
+	inFlight bool
+	// anyFailed is true once some child has recorded a rollback failure.
+	anyFailed bool
+}
+
+// planRollback reads a rollback's next move off the fold. Pure, so that
+// rollbackNext acting on it and conclusion deciding the rollback is over
+// cannot disagree.
+func planRollback(transfers map[string]*pb.Transfer, deps map[string]*pb.TransferIdList, children map[string]childState) rollbackPlan {
 	rolledBack := make(map[string]bool, len(children))
 	inFlight := make(map[string]bool, len(children))
-	anyRollbackFailed := false
+	var plan rollbackPlan
 	for id, st := range children {
 		switch st {
 		case childRolledBack:
@@ -708,9 +823,10 @@ func (s *Server) rollbackNext(
 		case childRollbackRequested:
 			inFlight[id] = true
 		case childRollbackFailed:
-			anyRollbackFailed = true
+			plan.anyFailed = true
 		}
 	}
+	plan.inFlight = len(inFlight) > 0
 
 	ready := readyToRollback(transfers, deps, touchedSet(children), rolledBack, inFlight)
 
@@ -727,27 +843,12 @@ func (s *Server) rollbackNext(
 	//
 	// readyToRun needs no equivalent: every child it returns appends exactly
 	// once, so a forward slice always makes progress.
-	candidates := make([]string, 0, len(ready))
 	for _, childID := range ready {
 		if children[childID] != childRollbackFailed {
-			candidates = append(candidates, childID)
+			plan.candidates = append(plan.candidates, childID)
 		}
 	}
-	if len(candidates) > maxDispatchPerStep {
-		candidates, more = candidates[:maxDispatchPerStep], true
-	}
-
-	madeProgress := false
-	for _, childID := range candidates {
-		if err := s.rollbackChild(ctx, transactionID, transfers[childID], children[childID]); err != nil {
-			return false, false, false, false, err
-		}
-		madeProgress = true
-	}
-	if madeProgress {
-		return true, more, false, false, nil
-	}
-	return false, false, len(inFlight) > 0, anyRollbackFailed, nil
+	return plan
 }
 
 // rollbackChild picks the rollback action for one ready child from its LIVE

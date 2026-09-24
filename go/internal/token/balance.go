@@ -24,8 +24,10 @@ type tokenStream struct {
 }
 
 // RecordBalances publishes a TokenBalanceRecorded for each Token in
-// tokenIDs, read from its TigerBeetle account. Call it after every ledger
-// write, passing every Token the write touched.
+// tokenIDs, read from its TigerBeetle account, one append per Token. A saga
+// step records the balances its ledger write moved together with its own
+// outcome instead (BalanceWrites); this is for a ledger write no outcome
+// follows, such as a refused chain after earlier chains applied.
 //
 // Each Token's stream is loaded BEFORE its account is looked up, and the
 // append expects the loaded length. A caller that loses the race loads and
@@ -37,26 +39,69 @@ type tokenStream struct {
 // A balance equal to the last one recorded is not recorded again, so a
 // retried saga step converges without adding events.
 func RecordBalances(ctx context.Context, store eventstore.Store, lc ledger.Client, tokenIDs []string) error {
-	ids := distinct(tokenIDs)
-	streams := make(map[string]tokenStream, len(ids))
-	for _, id := range ids {
-		s, err := loadTokenStream(ctx, store, id)
-		if err != nil {
-			return err
-		}
-		streams[id] = s
-	}
-	balances, err := lc.Balances(ctx, ids)
+	ids, streams, balances, err := observe(ctx, store, lc, tokenIDs)
 	if err != nil {
-		return twirp.InternalErrorWith(fmt.Errorf("ledger: Balances: %w", err))
+		return err
 	}
-
 	for _, id := range ids {
 		if err := recordBalance(ctx, store, lc, id, streams[id], balances); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// BalanceWrites builds the TokenBalanceRecorded write for each Token in
+// tokenIDs whose balance differs from the last one recorded, for a caller to
+// append atomically with the outcome of the ledger write that moved them
+// (go/docs/adr/0010). It is RecordBalances without the appends: each Token's
+// stream is loaded before its account is read, and each write expects the
+// loaded length, so a write that lands was read after every earlier balance
+// on its stream — the same ordering RecordBalances guarantees. A caller whose
+// atomic append loses must build again, never retry these writes as they are.
+//
+// A Token whose balance already matches its last recording gets no write, so
+// a retried step converges without adding events.
+func BalanceWrites(ctx context.Context, store eventstore.Store, lc ledger.Client, tokenIDs []string) ([]eventstore.StreamWrite, error) {
+	ids, streams, balances, err := observe(ctx, store, lc, tokenIDs)
+	if err != nil {
+		return nil, err
+	}
+	writes := make([]eventstore.StreamWrite, 0, len(ids))
+	for _, id := range ids {
+		event, err := balanceRecorded(id, streams[id].walletID, balances)
+		if err != nil {
+			return nil, err
+		}
+		if proto.Equal(event, streams[id].last) {
+			continue
+		}
+		writes = append(writes, eventstore.StreamWrite{
+			AggregateType: AggregateType, AggregateID: id, ExpectedSeq: streams[id].seq,
+			Events: []proto.Message{event},
+		})
+	}
+	return writes, nil
+}
+
+// observe loads each distinct Token's stream, then reads every account's
+// balance from the ledger — in that order, which is what makes the stream
+// sequence a safe ordering key (see RecordBalances).
+func observe(ctx context.Context, store eventstore.Store, lc ledger.Client, tokenIDs []string) ([]string, map[string]tokenStream, map[string]ledger.Balance, error) {
+	ids := distinct(tokenIDs)
+	streams := make(map[string]tokenStream, len(ids))
+	for _, id := range ids {
+		s, err := loadTokenStream(ctx, store, id)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		streams[id] = s
+	}
+	balances, err := lc.Balances(ctx, ids)
+	if err != nil {
+		return nil, nil, nil, twirp.InternalErrorWith(fmt.Errorf("ledger: Balances: %w", err))
+	}
+	return ids, streams, balances, nil
 }
 
 // recordBalance appends one Token's observation, starting from a stream and

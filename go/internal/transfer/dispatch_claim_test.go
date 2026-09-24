@@ -3,6 +3,7 @@ package transfer
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -120,6 +121,37 @@ func (c *createTransfersCountingClient) count() int {
 	return c.calls
 }
 
+// claimStrippingStore drops claim markers from every atomic write, so
+// prepare() records TransferPrepared without claiming the step after it.
+type claimStrippingStore struct {
+	eventstore.Store
+}
+
+func (s claimStrippingStore) AppendAtomic(ctx context.Context, writes ...eventstore.StreamWrite) error {
+	stripped := make([]eventstore.StreamWrite, len(writes))
+	for i, w := range writes {
+		w.Events = slices.DeleteFunc(slices.Clone(w.Events), func(m proto.Message) bool {
+			return isClaimMarkerType(eventstore.EventType(m))
+		})
+		stripped[i] = w
+	}
+	return s.Store.AppendAtomic(ctx, stripped...)
+}
+
+// prepareUnclaimed runs the real prepare() for transferID but leaves the
+// Transfer Prepared and unclaimed, as a stream written before prepare() began
+// claiming the next step is (go/docs/adr/0010). A test that drives that step
+// by hand needs it so: its own call would otherwise wait out prepare()'s
+// fresh claim.
+func prepareUnclaimed(t *testing.T, ctx context.Context, s *Server, transferID string) {
+	t.Helper()
+	seeder := *s
+	seeder.store = claimStrippingStore{Store: s.store}
+	if _, err := seeder.prepare(ctx, transferID); err != nil {
+		t.Fatalf("prepare(): %v", err)
+	}
+}
+
 // seedPreparedTransfer hand-seeds a minimal TransferRequestAccepted (only
 // the fields prepare() itself reads) and runs the real prepare() once,
 // single-threaded, landing the Transfer at exactly statePrepared — the one
@@ -133,9 +165,7 @@ func seedPreparedTransfer(t *testing.T, ctx context.Context, s *Server, store ev
 	}); err != nil {
 		t.Fatalf("seed TransferRequestAccepted: %v", err)
 	}
-	if err := s.prepare(ctx, transferID); err != nil {
-		t.Fatalf("prepare(): %v", err)
-	}
+	prepareUnclaimed(t, ctx, s, transferID)
 	events, err := store.Load(ctx, AggregateType, transferID)
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)

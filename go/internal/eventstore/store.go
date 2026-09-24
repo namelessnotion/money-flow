@@ -1,5 +1,5 @@
 // Package eventstore is the append-only, immutable log of Domain Events for
-// every aggregate (Holder, Wallet, Token, Transfer, Operation). It is the
+// every aggregate (Holder, Wallet, Token, Transfer, Transaction). It is the
 // source of truth for intent; TigerBeetle remains the source of truth for
 // account balances.
 package eventstore
@@ -80,12 +80,19 @@ type Store interface {
 	// weakened; the only added guarantee is that either every write lands or
 	// none does.
 	//
-	// This is deliberately narrow. It exists so aggregates that are *created
-	// together* — a Holder and the Wallets provisioned with it — cannot end up
-	// half-created. It is not a licence to mutate independently-lived
-	// aggregates in one transaction: a decision on aggregate A that depends on
-	// aggregate B's state belongs in a process manager, not here. It is also
-	// only implementable while every stream shares one database.
+	// This is deliberately narrow. It has two uses. Aggregates that are
+	// *created together* — a Holder and the Wallets provisioned with it —
+	// cannot end up half-created. And a saga step's outcome is recorded with
+	// the observations of the one ledger write it made — each touched Token's
+	// TokenBalanceRecorded — so the read side learns both at once
+	// (go/docs/adr/0010). An observation decides nothing: it restates what the
+	// ledger now holds, and each Token's own stream still orders it by
+	// ExpectedSeq.
+	//
+	// It is not a licence to mutate independently-lived aggregates in one
+	// transaction: a decision on aggregate A that depends on aggregate B's
+	// state belongs in a process manager, not here. It is also only
+	// implementable while every stream shares one database.
 	//
 	// Writes carrying no events are ignored, including their ExpectedSeq.
 	AppendAtomic(ctx context.Context, writes ...StreamWrite) error
