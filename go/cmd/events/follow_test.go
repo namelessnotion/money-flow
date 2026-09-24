@@ -5,7 +5,6 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	oppb "github.com/namelessnotion/money_flow/go/gen/proto/operation/v1"
 	txpb "github.com/namelessnotion/money_flow/go/gen/proto/transaction/v1"
 	trpb "github.com/namelessnotion/money_flow/go/gen/proto/transfer/v1"
 )
@@ -18,12 +17,12 @@ func streamEvent(t *testing.T, aggregateType, aggregateID string, sequence int64
 }
 
 // One ACH withdrawal whose ACH entry was returned: its Transaction, both legs
-// (one rejected, carrying no transaction id of its own), an Operation of the
-// real leg, and the Reversal the rollback asked for — interleaved with
-// another Transaction's Transfer and a Wallet shared by everything.
-func TestFollowerTakesInATransactionsTransfersOperationsAndReversals(t *testing.T) {
+// (one rejected, carrying no transaction id of its own), and the Reversal the
+// rollback asked for — interleaved with another Transaction's Transfer and a
+// Wallet shared by everything.
+func TestFollowerTakesInATransactionsTransfersAndReversals(t *testing.T) {
 	const (
-		tx, real, shadow, op, reversal = "tx", "real", "shadow", "op", "reversal"
+		tx, real, shadow, reversal = "tx", "real", "shadow", "reversal"
 	)
 	log := []struct {
 		e    row
@@ -33,9 +32,8 @@ func TestFollowerTakesInATransactionsTransfersOperationsAndReversals(t *testing.
 		{streamEvent(t, "transfer", "other", 1, &trpb.TransferRequestAccepted{Id: "other", TransactionId: "other-tx"}), false},
 		{streamEvent(t, "transfer", shadow, 1, &trpb.TransferRequestRejected{Id: shadow, Reason: "short"}), true},
 		{streamEvent(t, "transfer", real, 1, &trpb.TransferRequestAccepted{Id: real, TransactionId: tx}), true},
-		{streamEvent(t, "operation", op, 1, &oppb.Initiated{Id: op, TransferId: real}), true},
-		{streamEvent(t, "operation", op, 2, &oppb.Staged{Id: op}), true},
-		{streamEvent(t, "operation", "other-op", 1, &oppb.Initiated{Id: "other-op", TransferId: "other"}), false},
+		{streamEvent(t, "transfer", real, 2, &trpb.TransferPrepared{Id: real}), true},
+		{streamEvent(t, "transfer", "other", 2, &trpb.TransferPrepared{Id: "other"}), false},
 		{streamEvent(t, "transaction", tx, 5, &txpb.TransferReversalRequestedWithinTransaction{Id: tx, TransferId: real, ReversalId: reversal}), true},
 		{streamEvent(t, "transfer", reversal, 1, &trpb.ReversalRequestAccepted{Id: reversal, TransferId: real, TransactionId: tx}), true},
 		{streamEvent(t, "transfer", reversal, 3, &trpb.TransferStaged{Id: reversal}), true},

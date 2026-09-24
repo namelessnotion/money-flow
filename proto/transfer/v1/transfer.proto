@@ -8,10 +8,16 @@ import "shared/v1/money.proto";
 // A Transfer moves an amount from a Source Wallet to a Destination Wallet.
 // It never moves money directly between existing Tokens: one or more new
 // Tokens are minted in the destination Wallet for the transferred amount
-// (v1 always mints exactly one), and one or more Operations then move
-// capacity out of the source Wallet's existing Token(s) into those new
+// (v1 always mints exactly one), and the Transfer's legs (TransferLeg) then
+// move capacity out of the source Wallet's existing Token(s) into those new
 // Token(s)' TigerBeetle accounts — this is what keeps money's provenance
 // traceable instead of commingled within a Wallet.
+//
+// A leg is an entity inside the Transfer, not an aggregate of its own: every
+// leg is recorded on TransferPrepared and reaches the Transfer's own outcome
+// (Staged, Committed, Cancelled, Failed) together with every other leg, so
+// the Transfer's stream is the whole record of what its legs did
+// (go/docs/adr/0009).
 message RequestTransferRequest {
   string id = 1;
   string from_wallet_id = 2;
@@ -46,27 +52,31 @@ message RequestTransferRequest {
   bool mint_source = 7;
 }
 
-// One destination Token funded by a Transfer (or Reversal), and the
-// bookkeeping Operation that credits it. v1 forward Transfers always
-// populate exactly one of these; a Reversal may populate several, mirroring
-// the many-to-one shape of the Transfer it reverses.
+// One destination Token funded by a Transfer (or Reversal). v1 forward
+// Transfers always populate exactly one of these; a Reversal may populate
+// several, mirroring the many-to-one shape of the Transfer it reverses.
 message TransferDestination {
+  // 3 was credit_operation_id, the bookkeeping-only CREDIT Operation folded
+  // into the Transfer by go/docs/adr/0009.
+  reserved 3;
+  reserved "credit_operation_id";
+
   string to_token_id = 1;
   shared.v1.Money amount = 2;
-  string credit_operation_id = 3;
 }
 
 message TransferRequestAccepted {
+  // 6 was debit_operation_ids, never populated: a Transfer's legs are
+  // decided at prepare, and recorded on TransferPrepared (go/docs/adr/0009).
+  reserved 6;
+  reserved "debit_operation_ids";
+
   string id = 1;
   string from_wallet_id = 2;
   string to_wallet_id = 3;
   shared.v1.Money amount = 4;
   // Token(s) newly minted in the destination Wallet to receive the amount.
   repeated TransferDestination destinations = 5;
-  // One DEBIT Operation per source Token debited to fund the destination(s);
-  // more than one is needed when a single source Token's capacity can't
-  // cover the full amount. All must complete before any CREDIT performs.
-  repeated string debit_operation_ids = 6;
   // Echoes the request's stage flag — the saga has to know, on every resume
   // from the event log, whether this Transfer takes the staging branch,
   // and nothing else records that fact once accepted.
@@ -106,10 +116,10 @@ message CancelAcceptedTransferResponse {
 }
 
 // The remaining commands/events step the Transfer saga through preparing,
-// staging, committing, cancelling and compensating its underlying
-// Operations. These are driven internally by the Transfer process manager
-// as Operations report progress, not called directly over RPC (except the
-// staged-settlement RPCs below, which resume the saga from outside).
+// staging, committing, cancelling and compensating its legs. These are
+// driven internally by the Transfer process manager, not called directly
+// over RPC (except the staged-settlement RPCs below, which resume the saga
+// from outside).
 
 message StartPreparingTransfer {
   string id = 1;
@@ -123,21 +133,31 @@ message CompletePreparingTransfer {
   string id = 1;
 }
 
-// One DEBIT/CREDIT pairing within a Transfer: an amount moving from
-// source_token_id to dest_token_id. Recorded on TransferPrepared so a
-// reversal can later reconstruct the manifest (swap source and dest per
-// leg) without re-deriving Token selection, which could legitimately answer
-// differently by the time a reversal is requested.
+// One leg of a Transfer: an amount moving from source_token_id to
+// dest_token_id, as exactly one TigerBeetle transfer debiting the source
+// Token's account and crediting the destination's. A Transfer's legs are
+// submitted to TigerBeetle together as linked chains, so they commit or fail
+// together (go/docs/adr/0008 for a Transfer wider than one chain).
+//
+// Recorded on TransferPrepared, before anything is submitted, so a crash
+// recovers the same legs and a reversal can later reconstruct the manifest
+// (swap source and dest per leg) without re-deriving Token selection, which
+// could legitimately answer differently by the time a reversal is requested.
 message TransferLeg {
+  // 5 was credit_operation_id, the bookkeeping-only CREDIT Operation folded
+  // into the Transfer by go/docs/adr/0009.
+  reserved 5;
+  reserved "credit_operation_id";
+
   string source_token_id = 1;
   string dest_token_id = 2;
   shared.v1.Money amount = 3;
-  // Operation ids double as TigerBeetle transfer ids (decision #6), so
-  // stage()/commit() need them recorded here rather than re-deriving or
-  // separately indexing them. credit_operation_id is shared across every
-  // leg feeding the same dest_token_id.
-  string debit_operation_id = 4;
-  string credit_operation_id = 5;
+  // The leg's TigerBeetle transfer id, recorded here so every retry of
+  // stage()/commit() submits the same id and TigerBeetle answers Exists.
+  // A staged leg's post and void are derived from it. Formerly named
+  // debit_operation_id; the field number is unchanged, so older
+  // TransferPrepared events still decode.
+  string ledger_transfer_id = 4;
 }
 
 message TransferPrepared {
@@ -161,6 +181,7 @@ message CompleteCancellingPreparedTransfer {
 
 message PreparedTransferCancelled {
   string id = 1;
+  string reason = 2;
 }
 
 // StartCompensatingFailedTransfer/TransferFailed are reached only when
@@ -185,6 +206,7 @@ message CompleteCompensatingFailedTransfer {
 
 message TransferFailed {
   string id = 1;
+  string reason = 2; // what TigerBeetle refused, e.g. "tigerbeetle rejected commit leg 0: ..."
 }
 
 message StartCommittingTransfer {
@@ -195,15 +217,14 @@ message TransferCommittingStarted {
   string id = 1;
 }
 
-// This is where debit_operation_ids are submitted to TigerBeetle together as
+// This is where every leg is submitted to TigerBeetle together as
 // one linked transfer chain — atomic commit or atomic rejection, so there's
 // no partially-applied state to compensate for here. For an immediate
 // (non-staged) Transfer this is a fresh linked chain of ordinary transfers;
 // for a staged Transfer reaching this point via PostPendingTransfer, it is
 // instead a linked chain of post_pending_transfer entries referencing each
-// DEBIT's already-staged TigerBeetle transfer id. Either way, once
-// TigerBeetle confirms, every CREDIT Operation performs (bookkeeping only,
-// see operation.proto) and TransferCommitted fires — "posted" (the staged
+// leg's already-staged TigerBeetle transfer id. Either way, once
+// TigerBeetle confirms, TransferCommitted fires — "posted" (the staged
 // flow's vocabulary) and "committed" are the same terminal state reached by
 // two different routes.
 message CommitTransfer {
@@ -268,9 +289,9 @@ message ConfirmStagedTransferResponse {
 // with the provider failed (from Staged), or the provider later reports the
 // in-flight transfer didn't go through (from Pending) — legal from either
 // state, since the underlying mechanics are identical either way. Voids the
-// TigerBeetle reservation via void_pending_transfer, then operation.Cancel
-// (not Fail — this is an external-factor stop, not an invariant violation)
-// on every leg.
+// TigerBeetle reservation via void_pending_transfer, then records
+// TransferCancelled (not TransferFailed — this is an external-factor stop,
+// not an invariant violation).
 message CancelStagedTransferRequest {
   string id = 1;
   string reason = 2;
@@ -339,10 +360,10 @@ message PostPendingTransferResponse {
 // id, own stream), not a rewind of the original: an event stream reaching
 // TransferCommitted stays a linear terminal history, "undo" is a new fact.
 // Downstream of accept, a Reversal is structurally identical to a forward
-// Transfer (N debit legs -> linked TigerBeetle batch -> M credit legs) —
+// Transfer (N legs -> linked TigerBeetle batch -> M destination Tokens) —
 // it drives through the exact same saga states above, including staging.
 // The only difference is how the legs get computed: derived from the
-// original Transfer's own recorded Operations rather than selected fresh
+// original Transfer's own recorded legs rather than selected fresh
 // (see reversalManifest in the implementation), so no new Token is ever
 // minted for a Reversal.
 message RequestReversalRequest {
@@ -357,11 +378,14 @@ message RequestReversalRequest {
 }
 
 message ReversalRequestAccepted {
+  // 5 was debit_operation_ids, never populated (see TransferRequestAccepted).
+  reserved 5;
+  reserved "debit_operation_ids";
+
   string id = 1;
   string transfer_id = 2;
   shared.v1.Money amount = 3;
   repeated TransferDestination destinations = 4; // == original transfer's source Token(s)
-  repeated string debit_operation_ids = 5;
   bool stage = 6; // echoes the request's stage flag, same reason as TransferRequestAccepted.stage
   string transaction_id = 7;
 }

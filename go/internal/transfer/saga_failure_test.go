@@ -49,20 +49,7 @@ func TestCommit_TigerBeetleRejectionRoutesToFailedNotCancelled(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 	if currentState(events) != stateFailed {
-		t.Fatalf("state = %v, want failed; events = %v", currentState(events), eventTypes(events))
-	}
-
-	legs, err := preparedLegs(events, testutil.ID("xfer1"))
-	if err != nil {
-		t.Fatalf("preparedLegs() error = %v", err)
-	}
-	debitEvents, err := store.Load(ctx, "operation", legs[0].GetDebitOperationId())
-	if err != nil {
-		t.Fatalf("Load(debit operation) error = %v", err)
-	}
-	last := debitEvents[len(debitEvents)-1]
-	if last.EventType != "operation.v1.Failed" {
-		t.Errorf("debit operation's last event = %q, want operation.v1.Failed (not Cancelled)", last.EventType)
+		t.Fatalf("state = %v, want failed (not cancelled); events = %v", currentState(events), eventTypes(events))
 	}
 }
 
@@ -90,7 +77,7 @@ func TestStage_TigerBeetleRejectionRoutesToFailed(t *testing.T) {
 	}
 }
 
-// TestStage_TigerBeetleRejectionReturnsNilNotAnOperationContradiction is
+// TestStage_TigerBeetleRejectionReturnsNilNotAContradiction is
 // TestStage_TigerBeetleRejectionRoutesToFailed's blind spot closed:
 // RequestTransfer drives runSaga through logSagaError, which logs a saga
 // failure rather than returning it, so the two RequestTransfer-based tests
@@ -98,12 +85,12 @@ func TestStage_TigerBeetleRejectionRoutesToFailed(t *testing.T) {
 // contradiction error here — submitBatch returned onReject's result
 // directly, and a *successful* compensate() (which legitimately returns nil
 // after appending TransferFailed) was indistinguishable from "no rejection
-// happened," so stage() fell through to operation.Stage() on an Operation
-// compensate() had just marked Failed. The Transfer's own final state
+// happened," so stage() fell through to recording TransferStaged on a
+// Transfer compensate() had just marked Failed. The Transfer's own final state
 // (Failed, appended durably by compensate() before the fall-through) stayed
 // correct either way, which is exactly why this needed its own test rather
 // than trusting the existing ones' state assertions.
-func TestStage_TigerBeetleRejectionReturnsNilNotAnOperationContradiction(t *testing.T) {
+func TestStage_TigerBeetleRejectionReturnsNilNotAContradiction(t *testing.T) {
 	t.Parallel()
 	store := eventstore.NewMemoryStore()
 	lc := ledger.NewFakeClient()
@@ -130,9 +117,9 @@ func TestStage_TigerBeetleRejectionReturnsNilNotAnOperationContradiction(t *test
 	}
 }
 
-// TestCommit_TigerBeetleRejectionReturnsNilNotAnOperationContradiction is
+// TestCommit_TigerBeetleRejectionReturnsNilNotAContradiction is
 // the commit() twin of the stage() test above.
-func TestCommit_TigerBeetleRejectionReturnsNilNotAnOperationContradiction(t *testing.T) {
+func TestCommit_TigerBeetleRejectionReturnsNilNotAContradiction(t *testing.T) {
 	t.Parallel()
 	store := eventstore.NewMemoryStore()
 	lc := ledger.NewFakeClient()

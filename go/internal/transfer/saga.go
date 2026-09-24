@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -12,14 +13,12 @@ import (
 	"github.com/twitchtv/twirp"
 	"google.golang.org/protobuf/proto"
 
-	operationpb "github.com/namelessnotion/money_flow/go/gen/proto/operation/v1"
 	sharedpb "github.com/namelessnotion/money_flow/go/gen/proto/shared/v1"
 	pb "github.com/namelessnotion/money_flow/go/gen/proto/transfer/v1"
 	"github.com/namelessnotion/money_flow/go/internal/contention"
 	"github.com/namelessnotion/money_flow/go/internal/detid"
 	"github.com/namelessnotion/money_flow/go/internal/eventstore"
 	"github.com/namelessnotion/money_flow/go/internal/ledger"
-	"github.com/namelessnotion/money_flow/go/internal/operation"
 	"github.com/namelessnotion/money_flow/go/internal/token"
 	"github.com/namelessnotion/money_flow/go/internal/wallet"
 )
@@ -81,16 +80,46 @@ func (s transferState) String() string {
 // as if it were a real transition would miss a still-live claim sitting
 // underneath it — go/docs/adr/0005 was found doing exactly that.
 var stateByEventType = map[string]transferState{
-	eventstore.EventType(&pb.TransferRequestAccepted{}):    stateAccepted,
-	eventstore.EventType(&pb.ReversalRequestAccepted{}):    stateAccepted,
-	eventstore.EventType(&pb.TransferPrepared{}):           statePrepared,
-	eventstore.EventType(&pb.TransferStaged{}):             stateStaged,
-	eventstore.EventType(&pb.TransferPending{}):            statePending,
-	eventstore.EventType(&pb.TransferCommitted{}):          stateCommitted,
-	eventstore.EventType(&pb.TransferFailed{}):              stateFailed,
-	eventstore.EventType(&pb.TransferCancelled{}):           stateCancelled,
-	eventstore.EventType(&pb.AcceptedTransferCancelled{}):  stateCancelled,
-	eventstore.EventType(&pb.PreparedTransferCancelled{}):  stateCancelled,
+	eventstore.EventType(&pb.TransferRequestAccepted{}):   stateAccepted,
+	eventstore.EventType(&pb.ReversalRequestAccepted{}):   stateAccepted,
+	eventstore.EventType(&pb.TransferPrepared{}):          statePrepared,
+	eventstore.EventType(&pb.TransferStaged{}):            stateStaged,
+	eventstore.EventType(&pb.TransferPending{}):           statePending,
+	eventstore.EventType(&pb.TransferCommitted{}):         stateCommitted,
+	eventstore.EventType(&pb.TransferFailed{}):            stateFailed,
+	eventstore.EventType(&pb.TransferCancelled{}):         stateCancelled,
+	eventstore.EventType(&pb.AcceptedTransferCancelled{}): stateCancelled,
+	eventstore.EventType(&pb.PreparedTransferCancelled{}): stateCancelled,
+}
+
+// transitions is a Transfer's lifecycle: for each state, the saga-outcome
+// events that may be recorded next. appendSagaStep refuses anything else, so
+// this is where "no leg reaches two different outcomes" is enforced — every
+// leg of a Transfer reaches the Transfer's own outcome, together
+// (go/docs/adr/0009). A refusal here is a saga contradiction and a bug, never
+// a race: two callers racing the same step converge instead (appendSagaStep).
+// The opening Accepted events, and TransferPrepared, are recorded by
+// RequestTransfer/RequestReversal and prepare() under their own state checks,
+// not through appendSagaStep, so they are not listed.
+var transitions = map[transferState][]string{
+	stateAccepted: {
+		eventstore.EventType(&pb.AcceptedTransferCancelled{}),
+	},
+	statePrepared: {
+		eventstore.EventType(&pb.TransferStaged{}),
+		eventstore.EventType(&pb.TransferCommitted{}),
+		eventstore.EventType(&pb.TransferFailed{}),
+		eventstore.EventType(&pb.PreparedTransferCancelled{}),
+	},
+	stateStaged: {
+		eventstore.EventType(&pb.TransferPending{}),
+		eventstore.EventType(&pb.TransferCancelled{}),
+	},
+	statePending: {
+		eventstore.EventType(&pb.TransferCommitted{}),
+		eventstore.EventType(&pb.TransferFailed{}),
+		eventstore.EventType(&pb.TransferCancelled{}),
+	},
 }
 
 // TerminalEventTypes lists the event types after which a Transfer (or
@@ -265,43 +294,16 @@ func preparedLegs(events []eventstore.Event, transferID string) ([]*pb.TransferL
 	return nil, fmt.Errorf("transfer %q: no TransferPrepared event found", transferID)
 }
 
-// forEachOperation calls fn once for every DEBIT Operation's id in legs,
-// then once for every distinct CREDIT Operation's id (a CREDIT is shared
-// across every leg feeding the same destination Token). Centralizes that
-// DEBIT-then-CREDIT, dedup-CREDIT ordering for stage/commit/cancelStaged/
-// compensate, which all walk the same shape.
-func forEachOperation(legs []*pb.TransferLeg, fn func(operationID string) error) error {
-	for _, leg := range legs {
-		if err := fn(leg.GetDebitOperationId()); err != nil {
-			return err
-		}
-	}
-	seen := make(map[string]bool, len(legs))
-	for _, leg := range legs {
-		creditID := leg.GetCreditOperationId()
-		if seen[creditID] {
-			continue
-		}
-		seen[creditID] = true
-		if err := fn(creditID); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // buildDestinations groups legs by destination Token, summing the amount
 // each receives, for the TransferCommitted summary.
 func buildDestinations(legs []*pb.TransferLeg) []*pb.TransferDestination {
 	var order []string
 	sums := make(map[string]uint64, len(legs))
-	creditOps := make(map[string]string, len(legs))
 	currency := ""
 	for _, leg := range legs {
 		destID := leg.GetDestTokenId()
 		if _, seen := sums[destID]; !seen {
 			order = append(order, destID)
-			creditOps[destID] = leg.GetCreditOperationId()
 		}
 		sums[destID] += leg.GetAmount().GetMinorUnits()
 		currency = leg.GetAmount().GetCurrency()
@@ -310,7 +312,6 @@ func buildDestinations(legs []*pb.TransferLeg) []*pb.TransferDestination {
 	for i, destID := range order {
 		destinations[i] = &pb.TransferDestination{
 			ToTokenId: destID, Amount: &sharedpb.Money{MinorUnits: sums[destID], Currency: currency},
-			CreditOperationId: creditOps[destID],
 		}
 	}
 	return destinations
@@ -339,9 +340,9 @@ func (s *Server) loadLegs(ctx context.Context, transferID string) (legs []*pb.Tr
 // returning nil means "I recorded the rejection cleanly" (compensate()
 // legitimately returns nil after appending TransferFailed), not "there was
 // nothing to record" — conflating the two used to let stage()/commit() fall
-// through to operation.Stage()/Perform() on an Operation compensate() had
-// just marked Failed, the exact contradiction operation/server.go's
-// terminal-state guard exists to catch.
+// through to recording an outcome after compensate() had just recorded
+// TransferFailed, the exact contradiction appendSagaStep's transitions guard
+// exists to catch.
 var errBatchRejected = errors.New("transfer: batch rejected")
 
 // legTransfers builds one ledger transfer per leg, in leg order — the order
@@ -355,11 +356,11 @@ func legTransfers(legs []*pb.TransferLeg, build func(leg *pb.TransferLeg) ledger
 }
 
 // reservations reserves every leg's amount as a TigerBeetle pending transfer
-// named after its DEBIT Operation — the id posts and voids refer back to.
+// under the leg's ledger transfer id — the id posts and voids refer back to.
 func reservations(legs []*pb.TransferLeg) []ledger.Transfer {
 	return legTransfers(legs, func(leg *pb.TransferLeg) ledger.Transfer {
 		return ledger.Transfer{
-			ID: leg.GetDebitOperationId(), DebitAccountID: leg.GetSourceTokenId(), CreditAccountID: leg.GetDestTokenId(),
+			ID: leg.GetLedgerTransferId(), DebitAccountID: leg.GetSourceTokenId(), CreditAccountID: leg.GetDestTokenId(),
 			MinorUnits: leg.GetAmount().GetMinorUnits(), Currency: leg.GetAmount().GetCurrency(),
 			Kind: ledger.TransferKindPending, Timeout: stagingTimeoutSeconds,
 		}
@@ -367,15 +368,15 @@ func reservations(legs []*pb.TransferLeg) []ledger.Transfer {
 }
 
 // settlements finalizes (kind PostPending) or releases (kind VoidPending)
-// every leg's reservation, under an id derived from the DEBIT Operation and
-// suffix so a retry answers Exists.
+// every leg's reservation, under an id derived from the leg's ledger transfer
+// id and suffix so a retry answers Exists.
 func settlements(legs []*pb.TransferLeg, kind ledger.TransferKind, suffix string) []ledger.Transfer {
 	return legTransfers(legs, func(leg *pb.TransferLeg) ledger.Transfer {
 		return ledger.Transfer{
-			ID:             detid.New(leg.GetDebitOperationId() + suffix),
+			ID:             detid.New(leg.GetLedgerTransferId() + suffix),
 			DebitAccountID: leg.GetSourceTokenId(), CreditAccountID: leg.GetDestTokenId(),
 			MinorUnits: leg.GetAmount().GetMinorUnits(), Currency: leg.GetAmount().GetCurrency(),
-			Kind: kind, PendingID: leg.GetDebitOperationId(),
+			Kind: kind, PendingID: leg.GetLedgerTransferId(),
 		}
 	})
 }
@@ -480,18 +481,24 @@ func (s *Server) recordTouched(ctx context.Context, batch []ledger.Transfer) err
 	return token.RecordBalances(ctx, s.store, s.ledger, touched)
 }
 
-// appendSagaStep appends event as the next fact on transferID's own stream,
-// unless it's already there (idempotent convergence — a retried saga step,
-// or another concurrent call driving the same Transfer, already recorded
-// it).
+// appendSagaStep appends event as the next fact on transferID's own stream.
+// It converges when that fact is already the Transfer's latest outcome — a
+// retried saga step, or another concurrent call driving the same Transfer,
+// already recorded it, perhaps with a client's *Rejected response landing on
+// top since — and refuses, as an internal error, any outcome the Transfer's
+// lifecycle (transitions) does not allow from where it stands.
 func (s *Server) appendSagaStep(ctx context.Context, transferID string, event proto.Message) error {
 	events, err := s.store.Load(ctx, AggregateType, transferID)
 	if err != nil {
 		return twirp.InternalErrorWith(err)
 	}
 	wantType := eventstore.EventType(event)
-	if len(events) > 0 && events[len(events)-1].EventType == wantType {
+	if latest, ok := latestOutcome(events); ok && latest.EventType == wantType {
 		return nil
+	}
+	if state := currentState(events); !slices.Contains(transitions[state], wantType) {
+		return twirp.InternalError(fmt.Sprintf(
+			"transfer %q: already %s, cannot also become %s", transferID, state, wantType))
 	}
 	switch err := s.store.Append(ctx, AggregateType, transferID, int64(len(events)), event); {
 	case err == nil:
@@ -501,6 +508,17 @@ func (s *Server) appendSagaStep(ctx context.Context, transferID string, event pr
 	default:
 		return twirp.InternalErrorWith(err)
 	}
+}
+
+// latestOutcome is the last event on events that advances currentState()'s
+// fold, skipping claim markers and *Rejected responses.
+func latestOutcome(events []eventstore.Event) (eventstore.Event, bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		if _, advances := stateByEventType[events[i].EventType]; advances {
+			return events[i], true
+		}
+	}
+	return eventstore.Event{}, false
 }
 
 const claimPollInterval = 20 * time.Millisecond
@@ -559,8 +577,8 @@ func liveMarker(events []eventstore.Event) (eventstore.Event, bool) {
 // wait for that marker to resolve rather than immediately claiming the
 // *next* sequence number — an earlier version of this fix got this wrong
 // (twice — see the ADR), and a claim on the next slot runs concurrently
-// with the still-in-flight first one against the same Operations,
-// reproducing the exact contradiction this decision exists to prevent.
+// with the still-in-flight first one against the same legs, reproducing
+// the exact contradiction this decision exists to prevent.
 //
 // A marker older than claimStaleAfter is treated as abandoned and is safe
 // to re-claim with the same marker type — this is what preserves crash
@@ -569,9 +587,9 @@ func liveMarker(events []eventstore.Event) (eventstore.Event, bool) {
 // dispatch path. A different transition is refused (errAbandonedClaim)
 // rather than let through: "abandoned" is a guess, the old winner may be
 // merely slow and mid-step, and even if it did crash it may have
-// half-applied its step (some Operations Cancelled, a TigerBeetle void
-// landed) — the same transition converges over that, a different one
-// contradicts it. runSaga finishes an abandoned cancel of a Prepared
+// half-applied its step (some chains voided in TigerBeetle, not yet all)
+// — the same transition converges over that, a different one contradicts
+// it. runSaga finishes an abandoned cancel of a Prepared
 // Transfer itself (claimedPreparedCancel), so the orchestrator never
 // trips this refusal on its own dispatch. Staleness is
 // measured on the store's own clock (store.Now), not the Go process's:
@@ -589,8 +607,8 @@ func liveMarker(events []eventstore.Event) (eventstore.Event, bool) {
 // caller. stillHoldsClaim, called by stage()/commit()/cancelStaged()/
 // cancelPrepared()/compensate() immediately before each externally visible
 // action, stops the slow winner at its next step. It cannot stop it mid-step
-// (inside a multi-leg Operation loop, or a TigerBeetle round trip), which is
-// why only the same marker type may take a stale claim over: that overlap
+// (inside a TigerBeetle round trip, or a wide batch's run of chains), which
+// is why only the same marker type may take a stale claim over: that overlap
 // converges on idempotent writes, a different transition's would not.
 //
 // won=false, err=nil means the aggregate already moved past preClaimState —
@@ -722,10 +740,9 @@ var errPlanOvertaken = errors.New("plan overtaken by a write to a stream it plan
 
 // prepare mints the destination Token(s) (skipped for a reversal — its
 // destinations are always the original Transfer's own, pre-existing source
-// Tokens) and initiates every leg's Operations, all in one AppendAtomic —
-// the Transfer's own stream, any new Token stream(s), and every new
-// Operation stream are all *created together*, the same shape as
-// Holder.Provision.
+// Tokens) and records every leg on TransferPrepared, all in one AppendAtomic
+// — the Transfer's legs and any new Token stream(s) are *created together*,
+// the same shape as Holder.Provision.
 //
 // Minting appends to the Wallet at the position it was loaded at, so
 // Transfers minting into one Wallet — a shared destination, or a reserve
@@ -864,45 +881,19 @@ func (s *Server) tryPrepare(ctx context.Context, transferID string) error {
 		return fmt.Errorf("transfer %q: stream starts with %s, want an Accepted event", transferID, events[0].EventType)
 	}
 
-	writes := make([]eventstore.StreamWrite, 0, len(mintWrites)+2*len(legs)+1)
-	writes = append(writes, mintWrites...)
-
+	// Each leg's ledger transfer id is generated per planning: only the plan
+	// that lands is ever submitted, and every later step reads its ids back
+	// off TransferPrepared.
 	protoLegs := make([]*pb.TransferLeg, len(legs))
-	creditOpByDest := make(map[string]string, len(legs))
-	amountByDest := make(map[string]uint64, len(legs))
-	currency := ""
 	for i, leg := range legs {
-		debitOpID := uuid.NewV7().String()
-		writes = append(writes, eventstore.StreamWrite{
-			AggregateType: operation.AggregateType, AggregateID: debitOpID, ExpectedSeq: 0,
-			Events: []proto.Message{operation.InitiatedEvent(
-				debitOpID, transferID, leg.SourceTokenID, leg.DestTokenID, operationpb.Operator_OPERATOR_DEBIT, leg.Amount,
-			)},
-		})
-
-		creditOpID, ok := creditOpByDest[leg.DestTokenID]
-		if !ok {
-			creditOpID = uuid.NewV7().String()
-			creditOpByDest[leg.DestTokenID] = creditOpID
-		}
-		amountByDest[leg.DestTokenID] += leg.Amount.GetMinorUnits()
-		currency = leg.Amount.GetCurrency()
-
 		protoLegs[i] = &pb.TransferLeg{
 			SourceTokenId: leg.SourceTokenID, DestTokenId: leg.DestTokenID, Amount: leg.Amount,
-			DebitOperationId: debitOpID, CreditOperationId: creditOpID,
+			LedgerTransferId: uuid.NewV7().String(),
 		}
 	}
-	for destID, creditOpID := range creditOpByDest {
-		writes = append(writes, eventstore.StreamWrite{
-			AggregateType: operation.AggregateType, AggregateID: creditOpID, ExpectedSeq: 0,
-			Events: []proto.Message{operation.InitiatedEvent(
-				creditOpID, transferID, destID, "", operationpb.Operator_OPERATOR_CREDIT,
-				&sharedpb.Money{MinorUnits: amountByDest[destID], Currency: currency},
-			)},
-		})
-	}
 
+	writes := make([]eventstore.StreamWrite, 0, len(mintWrites)+1)
+	writes = append(writes, mintWrites...)
 	writes = append(writes, eventstore.StreamWrite{
 		AggregateType: AggregateType, AggregateID: transferID, ExpectedSeq: int64(len(events)),
 		Events: []proto.Message{&pb.TransferPrepared{Id: transferID, Legs: protoLegs}},
@@ -927,10 +918,9 @@ func (s *Server) tryPrepare(ctx context.Context, transferID string) error {
 // overtaken reports whether any stream writes expected at a position has
 // since moved past it: whether an append that lost did so to a write that
 // really landed, which is what makes re-planning worth it. Only streams that
-// already existed are checked. Every stream a plan creates — its Tokens, its
-// Operations — is created in the same AppendAtomic as the Transfer's own
-// TransferPrepared, so anything that created one first moved the Transfer's
-// stream too.
+// already existed are checked. Every stream a plan creates — its Tokens — is
+// created in the same AppendAtomic as the Transfer's own TransferPrepared, so
+// anything that created one first moved the Transfer's stream too.
 func (s *Server) overtaken(ctx context.Context, writes []eventstore.StreamWrite) (bool, error) {
 	for _, w := range writes {
 		if w.ExpectedSeq == 0 {
@@ -947,9 +937,8 @@ func (s *Server) overtaken(ctx context.Context, writes []eventstore.StreamWrite)
 	return false, nil
 }
 
-// stage submits every leg's DEBIT as a TigerBeetle pending transfer
-// (reserving capacity, posting nothing), then stages every DEBIT then every
-// distinct CREDIT Operation, then appends TransferStaged. A TigerBeetle-
+// stage submits every leg as a TigerBeetle pending transfer (reserving
+// capacity, posting nothing), then appends TransferStaged. A TigerBeetle-
 // level rejection here is our own ledger's invariant failing, so it routes
 // to compensate() (Failed), not cancelStaged() (Cancelled) — see decision
 // #13.
@@ -1003,19 +992,6 @@ func (s *Server) stage(ctx context.Context, transferID string) error {
 		}
 		return err
 	}
-	if err := forEachOperation(legs, func(operationID string) error {
-		_, err := operation.Stage(ctx, s.store, operationID)
-		return err
-	}); err != nil {
-		return err
-	}
-
-	if err := s.requireClaim(ctx, transferID, claimedSeq); err != nil {
-		if errors.Is(err, errClaimSuperseded) {
-			return nil
-		}
-		return err
-	}
 	return s.appendSagaStep(ctx, transferID, &pb.TransferStaged{Id: transferID})
 }
 
@@ -1026,8 +1002,7 @@ func (s *Server) confirmStaged(ctx context.Context, transferID string) error {
 	return s.appendSagaStep(ctx, transferID, &pb.TransferPending{Id: transferID})
 }
 
-// commit moves every leg's DEBIT in TigerBeetle (moveMoney), then performs
-// every DEBIT then every distinct CREDIT Operation, then appends
+// commit moves every leg in TigerBeetle (moveMoney), then appends
 // TransferCommitted. From Prepared (the immediate, non-staged path) this is
 // a fresh transfer batch — reserved first, then posted, if it spans more
 // than one ledger chain (go/docs/adr/0008); from Pending (called via
@@ -1083,19 +1058,6 @@ func (s *Server) commit(ctx context.Context, transferID string) error {
 		}
 		return err
 	}
-	if err := forEachOperation(legs, func(operationID string) error {
-		_, err := operation.Perform(ctx, s.store, operationID)
-		return err
-	}); err != nil {
-		return err
-	}
-
-	if err := s.requireClaim(ctx, transferID, claimedSeq); err != nil {
-		if errors.Is(err, errClaimSuperseded) {
-			return nil
-		}
-		return err
-	}
 	return s.appendSagaStep(ctx, transferID, &pb.TransferCommitted{Id: transferID, Destinations: buildDestinations(legs)})
 }
 
@@ -1117,7 +1079,7 @@ func (s *Server) moveMoney(ctx context.Context, transferID string, claimedSeq in
 	case len(legs) <= ledger.BatchMax:
 		return s.settle(ctx, transferID, claimedSeq, legTransfers(legs, func(leg *pb.TransferLeg) ledger.Transfer {
 			return ledger.Transfer{
-				ID: leg.GetDebitOperationId(), DebitAccountID: leg.GetSourceTokenId(), CreditAccountID: leg.GetDestTokenId(),
+				ID: leg.GetLedgerTransferId(), DebitAccountID: leg.GetSourceTokenId(), CreditAccountID: leg.GetDestTokenId(),
 				MinorUnits: leg.GetAmount().GetMinorUnits(), Currency: leg.GetAmount().GetCurrency(),
 				Kind: ledger.TransferKindRegular,
 			}
@@ -1167,11 +1129,11 @@ func (s *Server) settle(ctx context.Context, transferID string, claimedSeq int64
 }
 
 // cancelStaged submits a void_pending_transfer for every leg (releasing its
-// TigerBeetle reservation), then cancels every DEBIT then every distinct
-// CREDIT Operation (Cancel, not Fail — an external factor per decision #13),
-// then appends TransferCancelled. Legal from either Staged or Pending:
-// mechanically identical from either origin, since neither stage() nor
-// confirmStaged() changes what's reserved in TigerBeetle.
+// TigerBeetle reservation), then appends TransferCancelled (not
+// TransferFailed — an external factor per decision #13). Legal from either
+// Staged or Pending: mechanically identical from either origin, since
+// neither stage() nor confirmStaged() changes what's reserved in
+// TigerBeetle.
 //
 // Claims CancellingStagedTransferStarted before touching TigerBeetle
 // (go/docs/adr/0005): a client retry of CancelStagedTransfer, or a cancel
@@ -1208,56 +1170,26 @@ func (s *Server) cancelStaged(ctx context.Context, transferID, reason string) er
 		}
 		return err
 	}
-	if err := forEachOperation(legs, func(operationID string) error {
-		_, err := operation.Cancel(ctx, s.store, operationID, reason)
-		return err
-	}); err != nil {
-		return err
-	}
-
-	if err := s.requireClaim(ctx, transferID, claimedSeq); err != nil {
-		if errors.Is(err, errClaimSuperseded) {
-			return nil
-		}
-		return err
-	}
 	return s.appendSagaStep(ctx, transferID, &pb.TransferCancelled{Id: transferID, Reason: reason})
 }
 
-// compensate fails every DEBIT then every distinct CREDIT Operation (Fail,
-// not Cancel — our own ledger's invariant, not an external factor, per
-// decision #13), then appends TransferFailed. Called when TigerBeetle
-// itself rejects a batch we submitted, at stage() or commit().
+// compensate appends TransferFailed, carrying reason — our own ledger's
+// invariant refused a batch we submitted, at stage() or commit(), which is
+// not an external factor, so Failed rather than Cancelled (decision #13).
 //
 // No claim of its own (go/docs/adr/0005): compensate is only ever reached
 // from inside stage()'s or commit()'s own onReject callback, after that
 // caller already won the claim guarding the transition it's part of.
 // claimedSeq is that caller's claim, re-checked here (requireClaim) since
-// the CreateTransfers round trip that led here, and compensate's own
-// Postgres writes, both take real time a reclaim could happen during —
-// returning errClaimSuperseded propagates back through submitBatch's
-// onReject to the caller's own switch, which treats it exactly like
-// errBatchRejected.
+// the CreateTransfers round trip that led here takes real time a reclaim
+// could happen during — returning errClaimSuperseded propagates back
+// through submitBatch's onReject to the caller's own switch, which treats
+// it exactly like errBatchRejected.
 func (s *Server) compensate(ctx context.Context, transferID string, claimedSeq int64, reason string) error {
 	if err := s.requireClaim(ctx, transferID, claimedSeq); err != nil {
 		return err
 	}
-	legs, _, err := s.loadLegs(ctx, transferID)
-	if err != nil {
-		return err
-	}
-
-	if err := forEachOperation(legs, func(operationID string) error {
-		_, err := operation.Fail(ctx, s.store, operationID, reason)
-		return err
-	}); err != nil {
-		return err
-	}
-
-	if err := s.requireClaim(ctx, transferID, claimedSeq); err != nil {
-		return err
-	}
-	return s.appendSagaStep(ctx, transferID, &pb.TransferFailed{Id: transferID})
+	return s.appendSagaStep(ctx, transferID, &pb.TransferFailed{Id: transferID, Reason: reason})
 }
 
 // cancelPrepared handles user-driven cancellation via CancelAcceptedTransfer
@@ -1265,12 +1197,15 @@ func (s *Server) compensate(ctx context.Context, transferID string, claimedSeq i
 // anything has been submitted to TigerBeetle. Unlike cancelStaged, no
 // TigerBeetle call is ever needed here.
 //
-// The statePrepared branch claims CancellingPreparedTransferStarted before
-// calling operation.Cancel (go/docs/adr/0005): a client retry of
-// CancelAcceptedTransfer, or a cancel racing the orchestrator's automatic
-// stage()/commit() dispatch from the same Prepared state, would otherwise
-// both mutate every Operation. stateAccepted has no external side effect
-// before its own append, so — like prepare() — it needs no claim.
+// stateAccepted has no side effect to guard, so — like prepare() — it
+// needs no claim, only to land on the stream exactly as it was loaded: if
+// prepare() lands first, this append loses and CancelAcceptedTransfer
+// re-decides against the Prepared Transfer. The statePrepared branch claims
+// CancellingPreparedTransferStarted (go/docs/adr/0005) so it waits out,
+// rather than races, a stage()/commit() already submitting to TigerBeetle —
+// a client retry of CancelAcceptedTransfer, or the orchestrator's automatic
+// dispatch from the same Prepared state — and any that arrives after it
+// waits in turn.
 func (s *Server) cancelPrepared(ctx context.Context, transferID, reason string) error {
 	events, err := s.store.Load(ctx, AggregateType, transferID)
 	if err != nil {
@@ -1282,12 +1217,9 @@ func (s *Server) cancelPrepared(ctx context.Context, transferID, reason string) 
 
 	switch state := currentState(events); state {
 	case stateAccepted:
-		return s.appendSagaStep(ctx, transferID, &pb.AcceptedTransferCancelled{Id: transferID, Reason: reason})
+		_, err := s.tryAppend(ctx, transferID, int64(len(events)), &pb.AcceptedTransferCancelled{Id: transferID, Reason: reason})
+		return err
 	case statePrepared:
-		legs, err := preparedLegs(events, transferID)
-		if err != nil {
-			return err
-		}
 		claimedSeq, won, err := s.claimForDispatch(ctx, transferID, statePrepared, &pb.CancellingPreparedTransferStarted{Id: transferID, Reason: reason})
 		if err != nil {
 			return err
@@ -1301,19 +1233,7 @@ func (s *Server) cancelPrepared(ctx context.Context, transferID, reason string) 
 			}
 			return err
 		}
-		if err := forEachOperation(legs, func(operationID string) error {
-			_, err := operation.Cancel(ctx, s.store, operationID, reason)
-			return err
-		}); err != nil {
-			return err
-		}
-		if err := s.requireClaim(ctx, transferID, claimedSeq); err != nil {
-			if errors.Is(err, errClaimSuperseded) {
-				return nil
-			}
-			return err
-		}
-		return s.appendSagaStep(ctx, transferID, &pb.PreparedTransferCancelled{Id: transferID})
+		return s.appendSagaStep(ctx, transferID, &pb.PreparedTransferCancelled{Id: transferID, Reason: reason})
 	case stateCommitted, stateFailed, stateCancelled:
 		// Already resolved — idempotent no-op rather than an error.
 		return nil
@@ -1366,7 +1286,7 @@ func (s *Server) runSaga(ctx context.Context, transferID string) error {
 		}
 		if rejectedRequest(events) {
 			// A rejected request is terminal before the saga begins: there
-			// are no legs, no Operations and no next step, so resuming one is
+			// are no legs and no next step, so resuming one is
 			// legitimately nothing to do. Ordinary business rejections reach
 			// the orchestrator down the same topic as every other event
 			// (go/docs/adr/0001), and treating one as an unrecognized state

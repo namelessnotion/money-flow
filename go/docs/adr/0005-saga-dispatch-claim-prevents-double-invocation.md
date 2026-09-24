@@ -7,6 +7,11 @@
   already reached its next wait state does nothing" claim this decision found to be false for the
   side-effecting steps, and [ADR 0003](0003-orchestrator-failure-handling.md), whose halt-on-unprocessable-
   message policy is what surfaced the bug this ADR fixes rather than hiding it.
+- **Amended 2026-09-24 by** [ADR 0009](0009-operations-are-transfer-legs-not-aggregates.md): Operations are
+  now a Transfer's legs, not aggregates, so `operation/server.go` and its terminal-state guard are gone. The
+  same tripwire is now `appendSagaStep`'s `transitions` table on the Transfer itself, and it is stricter.
+  Mentions below of `operation.Stage/Perform/Cancel/Fail`, and of per-leg writes inside a claimed step,
+  describe the code as it stood when this was decided. The claims themselves are unchanged.
 
 ## Context
 
@@ -274,8 +279,8 @@ default:
 
 `cancelStaged()`'s own `onReject` always returns a non-nil `twirp.InternalError`, so it was never exposed to
 this bug and needed no change. Regression tests
-(`TestStage_TigerBeetleRejectionReturnsNilNotAnOperationContradiction`,
-`TestCommit_TigerBeetleRejectionReturnsNilNotAnOperationContradiction`, `go/internal/transfer/saga_failure_test.go`)
+(`TestStage_TigerBeetleRejectionReturnsNilNotAContradiction`,
+`TestCommit_TigerBeetleRejectionReturnsNilNotAContradiction`, `go/internal/transfer/saga_failure_test.go`)
 call `stage()`/`commit()` directly — bypassing `logSagaError`'s swallowing — and assert `nil`, closing the blind
 spot the existing RequestTransfer-based tests had.
 

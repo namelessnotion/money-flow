@@ -3,7 +3,7 @@ package main
 import "google.golang.org/protobuf/reflect/protoreflect"
 
 // follower narrows the log to one Transaction and everything it set off: its
-// Transfers, their Operations, and the Reversals its rollback requested. They
+// Transfers, and the Reversals its rollback requested. They
 // are separate aggregates with ids of their own, so the set of ids to show
 // grows as the Transaction's events name them.
 //
@@ -35,7 +35,8 @@ func (f *follower) admit(e row) bool {
 	fields := msg.ProtoReflect()
 
 	// An aggregate's first event says what it belongs to: a Transfer or
-	// Reversal its transaction_id, an Operation its transfer_id.
+	// Reversal its transaction_id, or the transfer_id of the Transfer it
+	// reverses.
 	joins := e.Sequence == 1 && (f.ids[stringField(fields, "transaction_id")] || f.ids[stringField(fields, "transfer_id")])
 	if !f.ids[e.AggregateID] && !joins {
 		return false
