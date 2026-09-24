@@ -344,33 +344,25 @@ func TestStage_OrphanedClaimDoesNotBlockRetry(t *testing.T) {
 	}
 }
 
-// TestStage_DoesNotRaceAFreshInFlightClaimFromADifferentTransition
-// reproduces the gap the first version of go/docs/adr/0005's fix missed:
-// currentState() ignores every claim marker, so a caller that reloads the
-// stream *after* a marker has landed (but before its winner has finished)
-// used to see the same pre-claim coarse state and win an independent claim
-// on the *next* sequence slot — racing the still-in-flight first one
-// against the same legs. Concretely: CancelAcceptedTransfer wins
-// CancellingPreparedTransferStarted; every event on a Transfer's own stream
-// — including that marker itself — is published to transfer-events
-// (go/docs/adr/0001), so the orchestrator's Resume fires on it and used to
-// win a fresh StagingTransferStarted claim and reserve every leg in
-// TigerBeetle while the cancel was still running: the exact "already
-// Cancelled, cannot also become Staged" contradiction this decision exists
-// to prevent.
+// TestCancelPrepared_WaitsOutAFreshInFlightStageClaim is the gap the first
+// version of go/docs/adr/0005's fix missed, as it stands since
+// cancelPrepared() stopped claiming (go/docs/adr/0009): currentState()
+// ignores every claim marker, so a caller that reloads the stream *after* a
+// marker has landed (but before its winner has finished) sees the same
+// Prepared state. A cancel that appended PreparedTransferCancelled there would
+// record Cancelled while stage() is reserving every leg in TigerBeetle —
+// then stage()'s TransferStaged is refused as "already cancelled, cannot
+// also become staged", with the reservations already made.
 //
-// This test seeds that in-flight marker directly (standing in for "the
-// cancel RPC's claim landed but its appendSagaStep hasn't run yet") and
-// calls stage() concurrently — simulating the re-entrant Resume —
-// asserting it blocks in claimForDispatch rather than taking its own claim,
-// never touches TigerBeetle, and converges to whatever the in-flight
-// caller's real resolution turns out to be once that lands.
-func TestStage_DoesNotRaceAFreshInFlightClaimFromADifferentTransition(t *testing.T) {
+// This test seeds that in-flight marker directly (standing in for "stage()'s
+// claim landed but its TigerBeetle submission and TransferStaged haven't
+// yet") and calls cancelPrepared() concurrently, asserting it waits rather
+// than appending, and converges to stage()'s outcome once that lands.
+func TestCancelPrepared_WaitsOutAFreshInFlightStageClaim(t *testing.T) {
 	t.Parallel()
 	store := eventstore.NewMemoryStore()
-	fake := ledger.NewFakeClient()
-	lc := &createTransfersCountingClient{Client: fake}
-	transferID := testutil.ID("xfer-in-flight-cancel")
+	lc := ledger.NewFakeClient()
+	transferID := testutil.ID("xfer-in-flight-stage")
 	w1, w2, t1 := testutil.ID("w1"), testutil.ID("w2"), testutil.ID("t1")
 
 	openWallet(t, store, w1, sharedpb.Allows_ALLOWS_ONRAMP_AND_OFFRAMP)
@@ -381,66 +373,48 @@ func TestStage_DoesNotRaceAFreshInFlightClaimFromADifferentTransition(t *testing
 	server := NewServer(store, lc, nil, nil)
 	ctx := context.Background()
 	seedPreparedTransfer(t, ctx, server, store, transferID, w1, w2, usd(400))
-	lc.mu.Lock()
-	lc.calls = 0
-	lc.mu.Unlock()
 
-	// Stand in for "CancelAcceptedTransfer's claim landed": append the
-	// marker directly, without running the rest of cancelPrepared() yet, so
-	// it's genuinely still in flight from a fresh reader's point of view.
 	events, err := store.Load(ctx, AggregateType, transferID)
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 	if err := store.Append(ctx, AggregateType, transferID, int64(len(events)),
-		&pb.CancellingPreparedTransferStarted{Id: transferID, Reason: "test"},
+		&pb.StagingTransferStarted{Id: transferID},
 	); err != nil {
-		t.Fatalf("seed in-flight cancel claim: %v", err)
+		t.Fatalf("seed in-flight stage claim: %v", err)
 	}
+	withMarker := len(events) + 1
 
-	// The re-entrant Resume the marker's own Kafka publication would
-	// trigger, racing the still-in-flight cancel.
-	stageDone := make(chan error, 1)
+	cancelDone := make(chan error, 1)
 	go func() {
-		stageDone <- server.stage(ctx, transferID)
+		cancelDone <- server.cancelPrepared(ctx, transferID, "client")
 	}()
 
-	// Give stage() time to reach claimForDispatch's poll loop, then confirm
-	// it is genuinely waiting rather than having already proceeded.
 	time.Sleep(10 * claimPollInterval)
 	select {
-	case err := <-stageDone:
-		t.Fatalf("stage() returned (err=%v) before the in-flight cancel resolved; it should still be waiting", err)
+	case err := <-cancelDone:
+		t.Fatalf("cancelPrepared() returned (err=%v) before the in-flight stage resolved; it should still be waiting", err)
 	default:
 	}
-	if got := lc.count(); got != 0 {
-		t.Fatalf("ledger.CreateTransfers called %d times while a different transition was still claimed, want 0", got)
+	if got := len(mustEvents(t, store, transferID)); got != withMarker {
+		t.Fatalf("stream has %d events, want %d: nothing may land while stage() holds the claim", got, withMarker)
 	}
 
-	// Now let the cancel actually finish, the way cancelPrepared() itself
-	// would: append the terminal event.
-	if err := server.appendSagaStep(ctx, transferID, &pb.PreparedTransferCancelled{Id: transferID, Reason: "test"}); err != nil {
-		t.Fatalf("appendSagaStep(PreparedTransferCancelled) error = %v", err)
+	// Let stage() finish, the way it would once its reservations landed.
+	if err := server.appendSagaStep(ctx, transferID, &pb.TransferStaged{Id: transferID}); err != nil {
+		t.Fatalf("appendSagaStep(TransferStaged) error = %v", err)
 	}
 
 	select {
-	case err := <-stageDone:
+	case err := <-cancelDone:
 		if err != nil {
-			t.Fatalf("stage() error = %v, want nil once the in-flight cancel resolved", err)
+			t.Fatalf("cancelPrepared() error = %v, want nil once the stage resolved", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("stage() never returned after the in-flight cancel resolved")
+		t.Fatal("cancelPrepared() never returned after the in-flight stage resolved")
 	}
-	if got := lc.count(); got != 0 {
-		t.Errorf("ledger.CreateTransfers called %d times, want 0: stage() must never have submitted anything", got)
-	}
-
-	events, err = store.Load(ctx, AggregateType, transferID)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if state := currentState(events); state != stateCancelled {
-		t.Errorf("final state = %v, want cancelled", state)
+	if state := currentStateOf(t, store, transferID); state != stateStaged {
+		t.Errorf("final state = %v, want staged: the cancel lost to the stage it waited out", state)
 	}
 }
 
@@ -720,7 +694,7 @@ func seedAbandonedClaim(t *testing.T, store eventstore.Store, lc ledger.Client, 
 // (go/docs/adr/0005): the crashed winner may have already half-applied its
 // step — some chains voided in TigerBeetle, say — and a different transition's side
 // effects on top of that are the contradiction this decision prevents.
-// stage() over an abandoned cancel claim must refuse, loudly, without
+// stage() over an abandoned commit claim must refuse, loudly, without
 // touching TigerBeetle or the stream.
 func TestStage_RefusesStaleTakeoverOfADifferentTransition(t *testing.T) {
 	// Deliberately not t.Parallel(): mutates claimStaleAfter.
@@ -728,8 +702,8 @@ func TestStage_RefusesStaleTakeoverOfADifferentTransition(t *testing.T) {
 
 	store := eventstore.NewMemoryStore()
 	lc := &createTransfersCountingClient{Client: ledger.NewFakeClient()}
-	transferID := testutil.ID("xfer-abandoned-cancel")
-	server := seedAbandonedClaim(t, store, lc, transferID, &pb.CancellingPreparedTransferStarted{Id: transferID, Reason: "crashed"})
+	transferID := testutil.ID("xfer-abandoned-commit")
+	server := seedAbandonedClaim(t, store, lc, transferID, &pb.TransferCommittingStarted{Id: transferID})
 	lc.mu.Lock()
 	lc.calls = 0
 	lc.mu.Unlock()
@@ -759,35 +733,42 @@ func TestStage_RefusesStaleTakeoverOfADifferentTransition(t *testing.T) {
 	}
 }
 
-// The orchestrator is what recovers a crashed cancel: the marker's own
-// publication triggers Resume, and runSaga must finish the claimed
-// transition (cancel) rather than the one it would otherwise dispatch from
-// Prepared (stage) — which would now be refused, halting the consumer.
-func TestResume_FinishesAnAbandonedCancelPreparedClaim(t *testing.T) {
-	// Deliberately not t.Parallel(): mutates claimStaleAfter.
-	defer swapClaimStaleAfter(20 * time.Millisecond)()
-
+// cancelPrepared() no longer claims (go/docs/adr/0009), so a
+// CancellingPreparedTransferStarted an older build left on a stream is noise,
+// not a claim: nothing it guarded outlives it, since that build's cancel only
+// ever touched Operation streams. Resume dispatches the Prepared Transfer as
+// usual instead of waiting on, or refusing over, the leftover.
+func TestResume_IgnoresALeftoverCancellingPreparedTransferStarted(t *testing.T) {
+	t.Parallel()
 	store := eventstore.NewMemoryStore()
-	lc := &createTransfersCountingClient{Client: ledger.NewFakeClient()}
-	transferID := testutil.ID("xfer-resume-cancel")
-	server := seedAbandonedClaim(t, store, lc, transferID, &pb.CancellingPreparedTransferStarted{Id: transferID, Reason: "crashed"})
-	lc.mu.Lock()
-	lc.calls = 0
-	lc.mu.Unlock()
-	ctx := context.Background()
+	lc := ledger.NewFakeClient()
+	transferID := testutil.ID("xfer-leftover-cancel-marker")
+	w1, w2, t1 := testutil.ID("w1"), testutil.ID("w2"), testutil.ID("t1")
 
+	openWallet(t, store, w1, sharedpb.Allows_ALLOWS_ONRAMP_AND_OFFRAMP)
+	openWallet(t, store, w2, sharedpb.Allows_ALLOWS_ONRAMP_AND_OFFRAMP)
+	mintToken(t, store, lc, w1, t1, usd(1000))
+	fundToken(t, lc, t1, 1000)
+
+	server := NewServer(store, lc, nil, nil)
+	ctx := context.Background()
+	seedPreparedTransfer(t, ctx, server, store, transferID, w1, w2, usd(400))
+	events := mustEvents(t, store, transferID)
+	if err := store.Append(ctx, AggregateType, transferID, int64(len(events)),
+		&pb.CancellingPreparedTransferStarted{Id: transferID, Reason: "older build"},
+	); err != nil {
+		t.Fatalf("seed leftover marker: %v", err)
+	}
+
+	start := time.Now()
 	if err := server.Resume(ctx, transferID); err != nil {
-		t.Fatalf("Resume() error = %v, want the abandoned cancel finished", err)
+		t.Fatalf("Resume() error = %v", err)
 	}
-	events, err := store.Load(ctx, AggregateType, transferID)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+	if waited := time.Since(start); waited >= claimStaleAfter {
+		t.Errorf("Resume() took %v: it waited on the leftover marker as if it were a live claim", waited)
 	}
-	if state := currentState(events); state != stateCancelled {
-		t.Fatalf("state = %v, want cancelled", state)
-	}
-	if got := lc.count(); got != 0 {
-		t.Errorf("ledger.CreateTransfers called %d times, want 0 (a Prepared cancel never touches TigerBeetle)", got)
+	if state := currentStateOf(t, store, transferID); state != stateStaged {
+		t.Errorf("state = %v, want staged", state)
 	}
 }
 

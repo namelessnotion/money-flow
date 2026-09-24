@@ -83,7 +83,7 @@ appends only onto the stream exactly as it loaded it, and a lost race sends `Can
 re-decide.
 
 **Unchanged:** the claim markers, `claimForDispatch`, `requireClaim`, the rule that only the same transition may
-take over a stale claim, and `CancellingPreparedTransferStarted`. The claims still guard the TigerBeetle side
+take over a stale claim, and (until the amendment below) `CancellingPreparedTransferStarted`. The claims still guard the TigerBeetle side
 effects they were built for. What changed is that a claimed step has less to do after TigerBeetle answers: it
 records balances (idempotent) and appends one guarded outcome, where it used to walk every leg's Operation.
 
@@ -121,7 +121,26 @@ Transfer's run of chains, still take real time.
 keep their Operation streams. `cmd/events` shows those rows as `(undecodable: …)`, and nothing else loads them.
 The `operation-events` Kafka topic stops receiving messages.
 
-**Follow-up, not done here:** with no per-leg writes left, `cancelPrepared()`'s `CancellingPreparedTransferStarted`
-marker guards nothing but its own single append. The marker could be replaced by waiting out any live claim and
-appending the outcome by compare-and-swap. That saves one commit on the cancel path only, and it means
-revisiting `claimedPreparedCancel`.
+## Amendment, 2026-09-24: cancelling a Prepared Transfer claims nothing
+
+With no per-leg writes left, `cancelPrepared()`'s `CancellingPreparedTransferStarted` marker guarded nothing
+but the single append that followed it. A claim exists to keep a side effect from running twice, and a
+Prepared cancel has no side effect outside the event store. The marker is no longer written.
+
+- `cancelPrepared()` waits out any fresh claim with `awaitUnclaimed`, which is the wait half of
+  `claimForDispatch`, now shared by both. It then appends `PreparedTransferCancelled` onto the stream exactly
+  as it loaded it. That append is the compare-and-swap against every other writer. If a `stage()` or
+  `commit()` claim lands first, the cancel loses, waits that step out, and finds the Transfer staged or
+  committed. If the cancel lands first, their claim loses and they find it cancelled. An abandoned claim is
+  still refused (`errAbandonedClaim`), because only the transition that wrote it may resume it.
+- `claimedPreparedCancel`, and the `runSaga` branch that finished a crashed cancel, are deleted. There is no
+  in-flight cancel left to finish.
+- `CancellingPreparedTransferStarted` stays in the proto so older streams still decode, but it is no longer
+  a claim marker (`isClaimMarkerType`). One an older build left on a stream is noise. It guarded nothing
+  that outlived it, since that build's cancel only ever touched Operation streams, which nothing reads now.
+  The dev database had one such marker ever written, and it was resolved.
+
+Cancelling a Prepared Transfer costs 1 commit instead of 2
+(`TestCancelAcceptedTransfer_CancelsAPreparedTransferInOneCommit`). The race ADR 0005's Round 2 found is now
+pinned from the cancel's side (`TestCancelPrepared_WaitsOutAFreshInFlightStageClaim`, which replaces
+`TestStage_DoesNotRaceAFreshInFlightClaimFromADifferentTransition`).

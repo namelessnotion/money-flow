@@ -301,3 +301,39 @@ func TestCancelAcceptedTransfer_RecordsTheReasonOnPreparedTransferCancelled(t *t
 		t.Errorf("PreparedTransferCancelled.reason = %q, want the caller's reason", cancelled.GetReason())
 	}
 }
+
+// Cancelling a Prepared Transfer touches nothing outside the event store, so
+// it is one append: no claim marker precedes it (go/docs/adr/0009). The
+// append itself is the compare-and-swap that keeps it from racing a stage()
+// or commit() claim.
+func TestCancelAcceptedTransfer_CancelsAPreparedTransferInOneCommit(t *testing.T) {
+	t.Parallel()
+	base := eventstore.NewMemoryStore()
+	lc := ledger.NewFakeClient()
+	from, to := fundedWallets(t, base, lc)
+	ctx := context.Background()
+	transferID := testutil.ID("xfer-cancel-one-commit")
+	seedPreparedTransfer(t, ctx, NewServer(base, lc, nil, nil), base, transferID, from, to, usd(400))
+
+	store := newCommitCountingStore(base)
+	server := NewServer(store, lc, nil, nil)
+	resp, err := server.CancelAcceptedTransfer(ctx, &pb.CancelAcceptedTransferRequest{Id: transferID, Reason: "client"})
+	if err != nil {
+		t.Fatalf("CancelAcceptedTransfer() error = %v", err)
+	}
+	if resp.GetAcceptedTransferCancelled() == nil {
+		t.Fatalf("result = %v, want AcceptedTransferCancelled", resp.GetResult())
+	}
+
+	want := []string{
+		eventstore.EventType(&pb.TransferRequestAccepted{}),
+		eventstore.EventType(&pb.TransferPrepared{}),
+		eventstore.EventType(&pb.PreparedTransferCancelled{}),
+	}
+	if got := eventTypes(mustEvents(t, base, transferID)); !slices.Equal(got, want) {
+		t.Errorf("transfer stream = %v, want %v", got, want)
+	}
+	if commits, _ := store.snapshot(); commits != 1 {
+		t.Errorf("commits = %d, want 1", commits)
+	}
+}
