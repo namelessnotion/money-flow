@@ -112,3 +112,11 @@ offers one today, deliberately.
 > returning it to be retried into a halt. The halt still exists for what really needs a person, including a
 > Transfer that has partly posted. The steps to recover from a halt are in
 > [`docs/saga-orchestrator.md`](../../../docs/saga-orchestrator.md#recovering-from-a-halt).
+
+> **Contention on a Token's balance stream follows the same rule (2026-09-24).** `token.RecordBalances`, which
+> every Transfer stage and commit calls through `recordTouched`, gave up after five lost races on one Token's
+> stream. With a funded source Token that every partition's Transfers debit at once, and no `mint_source`, the
+> ledger moves between attempts, so a loser's re-read rarely matches what just landed. The last of k recorders
+> then loses k−1 times, so any partition count above five could halt the orchestrator. It now uses the same
+> policy as prepare: no count bound, the same 1ms-to-50ms full-jitter wait, and a retry only when the Token's
+> stream has actually moved. A conflict with nothing landed is a fault, and the context ends the loop.
