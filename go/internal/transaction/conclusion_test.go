@@ -155,9 +155,9 @@ func TestTransaction_AChildsFailureAndTheRollbackItStartsShareOneAppend(t *testi
 		if got, want := store.appendCarrying(started), []string{failed, started, rolledBack}; !slices.Equal(got, want) {
 			t.Errorf("the append carrying %s was %v, want %v", started, got, want)
 		}
-		// Initialized, Started, the dispatch intent, then that one append.
-		if got := len(store.appends); got != 4 {
-			t.Errorf("the Transaction took %d appends, want 4: %v", got, store.appends)
+		// Initialized, Started with the dispatch intent, then that one append.
+		if got := len(store.appends); got != 3 {
+			t.Errorf("the Transaction took %d appends, want 3: %v", got, store.appends)
 		}
 
 		events, err := store.Load(ctx, AggregateType, txnID)
@@ -203,4 +203,53 @@ func TestTransaction_AChildsFailureAndTheRollbackItStartsShareOneAppend(t *testi
 			t.Fatalf("state = %v, want rolled_back; events = %v", got, eventTypesOf(events))
 		}
 	})
+}
+
+// Starting a Transaction is dispatching its first slice, so TransactionStarted
+// is recorded in the same append as that slice's intents, against the fold
+// that found it Initialized (go/docs/adr/0014). Only the first slice: later
+// ones are the Transaction's own and carry no second start.
+func TestRunSaga_StartsInTheSameAppendAsTheFirstSlice(t *testing.T) {
+	t.Parallel()
+	store := &appendRecordingStore{Store: eventstore.NewMemoryStore()}
+	txns := NewServer(store, newAcceptingTransferClient())
+	ctx := context.Background()
+
+	requireSliceable(t)
+	txnID := testutil.ID("txn-first-slice")
+	seedInitialized(t, store, txnID, independentRoots(slicedChildren))
+	started := eventstore.EventType(&pb.TransactionStarted{})
+	requested := eventstore.EventType(&pb.TransferRequestedWithinTransaction{})
+
+	if err := txns.Resume(ctx, txnID); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	first := store.appendCarrying(started)
+	if len(first) != 1+maxDispatchPerStep || first[0] != started {
+		t.Fatalf("the append carrying %s was %v, want it first and followed by one slice of %d intents",
+			started, first, maxDispatchPerStep)
+	}
+	for _, eventType := range first[1:] {
+		if eventType != requested {
+			t.Errorf("the start's append carried %s, want only %s after it", eventType, requested)
+		}
+	}
+
+	driveSaga(t, txns, nil, store, txnID)
+	events, err := store.Load(ctx, AggregateType, txnID)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	starts := 0
+	for _, e := range events {
+		if e.EventType == started {
+			starts++
+		}
+	}
+	if starts != 1 {
+		t.Errorf("stream holds %d TransactionStarted, want exactly 1; events = %v", starts, eventTypesOf(events))
+	}
+	if got := len(childrenOf(t, store, txnID)); got != slicedChildren {
+		t.Errorf("%d children requested once the saga settled, want all %d", got, slicedChildren)
+	}
 }

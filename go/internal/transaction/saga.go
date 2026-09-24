@@ -513,16 +513,26 @@ func (s *Server) runSaga(ctx context.Context, transactionID string) error {
 
 		switch top := topLevelState(events); top {
 		case stateInitialized:
-			// Appended against the fold that decided it, not through
-			// appendSagaStep's dedupe-and-retry. StartTransactionRollback may
+			// Starting a Transaction is dispatching its first slice, so
+			// TransactionStarted is recorded in the same append as that
+			// slice's intents (go/docs/adr/0014). That append is made against
+			// the fold that found the Transaction Initialized, not through
+			// appendSagaStep's dedupe-and-retry: StartTransactionRollback may
 			// land while a Transaction is still Initialized, and a Started
-			// written after that would put it back to Started, undoing the
-			// rollback and dispatching what it abandoned. On a conflict the
-			// loop re-folds and decides again from whatever landed.
-			switch err := s.store.Append(ctx, AggregateType, transactionID, int64(len(events)), &pb.TransactionStarted{Id: transactionID}); {
-			case err == nil, errors.Is(err, eventstore.ErrConcurrencyConflict):
-			default:
-				return twirp.InternalErrorWith(err)
+			// written after it would put the Transaction back to Started,
+			// undoing the rollback and dispatching what it abandoned. On a
+			// conflict the loop re-folds and decides again from whatever
+			// landed.
+			transfers, deps, err := decodeSpec(events)
+			if err != nil {
+				return err
+			}
+			_, more, err := s.dispatchReady(ctx, transactionID, int64(len(events)), transfers, deps, map[string]childState{}, true)
+			if err != nil {
+				return err
+			}
+			if more {
+				return nil // as for any slice: its own appends fetch the next one
 			}
 
 		case stateStarted:
@@ -553,7 +563,7 @@ func (s *Server) runSaga(ctx context.Context, transactionID string) error {
 				continue
 			}
 
-			dispatched, more, err := s.dispatchReady(ctx, transactionID, int64(len(events)), transfers, deps, children)
+			dispatched, more, err := s.dispatchReady(ctx, transactionID, int64(len(events)), transfers, deps, children, false)
 			if err != nil {
 				return err
 			}
@@ -666,6 +676,12 @@ const maxDispatchPerStep = 8
 // every child it must undo already on the stream. On losing, dispatchReady
 // reports dispatched so runSaga re-folds and decides again.
 //
+// starting says the fold found the Transaction Initialized, so this slice is
+// also what starts it: TransactionStarted leads the same append, and lands or
+// loses with the intents it licenses. Started is recorded even with nothing
+// ready, which validateDAG makes impossible for a fold that just started, so
+// that a start is never skipped.
+//
 // Reports dispatched, so runSaga knows whether to loop again, and more, so it
 // knows to end the run instead. more implies dispatched.
 //
@@ -676,16 +692,20 @@ const maxDispatchPerStep = 8
 func (s *Server) dispatchReady(
 	ctx context.Context, transactionID string, version int64,
 	transfers map[string]*pb.Transfer, deps map[string]*pb.TransferIdList, children map[string]childState,
+	starting bool,
 ) (dispatched, more bool, err error) {
 	ready := readyToRun(transfers, deps, touchedSet(children), completedSet(children))
-	if len(ready) == 0 {
+	if len(ready) == 0 && !starting {
 		return false, false, nil
 	}
 	if len(ready) > maxDispatchPerStep {
 		ready, more = ready[:maxDispatchPerStep], true
 	}
 
-	intents := make([]proto.Message, 0, len(ready))
+	intents := make([]proto.Message, 0, len(ready)+1)
+	if starting {
+		intents = append(intents, &pb.TransactionStarted{Id: transactionID})
+	}
 	for _, childID := range ready {
 		intents = append(intents, &pb.TransferRequestedWithinTransaction{Id: transactionID, TransferId: childID})
 	}

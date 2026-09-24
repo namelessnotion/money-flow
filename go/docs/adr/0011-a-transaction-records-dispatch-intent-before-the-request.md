@@ -9,6 +9,8 @@
   transaction-topic run fold the same Transaction at once. [ADR 0005](0005-saga-dispatch-claim-prevents-double-invocation.md),
   whose "The Transaction layer needs no claim of its own" is amended here. [ADR 0007](0007-bounded-transaction-width-and-sliced-dispatch.md)
   defines the slice this records in one append.
+- **Amended 2026-09-24 by** [ADR 0014](0014-a-transaction-starts-with-its-first-slice.md): `TransactionStarted` now
+  leads the first slice's intents in their one append, as the last paragraph under Consequences proposed.
 
 ## Context
 
