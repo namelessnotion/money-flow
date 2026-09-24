@@ -5,21 +5,53 @@
 
 Event sourced tokenized transaction system
 
+MoneyFlow moves money between the parties of a marketplace and can prove
+where every cent went. It is split into two backends with one job each:
+
+- **Go records what money is meant to do and does it.** Every command becomes
+  an immutable event in an append-only PostgreSQL log, and sagas turn those
+  events into double-entry token movements in
+  [TigerBeetle](https://tigerbeetle.com). Nothing is updated in place, and
+  every balance can be rebuilt from the log.
+- **Ruby decides what the business wants.** Onboarding, ACH deposits and
+  withdrawals, and a real-estate lending market (Securities that Investors buy
+  in fractions, draw to Borrowers, and repay with interest) are orchestrated
+  here and exposed over GraphQL.
+
+A Vue client renders the result, including a graph that replays every
+Movement of money in the order it completed.
+
+[![Watch the money flow graph replay a simulated lending market](https://img.youtube.com/vi/LfLltacbiTA/maxresdefault.jpg)](https://www.youtube.com/watch?v=LfLltacbiTA)
+
+_The money flow graph replaying a [lending market simulation](#market-simulation-a-lending-market)
+([watch on YouTube](https://www.youtube.com/watch?v=LfLltacbiTA)): Investors →
+Securities → Borrowers, and back with interest._
+
 ## Status
 
-Early, but a money-moving path works end to end:
+Early, but money moves end to end through the real stack:
 
 - Onboarding an `Entity` in Ruby provisions a `Holder` and its `Wallet`s in Go
-  over Twirp, recorded as immutable events; the Vue client lists entities.
+  over Twirp, recorded as immutable events. Each entity has a Role: `investor`,
+  `borrower` or `issuer`.
 - An **ACH deposit or withdrawal** started from GraphQL runs in Go as a two-leg
   Transaction: a staged real leg that waits on the ACH network, and a shadow
   leg that follows it. Settlement and returns are reported through GraphQL,
-  standing in for an ACH provider.
+  standing in for an ACH provider. Deposits clear on a scheduled sweep.
+- **Securities** go through their whole life: an Issuer offers one, Investors
+  subscribe in fractions (the ledger itself refuses oversubscription), it is
+  drawn to its Borrower, repaid with simple interest, and disbursed pro rata
+  to its holders. Each step is its own Go Transaction.
 - Go's events are published to Kafka by Debezium (CDC). The Go orchestrator
   drives sagas forward from them, and a Ruby consumer folds them into a read
   model that GraphQL serves.
+- Two simulations exercise all of this: a **benchmark** that loads the Go
+  backend and checks the ledger balances afterwards, and a **lending market**
+  that plays out months of Investor and Borrower activity through GraphQL's
+  own services and replays it as a graph.
 
-See [docs/ach-transactions.md](docs/ach-transactions.md) for the ACH flow.
+See [docs/ach-transactions.md](docs/ach-transactions.md) for the ACH flow and
+[ruby/CONTEXT.md](ruby/CONTEXT.md) for the securities vocabulary.
 
 ## Structure
 
@@ -46,7 +78,9 @@ low-level token accounting. Exposed as Twirp RPC services (`internal/holder`,
 `internal/wallet`, `internal/transfer`, `internal/transaction`, …) reachable
 directly on `:8080` or via the proxy at `https://rpc.local.namelessnotion.com`.
 `cmd/orchestrator` consumes the published events and drives the sagas forward
-([docs/saga-orchestrator.md](docs/saga-orchestrator.md)).
+([docs/saga-orchestrator.md](docs/saga-orchestrator.md)); `cmd/simulate` is the
+[benchmark](#benchmark-simulation-go-under-load). Decisions:
+[go/docs/adr](go/docs/adr).
 
 ### `ruby/`
 
@@ -56,15 +90,30 @@ Business backend. Exposes GraphQL (`app/graphql`) backed by Sequel models
 reachable directly on `:9292` or via the proxy at
 `https://graphql.local.namelessnotion.com`. `bin/consumer` reads the published
 events into a lagging read model (`app/consumer`,
-[ruby/docs/adr](ruby/docs/adr)). Vocabulary: [ruby/CONTEXT.md](ruby/CONTEXT.md).
+[ruby/docs/adr](ruby/docs/adr)). `bin/simulate_lending` runs the
+[market simulation](#market-simulation-a-lending-market). Vocabulary:
+[ruby/CONTEXT.md](ruby/CONTEXT.md).
 
 ### `client/`
 
 Vue 3 + TypeScript SPA. Apollo Client (via `@vue/apollo-composable`) queries
-the Ruby GraphQL API; TailwindCSS for styling. Served by Vite, reachable
-directly on `:5173` or via the proxy at `https://app.local.namelessnotion.com`.
+the Ruby GraphQL API; TailwindCSS for styling. Pages for entities and their
+ACH Transactions, and `/money-flow`, the replayable graph of where money went
+(Cytoscape). Served by Vite, reachable directly on `:5173` or via the proxy at
+`https://app.local.namelessnotion.com`.
 
 ## Running locally
+
+In short, from a clean checkout:
+
+```bash
+make up                                          # the stack
+make cdc-up orchestrator-up consumer-up jobs-up  # the event pipeline: without it no money moves
+```
+
+Then open the client at `http://localhost:5173` (or
+`https://app.local.namelessnotion.com`, see below). The rest of this section
+explains each piece.
 
 Everything runs via Docker Compose: PostgreSQL, TigerBeetle, the Go and Ruby
 backends, the Vite dev server, Kafka and Kafka Connect, and an nginx reverse
@@ -243,6 +292,124 @@ make cdc-down
 make down
 ```
 
+## Simulations
+
+Both simulations drive the real, running stack, so bring it up **with the
+whole event pipeline** first (`make up`, then `make cdc-up orchestrator-up
+consumer-up`). If everything they start stays open, check
+`make orchestrator-logs` before anything else.
+
+Both write to the development database, and the event log is append-only:
+what a run writes stays. Entities from different runs never mix, because
+each run creates its own.
+
+### Benchmark simulation: Go under load
+
+[`go/cmd/simulate`](go/cmd/simulate/main.go) measures the Go backend on its
+own, over Twirp, with Ruby out of the loop. It provisions `-entities` entities,
+seeds each from a reserve, then drives `-transactions` transfers between
+random pairs, `-concurrency` at a time, steering `-rollback-rate` of them to
+roll back instead of settle. Each one counts as finished only once the
+orchestrator has taken it to a terminal state, so the latency it reports is
+the whole trip through CDC, Kafka and the orchestrator, not just an RPC.
+
+`make simulate` runs it in the `go` container. It links TigerBeetle's native
+client, which does not link on macOS hosts:
+
+```bash
+make simulate                                                              # 200 transfers across 20 entities
+make simulate ARGS="-entities 150 -transactions 2000 -concurrency 32 -seed 42"
+```
+
+| Flag | Default | |
+| --- | --- | --- |
+| `-mode` | `transaction` | `transaction` wraps every Transfer in a single-child Transaction, the production ACH shape. `transfer` drives `TransferService` directly, to measure Transfers without Transaction dispatch |
+| `-entities` | `20` | Wallets to spread the load over. Keep it well above `-concurrency`, or a few hot Wallets contend |
+| `-transactions` | `200` | How many to drive |
+| `-concurrency` | `8` | How many are in flight at once |
+| `-rollback-rate` | `0.3` | Share steered to roll back |
+| `-seed` | time | Fix it to repeat a run |
+| `-skip-verify` | `false` | Skip the ledger check at the end |
+
+`make simulate ARGS=-h` lists the rest (amounts, timeouts, how long to wait for stragglers).
+
+It prints two reports. **Load**: throughput, p50/p95/p99 latency, and how
+many ended in each terminal state. **Ledger correctness**: every entity's
+balance, read back from the event log, matches what its transfers should have
+left, and the total across entities equals what was seeded. Any mismatch is
+printed as one.
+
+Keep `-concurrency` below about 60. The tool gives itself one Postgres
+connection per in-flight transfer, and past Postgres' `max_connections` of
+100, "too many clients" errors are the harness failing, not the system. On a
+Docker Desktop laptop, throughput peaks at around concurrency 48, at roughly
+280 transfers/s in `transfer` mode and 215/s in `transaction` mode. The limit
+there is Postgres syncing its WAL to Docker's disk, not TigerBeetle or the
+orchestrator.
+
+### Market simulation: a lending market
+
+[`ruby/bin/simulate_lending`](ruby/bin/simulate_lending) plays out a
+Groundfloor-like real-estate lending market on a compressed clock, one
+simulated day at a time. Each day, Investors top up over ACH, new loans are
+offered as Securities, Investors auto-invest in what is open, fully
+subscribed Securities are drawn to their Borrowers (who withdraw the money),
+loans that come due are repaid with interest and disbursed to their holders,
+and now and then an Investor withdraws. Every step is a real Go Transaction,
+started through the same Ruby services GraphQL uses, and the next step waits
+for the read model to see the last one complete.
+
+```bash
+make simulate-lending                                   # seed 42: 40 Investors, 8 Borrowers
+make simulate-lending ARGS="--seed 7 --investors 20"
+```
+
+| Option | Default | |
+| --- | --- | --- |
+| `--seed N` | `42` | The same seed plays the same market |
+| `--investors N` | `40` | |
+| `--borrowers N` | `8` | |
+| `--issue-days N` | `180` | Days new loans are offered. The run then continues until every loan is repaid |
+| `--max-days N` | `1500` | Hard stop, in simulated days |
+| `--seconds-per-day S` | `0.1` | Least real time per simulated day |
+| `--start-date DATE` | today | First simulated day, `YYYY-MM-DD` |
+| `--profile PATH` | [`groundfloor_like.yml`](ruby/config/simulation/groundfloor_like.yml) | The market's shape |
+| `--tag TAG` | `sim-<seed>-<time>` | Prefix for every entity name the run creates |
+
+The profile holds the market's shape as decile tables: loan sizes, grades
+and rates, terms, how early or late loans pay off, position sizes, and
+deposit habits. It was calibrated from aggregate figures from a real
+platform, then scaled so tens of Investors can fund a loan.
+
+The run prints its tag first. At the end it reads the money flow back through
+the read model, not its own bookkeeping, and logs the total of each kind of
+Movement along with three checks: every Repayment was disbursed in full,
+every Draw equals the Subscriptions that funded it, and every entity's
+cleared cash and cash on the ledger match what the run expected. It exits
+non-zero if any check fails. The ACH, clearing and disbursement sweeps are
+called directly for each step, so `make jobs-up` is not needed.
+
+### Replaying a run as a graph
+
+Open the tag the run printed in the client:
+
+```
+http://localhost:5173/money-flow?run=<tag>
+https://app.local.namelessnotion.com/money-flow?run=<tag>
+```
+
+Without `?run=`, the page shows every Movement from every run. Each Party
+(Investor, Security, Borrower, or the Bank) is a node, and each completed
+Movement is an edge coloured by which way the money is going. **Play**
+replays the Movements in the order Go completed them, and the slider scrubs
+through time. The checkboxes filter by flow (investing, repaying, interest,
+bank deposits and withdrawals) or collapse each Security into its Borrower.
+Click a Party to follow its money, and hover an edge to see its amount and
+time. [The video above](https://www.youtube.com/watch?v=LfLltacbiTA) shows a
+full run replaying.
+
+## Development
+
 ### Running services outside Docker
 
 ```bash
@@ -255,6 +422,10 @@ cd ruby && bin/server
 # Client (expects the Ruby backend reachable, see client/README.md)
 cd client && npm install && npm run dev
 ```
+
+Anything that links TigerBeetle's native client (`cmd/server`,
+`cmd/orchestrator`, `cmd/simulate`, and most of the Go tests) fails to link on
+macOS hosts. Run those in the `go` container instead.
 
 ### Regenerating protobuf code
 
@@ -279,11 +450,21 @@ cd ruby && bundle exec rubocop
 cd ruby && bundle exec srb tc       # Sorbet type check
 
 # Client
+cd client && npm test               # Vitest + Vue Test Utils
 cd client && npm run build          # vue-tsc type check + Vite build
 ```
 
-CI (`.github/workflows/`) runs Go tests, Ruby specs, Rubocop, and Sorbet's
-`srb tc` against every push/PR to `main`.
+With the stack up, the Go and Ruby suites run in their containers, which have
+the native libraries and gems they need and point at the `money_flow_test`
+database:
+
+```bash
+docker compose exec -T go go test ./...
+docker compose exec -T ruby bundle exec rspec
+```
+
+CI (`.github/workflows/`) runs Go tests, golangci-lint, Ruby specs, Rubocop,
+and Sorbet's `srb tc` against every push/PR to `main`.
 
 ## Conventions
 
