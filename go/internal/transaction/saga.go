@@ -295,6 +295,10 @@ func childEventTransferID(msg proto.Message) string {
 // events of the same handful of types, so checking only the stream's tail
 // (as transfer's version does) isn't enough here — this scans by (type,
 // transfer_id) pair instead.
+//
+// A step the stream no longer allows (see stillDecidable) is dropped, not
+// recorded: every caller re-folds afterwards and decides again from whatever
+// overtook it.
 func (s *Server) appendSagaStep(ctx context.Context, transactionID string, event proto.Message) error {
 	events, err := s.store.Load(ctx, AggregateType, transactionID)
 	if err != nil {
@@ -314,6 +318,13 @@ func (s *Server) appendSagaStep(ctx context.Context, transactionID string, event
 		if childEventTransferID(msg) == wantChildID {
 			return nil // already recorded
 		}
+	}
+
+	switch ok, err := stillDecidable(events, transactionID, event); {
+	case err != nil:
+		return err
+	case !ok:
+		return nil
 	}
 
 	// A child's outcome that decides the Transaction's own — the last child
@@ -343,6 +354,56 @@ func (s *Server) appendSagaStep(ctx context.Context, transactionID string, event
 		return s.appendSagaStep(ctx, transactionID, event)
 	default:
 		return twirp.InternalErrorWith(err)
+	}
+}
+
+// stillDecidable reports whether event may still be recorded on top of
+// events. Every saga step is decided from a fold that may be stale by the time
+// it is written — ADR 0001 lets a transfer-topic and a transaction-topic run
+// fold the same Transaction at once, and an RPC can land between any fold and
+// its append — so each step names the part of the fold that decided it, and
+// that part must still hold:
+//
+//   - a forward child outcome, while the Transaction is Started and the child
+//     is still Requested. Once rollback has begun, rollbackChild reads the
+//     child's live outcome itself, so a late outcome is moot; recorded after
+//     the rollback resolved the child it would rewrite it.
+//   - TransactionRollbackStarted, while Initialized or Started. Nothing rolls
+//     back from Completed.
+//   - a child's rollback fact, while the Transaction is rolling back.
+//   - a conclusion, while the stream still concludes exactly that.
+//
+// Dispatch intents (TransferRequested/GatedWithinTransaction) are not here:
+// they are appended against the fold that chose them (recordIntents), because
+// the side effect they license must not happen at all once they are stale.
+func stillDecidable(events []eventstore.Event, transactionID string, event proto.Message) (bool, error) {
+	top := topLevelState(events)
+	switch event.(type) {
+	case *pb.TransferCompletedWithinTransaction, *pb.TransferFailedWithinTransaction:
+		if top != stateStarted {
+			return false, nil
+		}
+		children, err := foldChildStates(events)
+		if err != nil {
+			return false, err
+		}
+		return children[childEventTransferID(event)] == childRequested, nil
+
+	case *pb.TransactionRollbackStarted:
+		return top == stateInitialized || top == stateStarted, nil
+
+	case *pb.TransferReversalRequestedWithinTransaction, *pb.TransferRolledBackWithinTransaction, *pb.TransferRollbackFailedWithinTransaction:
+		return top == stateRollbackStarted, nil
+
+	case *pb.TransactionCompleted, *pb.TransactionRolledBack, *pb.TransactionRollbackFailed:
+		concluded, err := conclusion(events, transactionID)
+		if err != nil {
+			return false, err
+		}
+		return concluded != nil && eventstore.EventType(concluded) == eventstore.EventType(event), nil
+
+	default:
+		return false, fmt.Errorf("transaction %q: %s is not a step appendSagaStep records", transactionID, eventstore.EventType(event))
 	}
 }
 
@@ -469,7 +530,7 @@ func (s *Server) runSaga(ctx context.Context, transactionID string) error {
 				return err
 			}
 
-			progressed, err := s.reconcileInFlight(ctx, transactionID, children)
+			progressed, err := s.reconcileInFlight(ctx, transactionID, transfers, children)
 			if err != nil {
 				return err
 			}
@@ -500,7 +561,7 @@ func (s *Server) runSaga(ctx context.Context, transactionID string) error {
 				continue
 			}
 
-			dispatched, more, err := s.dispatchReady(ctx, transactionID, transfers, deps, children)
+			dispatched, more, err := s.dispatchReady(ctx, transactionID, int64(len(events)), transfers, deps, children)
 			if err != nil {
 				return err
 			}
@@ -585,8 +646,8 @@ func (s *Server) runSaga(ctx context.Context, transactionID string) error {
 // the point — a run is a Kafka handler, and a handler that keeps failing
 // halts the consumer for every other aggregate sharing it (ADR 0003).
 //
-// No cursor is stored, because none is needed. Every dispatched child
-// appends one TransferRequested/Gated/FailedWithinTransaction to this
+// No cursor is stored, because none is needed. Every dispatched child is
+// recorded as a TransferRequested/GatedWithinTransaction intent on this
 // Transaction's own stream, and readyToRun excludes every touched child: the
 // stream is the cursor. Those same appends are published, so the writes that
 // record a slice are the triggers that fetch the next one. A slice that
@@ -596,16 +657,23 @@ func (s *Server) runSaga(ctx context.Context, transactionID string) error {
 //
 // Per run, not in flight: ADR 0001 records that a transfer-topic and a
 // transaction-topic message can be handled concurrently and both append
-// here, so two concurrent runs may take disjoint slices. That is safe for
-// the reasons ADR 0005 gives — RequestTransfer is idempotent by id and
-// appendSagaStep dedupes by (type, transfer_id) — and the absolute ceiling
-// on a Transaction's width stays maxTransfersPerTransaction.
+// here. A slice's intents are appended against the fold that chose them, so
+// two runs that folded the same stream cannot both claim a slice from it: the
+// loser re-folds and takes whatever is still ready. The absolute ceiling on a
+// Transaction's width stays maxTransfersPerTransaction.
 const maxDispatchPerStep = 8
 
 // dispatchReady dispatches up to maxDispatchPerStep currently-ready children
 // (per readyToRun): auto_process=true children get an actual RequestTransfer
 // call; auto_process=false children are simply marked Gated, waiting for an
 // explicit StartProcessingTransfer.
+//
+// Intent comes before effect (go/docs/adr/0011). The whole slice is recorded
+// first, in one append against version — the length of the fold that chose
+// it — and only then are its requests made. So a rollback that lands first
+// makes the append lose, and nothing is requested; one that lands after finds
+// every child it must undo already on the stream. On losing, dispatchReady
+// reports dispatched so runSaga re-folds and decides again.
 //
 // Reports dispatched, so runSaga knows whether to loop again, and more, so it
 // knows to end the run instead. more implies dispatched.
@@ -615,7 +683,8 @@ const maxDispatchPerStep = 8
 // constrains a child only by its parents, and every ready child is by
 // definition unconstrained.
 func (s *Server) dispatchReady(
-	ctx context.Context, transactionID string, transfers map[string]*pb.Transfer, deps map[string]*pb.TransferIdList, children map[string]childState,
+	ctx context.Context, transactionID string, version int64,
+	transfers map[string]*pb.Transfer, deps map[string]*pb.TransferIdList, children map[string]childState,
 ) (dispatched, more bool, err error) {
 	ready := readyToRun(transfers, deps, touchedSet(children), completedSet(children))
 	if len(ready) == 0 {
@@ -625,52 +694,97 @@ func (s *Server) dispatchReady(
 		ready, more = ready[:maxDispatchPerStep], true
 	}
 
+	intents := make([]proto.Message, 0, len(ready))
 	for _, childID := range ready {
-		spec := transfers[childID]
-		if !spec.GetAutoProcess() {
-			if err := s.appendSagaStep(ctx, transactionID, &pb.TransferGatedWithinTransaction{Id: transactionID, TransferId: childID}); err != nil {
+		if transfers[childID].GetAutoProcess() {
+			intents = append(intents, &pb.TransferRequestedWithinTransaction{Id: transactionID, TransferId: childID})
+		} else {
+			intents = append(intents, &pb.TransferGatedWithinTransaction{Id: transactionID, TransferId: childID})
+		}
+	}
+	switch recorded, err := s.recordIntents(ctx, transactionID, version, intents...); {
+	case err != nil:
+		return false, false, err
+	case !recorded:
+		return true, false, nil
+	}
+
+	for _, childID := range ready {
+		if spec := transfers[childID]; spec.GetAutoProcess() {
+			if _, err := s.requestChildTransfer(ctx, transactionID, spec); err != nil {
 				return false, false, err
 			}
-			continue
-		}
-		if err := s.requestChildTransfer(ctx, transactionID, spec); err != nil {
-			return false, false, err
 		}
 	}
 	return true, more, nil
 }
 
-// requestChildTransfer calls transfer.RequestTransfer for spec, tagged with
-// transactionID, and records the outcome onto the Transaction's own
-// stream: TransferRequestedWithinTransaction on accept, or
-// TransferFailedWithinTransaction directly on an immediate accept-time
-// rejection — exactly as much a "child failed" fact as a later TransferFailed
-// reaching it through reconcileInFlight is.
-func (s *Server) requestChildTransfer(ctx context.Context, transactionID string, spec *pb.Transfer) error {
-	resp, err := s.transfer.RequestTransfer(ctx, &transferpb.RequestTransferRequest{
+// recordIntents appends intents to transactionID's stream only if the stream
+// is still at version, reporting whether they landed. Unlike appendSagaStep it
+// neither dedupes nor retries: an intent licenses a side effect, so it may only
+// be recorded against the exact fold that decided it. A caller whose append
+// loses re-folds, and whatever overtook it — a rollback, or a concurrent run
+// that dispatched the same children — is what it decides from.
+func (s *Server) recordIntents(ctx context.Context, transactionID string, version int64, intents ...proto.Message) (bool, error) {
+	switch err := s.store.Append(ctx, AggregateType, transactionID, version, intents...); {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, eventstore.ErrConcurrencyConflict):
+		return false, nil
+	default:
+		return false, twirp.InternalErrorWith(err)
+	}
+}
+
+// requestChildTransfer makes the request a TransferRequestedWithinTransaction
+// already recorded the intent for: transfer.RequestTransfer for spec, tagged
+// with transactionID. It is idempotent by the child's id, so completing an
+// intent twice — a retried run, a rollback finishing one its driver
+// abandoned — reaches the same one decision.
+//
+// An accept records nothing: the Transfer's own events report where it goes,
+// and reconcileInFlight reads them. A rejection is recorded here, as
+// TransferFailedWithinTransaction carrying the Transfer's reason, because a
+// rejected Transfer names no Transaction (transfer.OwningTransaction) and so
+// wakes none; it is returned too, for StartProcessingTransfer to answer with.
+func (s *Server) requestChildTransfer(ctx context.Context, transactionID string, spec *pb.Transfer) (*transferpb.TransferRequestRejected, error) {
+	resp, err := s.transfer.RequestTransfer(ctx, requestFor(transactionID, spec))
+	if err != nil {
+		return nil, err
+	}
+	rejected := resp.GetTransferRequestRejected()
+	if rejected == nil {
+		return nil, nil
+	}
+	if err := s.appendSagaStep(ctx, transactionID, &pb.TransferFailedWithinTransaction{
+		Id: transactionID, TransferId: spec.GetId(), Reason: rejected.GetReason(),
+	}); err != nil {
+		return nil, err
+	}
+	return rejected, nil
+}
+
+func requestFor(transactionID string, spec *pb.Transfer) *transferpb.RequestTransferRequest {
+	return &transferpb.RequestTransferRequest{
 		Id: spec.GetId(), FromWalletId: spec.GetFromWalletId(), ToWalletId: spec.GetToWalletId(),
 		Amount: spec.GetAmount(), Stage: spec.GetStage(), MintSource: spec.GetMintSource(),
 		TransactionId: transactionID,
-	})
-	if err != nil {
-		return err
 	}
-	if rejected := resp.GetTransferRequestRejected(); rejected != nil {
-		return s.appendSagaStep(ctx, transactionID, &pb.TransferFailedWithinTransaction{
-			Id: transactionID, TransferId: spec.GetId(), Reason: rejected.GetReason(),
-		})
-	}
-	return s.appendSagaStep(ctx, transactionID, &pb.TransferRequestedWithinTransaction{Id: transactionID, TransferId: spec.GetId()})
 }
 
 // reconcileInFlight checks every currently-Requested child's live
 // transfer.Outcome and records how it's resolved, if it has: Committed ->
 // TransferCompletedWithinTransaction; Failed or Cancelled ->
-// TransferFailedWithinTransaction. Anything else (InFlight, Staged,
-// Pending) means still waiting on the outside world — no change, matching
+// TransferFailedWithinTransaction. A child with no Transfer yet, or a
+// rejected one, is an intent whose request has not been made or not been
+// recorded — its driver stopped in between — so the request is completed
+// here, which records a rejection. Anything else (InFlight, Staged, Pending)
+// means still waiting on the outside world — no change, matching
 // transfer.runSaga itself stopping at Staged/Pending. Returns true if it
 // recorded anything, so runSaga knows to loop again.
-func (s *Server) reconcileInFlight(ctx context.Context, transactionID string, children map[string]childState) (bool, error) {
+func (s *Server) reconcileInFlight(
+	ctx context.Context, transactionID string, transfers map[string]*pb.Transfer, children map[string]childState,
+) (bool, error) {
 	progressed := false
 	for childID, state := range children {
 		if state != childRequested {
@@ -681,6 +795,12 @@ func (s *Server) reconcileInFlight(ctx context.Context, transactionID string, ch
 			return false, err
 		}
 		switch outcome {
+		case transfer.OutcomeNotFound, transfer.OutcomeRejected:
+			rejected, err := s.requestChildTransfer(ctx, transactionID, transfers[childID])
+			if err != nil {
+				return false, err
+			}
+			progressed = progressed || rejected != nil
 		case transfer.OutcomeCommitted:
 			if err := s.appendSagaStep(ctx, transactionID, &pb.TransferCompletedWithinTransaction{Id: transactionID, TransferId: childID}); err != nil {
 				return false, err
@@ -856,7 +976,14 @@ func planRollback(transfers map[string]*pb.Transfer, deps map[string]*pb.Transfe
 // CancelStagedTransfer; InFlight (Accepted/Prepared) ->
 // CancelAcceptedTransfer; never requested (only Gated, or no entry at all)
 // -> nothing to call, straight to ABANDONED; already Failed/Cancelled on
-// its own -> nothing left to undo, also ABANDONED.
+// its own, or rejected at accept -> nothing left to undo, also ABANDONED.
+//
+// A Requested child with no Transfer yet is an intent whose driver has not
+// made the request, or is making it now (go/docs/adr/0011). The request is
+// completed here — RequestTransfer is idempotent by id, so this and that
+// driver reach the same one decision — and the child is then undone by what
+// it became. Leaving it would let the driver's request land after the
+// rollback concluded, with nothing left to undo it.
 func (s *Server) rollbackChild(ctx context.Context, transactionID string, spec *pb.Transfer, state childState) error {
 	if state != childRequested && state != childCompleted {
 		return s.appendSagaStep(ctx, transactionID, &pb.TransferRolledBackWithinTransaction{
@@ -870,6 +997,12 @@ func (s *Server) rollbackChild(ctx context.Context, transactionID string, spec *
 	}
 
 	switch outcome {
+	case transfer.OutcomeNotFound:
+		if _, err := s.transfer.RequestTransfer(ctx, requestFor(transactionID, spec)); err != nil {
+			return err
+		}
+		return s.rollbackChild(ctx, transactionID, spec, state)
+
 	case transfer.OutcomeCommitted:
 		reversalID := detid.New(transactionID + ":reversal:" + spec.GetId())
 		resp, err := s.transfer.RequestReversal(ctx, &transferpb.RequestReversalRequest{
@@ -914,13 +1047,20 @@ func (s *Server) rollbackChild(ctx context.Context, transactionID string, spec *
 
 	case transfer.OutcomeInFlight:
 		if _, err := s.transfer.CancelAcceptedTransfer(ctx, &transferpb.CancelAcceptedTransferRequest{Id: spec.GetId(), Reason: "transaction rollback"}); err != nil {
+			var twerr twirp.Error
+			if errors.As(err, &twerr) && twerr.Code() == twirp.FailedPrecondition {
+				// The Transfer's own saga moved it past cancelling first — likely
+				// for a request just completed above, whose acceptance set its
+				// saga running. Undo it by what it became instead.
+				return s.rollbackChild(ctx, transactionID, spec, state)
+			}
 			return err
 		}
 		return s.appendSagaStep(ctx, transactionID, &pb.TransferRolledBackWithinTransaction{
 			Id: transactionID, TransferId: spec.GetId(), Method: pb.RollbackMethod_ROLLBACK_METHOD_CANCELLED,
 		})
 
-	case transfer.OutcomeFailed, transfer.OutcomeCancelled:
+	case transfer.OutcomeFailed, transfer.OutcomeCancelled, transfer.OutcomeRejected:
 		// Already resolved on its own — nothing left to undo.
 		return s.appendSagaStep(ctx, transactionID, &pb.TransferRolledBackWithinTransaction{
 			Id: transactionID, TransferId: spec.GetId(), Method: pb.RollbackMethod_ROLLBACK_METHOD_ABANDONED,

@@ -15,6 +15,10 @@
   `cancelPrepared()` no longer claims `CancellingPreparedTransferStarted`. It waits out any live claim and
   appends its outcome by compare-and-swap (ADR 0009's amendment), so the table row, Round 4's
   `claimedPreparedCancel` recovery, and `TestResume_FinishesAnAbandonedCancelPreparedClaim` below are historical.
+- **Amended 2026-09-24 by** [ADR 0011](0011-a-transaction-records-dispatch-intent-before-the-request.md): "The
+  Transaction layer needs no claim of its own" is still true of the calls it makes. But recording a call only
+  after making it let the record land after a concurrent rollback had concluded. A Transaction now records its
+  intent to request a child, against the fold that chose it, before the call.
 
 ## Context
 
