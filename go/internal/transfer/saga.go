@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"sort"
 	"time"
 
@@ -16,6 +15,7 @@ import (
 	operationpb "github.com/namelessnotion/money_flow/go/gen/proto/operation/v1"
 	sharedpb "github.com/namelessnotion/money_flow/go/gen/proto/shared/v1"
 	pb "github.com/namelessnotion/money_flow/go/gen/proto/transfer/v1"
+	"github.com/namelessnotion/money_flow/go/internal/contention"
 	"github.com/namelessnotion/money_flow/go/internal/detid"
 	"github.com/namelessnotion/money_flow/go/internal/eventstore"
 	"github.com/namelessnotion/money_flow/go/internal/ledger"
@@ -715,16 +715,6 @@ func (s *Server) requireClaim(ctx context.Context, transferID string, claimedSeq
 	return nil
 }
 
-// Between re-plans, prepare waits a random slice of a window that doubles
-// from replanBackoffBase up to replanBackoffCap. The wait is there to
-// decorrelate Transfers that just collided, so they don't all re-plan into
-// the same collision again, not to outlast a fault, so its scale is one
-// prepare (a few store round trips), not the orchestrator's retry backoff.
-const (
-	replanBackoffBase = time.Millisecond
-	replanBackoffCap  = 50 * time.Millisecond
-)
-
 // errPlanOvertaken is tryPrepare losing its append to a write that landed on
 // a stream it planned against — a Wallet it mints into, or the Transfer's own
 // stream: the plan was built on a position that no longer holds.
@@ -757,23 +747,10 @@ func (s *Server) prepare(ctx context.Context, transferID string) error {
 		if err := s.tryPrepare(ctx, transferID); !errors.Is(err, errPlanOvertaken) {
 			return err
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(replanBackoff(attempt)):
+		if err := contention.Wait(ctx, attempt); err != nil {
+			return err
 		}
 	}
-}
-
-// replanBackoff is how long prepare waits before re-planning for the
-// attempt'th time: a uniformly random slice of a window that doubles from
-// replanBackoffBase, capped at replanBackoffCap.
-func replanBackoff(attempt int) time.Duration {
-	window := replanBackoffCap
-	if attempt < 16 {
-		window = min(window, replanBackoffBase<<attempt)
-	}
-	return rand.N(window)
 }
 
 // tryPrepare is one planning of prepare against the store as it stands now.
