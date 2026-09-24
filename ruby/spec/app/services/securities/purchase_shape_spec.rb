@@ -54,7 +54,6 @@ RSpec.describe Services::Securities::PurchaseShape do
     [claim_id, money_id, cash_id].each do |id|
       expect(leg(id).stage).to be false
       expect(leg(id).mint_source).to be false
-      expect(leg(id).auto_process).to be true
     end
   end
 

@@ -16,16 +16,17 @@ func usd(minorUnits uint64) *sharedpb.Money {
 	return &sharedpb.Money{MinorUnits: minorUnits, Currency: "USD"}
 }
 
-// gatedChildDAG builds a single-root, auto_process=false DAG — enough to
+// mintSourceChildDAG builds a single-root, mint_source DAG — enough to
 // exercise StartInitializingTransaction's own accept/reject/idempotency
-// without needing a working transferClient, since a Gated child never
-// reaches into it.
-func gatedChildDAG(childID string) map[string]*pb.Transfer {
+// without needing a working transferClient, since a mint_source child has no
+// balance to pre-check and so never reaches into it (see
+// wouldAcceptReadyChildren).
+func mintSourceChildDAG(childID string) map[string]*pb.Transfer {
 	return map[string]*pb.Transfer{
 		childID: {
 			Id: childID, Amount: usd(400),
 			FromWalletId: testutil.ID("w1"), ToWalletId: testutil.ID("w2"),
-			AutoProcess: false,
+			MintSource: true,
 		},
 	}
 }
@@ -33,13 +34,14 @@ func gatedChildDAG(childID string) map[string]*pb.Transfer {
 func TestStartInitializingTransaction_Accepts(t *testing.T) {
 	t.Parallel()
 	store := eventstore.NewMemoryStore()
-	server := NewServer(store, nil)
+	client := newAcceptingTransferClient()
+	server := NewServer(store, client)
 	ctx := context.Background()
 
 	txnID := testutil.ID("txn1")
 	childID := testutil.ID("xfer1")
 	resp, err := server.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
-		Id: txnID, Transfers: gatedChildDAG(childID),
+		Id: txnID, Transfers: mintSourceChildDAG(childID),
 	})
 	if err != nil {
 		t.Fatalf("StartInitializingTransaction() error = %v", err)
@@ -71,8 +73,11 @@ func TestStartInitializingTransaction_Accepts(t *testing.T) {
 	if len(children) != 0 {
 		t.Errorf("children = %v, want none touched yet", children)
 	}
+	if len(client.requested) != 0 {
+		t.Errorf("requested %v while accepting, want nothing requested until the saga is driven", client.requested)
+	}
 
-	// Driving it is what gates the child.
+	// Driving it is what requests the child.
 	driveSaga(t, server, nil, store, txnID)
 	events, err = store.Load(ctx, AggregateType, txnID)
 	if err != nil {
@@ -82,8 +87,11 @@ func TestStartInitializingTransaction_Accepts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("foldChildStates() error = %v", err)
 	}
-	if children[childID] != childGated {
-		t.Errorf("child state = %v, want gated (auto_process=false)", children[childID])
+	if children[childID] != childRequested {
+		t.Errorf("child state = %v, want requested", children[childID])
+	}
+	if client.requested[childID] == 0 {
+		t.Errorf("child %s was never requested of the Transfer aggregate", childID)
 	}
 }
 
@@ -94,7 +102,7 @@ func TestStartInitializingTransaction_RejectsCyclicDAG(t *testing.T) {
 	ctx := context.Background()
 
 	childID := testutil.ID("xfer1")
-	spec := gatedChildDAG(childID)[childID]
+	spec := mintSourceChildDAG(childID)[childID]
 	txnID := testutil.ID("txn1")
 	resp, err := server.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
 		Id:        txnID,
@@ -157,7 +165,6 @@ func TestStartInitializingTransaction_RejectsAZeroAmountLegBeforeDispatchingAnyt
 		Transfers: map[string]*pb.Transfer{childID: {
 			Id: childID, Amount: usd(0),
 			FromWalletId: testutil.ID("w1"), ToWalletId: testutil.ID("w2"),
-			AutoProcess: true,
 		}},
 	})
 	if err != nil {
@@ -190,7 +197,7 @@ func TestStartInitializingTransaction_IsIdempotent(t *testing.T) {
 	ctx := context.Background()
 
 	txnID := testutil.ID("txn1")
-	req := &pb.StartInitializingTransactionRequest{Id: txnID, Transfers: gatedChildDAG(testutil.ID("xfer1"))}
+	req := &pb.StartInitializingTransactionRequest{Id: txnID, Transfers: mintSourceChildDAG(testutil.ID("xfer1"))}
 	first, err := server.StartInitializingTransaction(ctx, req)
 	if err != nil {
 		t.Fatalf("first StartInitializingTransaction() error = %v", err)
@@ -250,7 +257,7 @@ func TestIsOpen_InitializedAndStartedAreOpen(t *testing.T) {
 
 	txnID := testutil.ID("txn1")
 	if _, err := server.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
-		Id: txnID, Transfers: gatedChildDAG(testutil.ID("xfer1")),
+		Id: txnID, Transfers: mintSourceChildDAG(testutil.ID("xfer1")),
 	}); err != nil {
 		t.Fatalf("StartInitializingTransaction() error = %v", err)
 	}
@@ -298,7 +305,7 @@ func TestExists_InitializedTransactionIsTrue(t *testing.T) {
 
 	txnID := testutil.ID("txn1")
 	if _, err := server.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
-		Id: txnID, Transfers: gatedChildDAG(testutil.ID("xfer1")),
+		Id: txnID, Transfers: mintSourceChildDAG(testutil.ID("xfer1")),
 	}); err != nil {
 		t.Fatalf("StartInitializingTransaction() error = %v", err)
 	}
@@ -323,8 +330,8 @@ func achWithdrawalDAG(cash, bankAccount, cleared, bankControl, realID, shadowID 
 	map[string]*pb.Transfer, map[string]*pb.TransferIdList,
 ) {
 	return map[string]*pb.Transfer{
-			realID:   {Id: realID, Amount: amount, FromWalletId: cash, ToWalletId: bankAccount, AutoProcess: true, Stage: true},
-			shadowID: {Id: shadowID, Amount: amount, FromWalletId: cleared, ToWalletId: bankControl, AutoProcess: true},
+			realID:   {Id: realID, Amount: amount, FromWalletId: cash, ToWalletId: bankAccount, Stage: true},
+			shadowID: {Id: shadowID, Amount: amount, FromWalletId: cleared, ToWalletId: bankControl},
 		}, map[string]*pb.TransferIdList{
 			realID: {TransferId: []string{shadowID}},
 		}
@@ -445,7 +452,7 @@ func TestStartInitializingTransaction_SkipsMintSourceReadyChild(t *testing.T) {
 		Transfers: map[string]*pb.Transfer{
 			realID: {
 				Id: realID, Amount: usd(10000), FromWalletId: bankAccount, ToWalletId: cash,
-				AutoProcess: true, Stage: true, MintSource: true,
+				Stage: true, MintSource: true,
 			},
 		},
 	})
@@ -454,28 +461,6 @@ func TestStartInitializingTransaction_SkipsMintSourceReadyChild(t *testing.T) {
 	}
 	if resp.GetTransactionInitialized() == nil {
 		t.Fatalf("result = %v, want TransactionInitialized (mint_source has no balance to be underfunded on)", resp.GetResult())
-	}
-}
-
-// TestStartInitializingTransaction_GatedChildIsNeverPreChecked is an
-// explicit regression guard: a gated (auto_process=false) child must never
-// reach wouldAcceptReadyChildren's transferClient call at all, which is why
-// every pre-existing test in this file can keep constructing NewServer
-// with a nil transferClient — a nil dereference here would panic loudly.
-func TestStartInitializingTransaction_GatedChildIsNeverPreChecked(t *testing.T) {
-	t.Parallel()
-	store := eventstore.NewMemoryStore()
-	server := NewServer(store, nil)
-	ctx := context.Background()
-
-	resp, err := server.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
-		Id: testutil.ID("txn1"), Transfers: gatedChildDAG(testutil.ID("xfer1")),
-	})
-	if err != nil {
-		t.Fatalf("StartInitializingTransaction() error = %v", err)
-	}
-	if resp.GetTransactionInitialized() == nil {
-		t.Fatalf("result = %v, want TransactionInitialized", resp.GetResult())
 	}
 }
 

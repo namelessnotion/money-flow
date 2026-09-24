@@ -30,7 +30,7 @@ func TestResume_StartsAnInitializedTransaction(t *testing.T) {
 	if err := store.Append(ctx, AggregateType, txnID, 0, &pb.TransactionInitialized{
 		Id: txnID,
 		Transfers: map[string]*pb.Transfer{
-			clearID: {Id: clearID, Amount: usd(10000), FromWalletId: uncleared, ToWalletId: cleared, AutoProcess: true},
+			clearID: {Id: clearID, Amount: usd(10000), FromWalletId: uncleared, ToWalletId: cleared},
 		},
 	}); err != nil {
 		t.Fatalf("seed initialized: %v", err)
@@ -82,7 +82,7 @@ func TestResume_IsANoOpOnATerminalTransaction(t *testing.T) {
 	if _, err := server.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
 		Id: txnID,
 		Transfers: map[string]*pb.Transfer{
-			clearID: {Id: clearID, Amount: usd(10000), FromWalletId: uncleared, ToWalletId: cleared, AutoProcess: true},
+			clearID: {Id: clearID, Amount: usd(10000), FromWalletId: uncleared, ToWalletId: cleared},
 		},
 	}); err != nil {
 		t.Fatalf("StartInitializingTransaction() error = %v", err)

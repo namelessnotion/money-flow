@@ -7,6 +7,8 @@
 - **See also:** [ruby/docs/adr/0004](../../../ruby/docs/adr/0004-ach-withdrawal-funds-before-it-leaves.md), the
   decision this makes possible without depending on the synchronous saga described in
   [go/docs/adr/0001](0001-event-triggered-saga-orchestrator.md).
+- **Amended 2026-09-24 by** [ADR 0012](0012-a-ready-child-is-always-requested.md): `auto_process` is removed, so
+  "immediately dispatchable" is now every child ready at time zero. No existing caller ever set `auto_process=false`.
 
 ## Context
 

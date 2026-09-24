@@ -44,11 +44,11 @@ func achDeposit(t *testing.T) (w *world, txnID, realID, shadowID string) {
 		map[string]*transactionpb.Transfer{
 			realID: {
 				Id: realID, Amount: usd(10000), FromWalletId: bankAccount, ToWalletId: cash,
-				AutoProcess: true, Stage: true, MintSource: true,
+				Stage: true, MintSource: true,
 			},
 			shadowID: {
 				Id: shadowID, Amount: usd(10000), FromWalletId: bankControl, ToWalletId: uncleared,
-				AutoProcess: true, Stage: false, MintSource: true,
+				Stage: false, MintSource: true,
 			},
 		},
 		map[string]*transactionpb.TransferIdList{shadowID: {TransferId: []string{realID}}},
@@ -292,11 +292,11 @@ func stagedReversalRollback(t *testing.T) (w *world, txnID, realID string) {
 		map[string]*transactionpb.Transfer{
 			realID: {
 				Id: realID, Amount: usd(10000), FromWalletId: bankAccount, ToWalletId: cash,
-				AutoProcess: true, Stage: true, MintSource: true,
+				Stage: true, MintSource: true,
 			},
 			shadowID: {
 				Id: shadowID, Amount: usd(10000), FromWalletId: testutil.ID("never-provisioned"), ToWalletId: uncleared,
-				AutoProcess: true, MintSource: true,
+				MintSource: true,
 			},
 		},
 		map[string]*transactionpb.TransferIdList{shadowID: {TransferId: []string{realID}}},

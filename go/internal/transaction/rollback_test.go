@@ -45,8 +45,8 @@ func TestMidDAGFailure_TriggersReverseTopologicalRollback(t *testing.T) {
 	if _, err := txnServer.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
 		Id: txnID,
 		Transfers: map[string]*pb.Transfer{
-			realID:   {Id: realID, Amount: usd(10000), FromWalletId: bankAccount, ToWalletId: cash, AutoProcess: true, MintSource: true},
-			shadowID: {Id: shadowID, Amount: usd(10000), FromWalletId: neverProvisionedBankControl, ToWalletId: uncleared, AutoProcess: true, MintSource: true},
+			realID:   {Id: realID, Amount: usd(10000), FromWalletId: bankAccount, ToWalletId: cash, MintSource: true},
+			shadowID: {Id: shadowID, Amount: usd(10000), FromWalletId: neverProvisionedBankControl, ToWalletId: uncleared, MintSource: true},
 		},
 		TransferDependency: map[string]*pb.TransferIdList{
 			shadowID: {TransferId: []string{realID}},
@@ -171,8 +171,8 @@ func TestRollbackFailure_ReachesTransactionRollbackFailed(t *testing.T) {
 	if _, err := txnServer.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
 		Id: txnID,
 		Transfers: map[string]*pb.Transfer{
-			realID: {Id: realID, Amount: usd(1000), FromWalletId: bankAccount, ToWalletId: cash, AutoProcess: true, MintSource: true},
-			failID: {Id: failID, Amount: usd(1000), FromWalletId: neverOpened, ToWalletId: cash, AutoProcess: true, MintSource: true},
+			realID: {Id: realID, Amount: usd(1000), FromWalletId: bankAccount, ToWalletId: cash, MintSource: true},
+			failID: {Id: failID, Amount: usd(1000), FromWalletId: neverOpened, ToWalletId: cash, MintSource: true},
 		},
 		TransferDependency: map[string]*pb.TransferIdList{
 			failID: {TransferId: []string{realID}},
@@ -228,11 +228,11 @@ func TestCrossTransactionTokenReservation_HidesThenRevealsCashToken(t *testing.T
 		Transfers: map[string]*pb.Transfer{
 			realID: {
 				Id: realID, Amount: usd(10000), FromWalletId: bankAccount, ToWalletId: cash,
-				AutoProcess: true, Stage: true, MintSource: true,
+				Stage: true, MintSource: true,
 			},
 			shadowID: {
 				Id: shadowID, Amount: usd(10000), FromWalletId: bankControl, ToWalletId: uncleared,
-				AutoProcess: true, MintSource: true,
+				MintSource: true,
 			},
 		},
 		TransferDependency: map[string]*pb.TransferIdList{shadowID: {TransferId: []string{realID}}},
@@ -312,8 +312,8 @@ func TestSameTransactionVisibility_DAGCanSpendItsOwnTaggedToken(t *testing.T) {
 	if _, err := txnServer.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
 		Id: txnID,
 		Transfers: map[string]*pb.Transfer{
-			aID: {Id: aID, Amount: usd(1000), FromWalletId: bankAccount, ToWalletId: middle, AutoProcess: true, MintSource: true},
-			bID: {Id: bID, Amount: usd(1000), FromWalletId: middle, ToWalletId: final, AutoProcess: true},
+			aID: {Id: aID, Amount: usd(1000), FromWalletId: bankAccount, ToWalletId: middle, MintSource: true},
+			bID: {Id: bID, Amount: usd(1000), FromWalletId: middle, ToWalletId: final},
 		},
 		TransferDependency: map[string]*pb.TransferIdList{bID: {TransferId: []string{aID}}},
 	}); err != nil {
@@ -353,8 +353,8 @@ func TestRunSaga_IdempotentMidDAGResume(t *testing.T) {
 	if _, err := txnServer.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
 		Id: txnID,
 		Transfers: map[string]*pb.Transfer{
-			realID:   {Id: realID, Amount: usd(10000), FromWalletId: bankAccount, ToWalletId: cash, AutoProcess: true, Stage: true, MintSource: true},
-			shadowID: {Id: shadowID, Amount: usd(10000), FromWalletId: bankControl, ToWalletId: uncleared, AutoProcess: true, MintSource: true},
+			realID:   {Id: realID, Amount: usd(10000), FromWalletId: bankAccount, ToWalletId: cash, Stage: true, MintSource: true},
+			shadowID: {Id: shadowID, Amount: usd(10000), FromWalletId: bankControl, ToWalletId: uncleared, MintSource: true},
 		},
 		TransferDependency: map[string]*pb.TransferIdList{shadowID: {TransferId: []string{realID}}},
 	}); err != nil {

@@ -22,10 +22,12 @@ message Transfer {
   shared.v1.Money amount = 2;
   string from_wallet_id = 3;
   string to_wallet_id = 4;
-  bool auto_process = 5; // automatically process or wait for external StartProcessing
-  // auto_process does not go in the transfer.proto because auto processing only makes
-  // sense in the context of a Transaction and only a Transaction can determine if all
-  // deps are met for a Transfer to start processing
+  // auto_process let a child wait, once ready, for an external
+  // StartProcessingTransfer. No caller ever set it false, so every child is
+  // requested as soon as its parents complete (go/docs/adr/0012). Older
+  // TransactionInitialized events still carry it, and it is ignored.
+  reserved 5;
+  reserved "auto_process";
 
   // Echoes RequestTransferRequest.stage for this child — Transaction has no
   // opinion of its own on staging, it just passes the caller's choice through.
@@ -149,16 +151,9 @@ message TransactionStarted {
 
 // --- Per-child bookkeeping Transaction records on its OWN stream as it
 // drives each child Transfer forward or back. Not exposed via any RPC —
-// saga-internal, produced only by transaction/saga.go, the same relationship
-// operation.Staged/Performed has to transfer/saga.go.
+// saga-internal, produced only by transaction/saga.go.
 
 message TransferRequestedWithinTransaction {
-  string id = 1;
-  string transfer_id = 2;
-}
-
-// auto_process=false, awaiting StartProcessingTransfer.
-message TransferGatedWithinTransaction {
   string id = 1;
   string transfer_id = 2;
 }
@@ -192,7 +187,7 @@ enum RollbackMethod {
   ROLLBACK_METHOD_UNSPECIFIED = 0;
   ROLLBACK_METHOD_REVERSED = 1;   // child was Committed -> RequestReversal
   ROLLBACK_METHOD_CANCELLED = 2;  // child was Accepted/Prepared/Staged/Pending -> Cancel*Transfer
-  ROLLBACK_METHOD_ABANDONED = 3;  // child was only Gated, never requested -> nothing to call
+  ROLLBACK_METHOD_ABANDONED = 3;  // child moved no money (rejected, failed or cancelled on its own) -> nothing to call
 }
 
 // A committed child is undone by RequestReversal, and a Reversal is itself a
@@ -238,26 +233,6 @@ message TransactionRollbackFailed {
   string reason = 2;
 }
 
-message StartProcessingTransferRequest {
-  string id = 1;
-  string transfer_id = 2;
-}
-
-message StartProcessingTransferRejected {
-  string id = 1;
-  string transfer_id = 2;
-  string reason = 3;
-}
-
-message StartProcessingTransferResponse {
-  string id = 1;
-  oneof result {
-    TransferRequestedWithinTransaction transfer_requested_within_transaction = 2;
-    TransferFailedWithinTransaction transfer_failed_within_transaction = 3;
-    StartProcessingTransferRejected start_processing_transfer_rejected = 4;
-  }
-}
-
 enum TransactionState {
   TRANSACTION_STATE_UNSPECIFIED = 0;
   TRANSACTION_STATE_INITIALIZED = 1;
@@ -300,7 +275,6 @@ message StartTransactionRollbackResponse {
 
 service TransactionService {
   rpc StartInitializingTransaction(StartInitializingTransactionRequest) returns (StartInitializingTransactionResponse) {}
-  rpc StartProcessingTransfer(StartProcessingTransferRequest) returns (StartProcessingTransferResponse) {}
   rpc GetTransactionState(GetTransactionStateRequest) returns (GetTransactionStateResponse) {}
   rpc StartTransactionRollback(StartTransactionRollbackRequest) returns (StartTransactionRollbackResponse) {}
 }

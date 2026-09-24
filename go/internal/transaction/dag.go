@@ -149,7 +149,7 @@ func validateChildAmount(key string, spec *pb.Transfer) error {
 }
 
 // readyToRun returns every child id that (a) has not yet been touched (no
-// entry in touched — nothing dispatched, gated, completed, or failed for it
+// entry in touched — nothing dispatched, completed, or failed for it
 // yet) and (b) has every parent listed in deps[id] already in completed. A
 // child with no entry in deps is a DAG root, ready immediately. Called on
 // every runSaga iteration rather than precomputing a single execution plan,
@@ -178,9 +178,9 @@ func readyToRun(transfers map[string]*pb.Transfer, deps map[string]*pb.TransferI
 }
 
 // wouldAcceptReadyChildren pre-flight-checks every child that would be
-// dispatched immediately were req accepted (auto_process=true, ready at time
-// zero per readyToRun, mint_source=false) against transfer's own accept-time
-// decision, before TransactionInitialized is ever written. mint_source
+// dispatched immediately were req accepted (ready at time zero per readyToRun,
+// mint_source=false) against transfer's own accept-time decision, before
+// TransactionInitialized is ever written. mint_source
 // children are excluded: they have no balance constraint at all (they mint
 // their own source Token — see transfer.validateMintSource), and checking
 // one here would spuriously reject via TransactionExistsChecker, since this
@@ -194,7 +194,7 @@ func (s *Server) wouldAcceptReadyChildren(
 ) (string, error) {
 	for _, childID := range readyToRun(transfers, deps, map[string]bool{}, map[string]bool{}) {
 		spec := transfers[childID]
-		if !spec.GetAutoProcess() || spec.GetMintSource() {
+		if spec.GetMintSource() {
 			continue
 		}
 		rejection, err := s.transfer.WouldAcceptTransfer(ctx, spec.GetFromWalletId(), spec.GetAmount(), transactionID)
@@ -208,10 +208,10 @@ func (s *Server) wouldAcceptReadyChildren(
 	return "", nil
 }
 
-// readyToRollback returns every started-or-gated child (touched, not yet
-// rolled back) that has no remaining *active* dependent — every child that
-// lists it as a parent is either untouched (never started, so trivially
-// resolved) or already rolled back. This is readyToRun's mirror, walking
+// readyToRollback returns every touched child (not yet rolled back) that has
+// no remaining *active* dependent — every child that lists it as a parent is
+// either untouched (never started, so trivially resolved) or already rolled
+// back. This is readyToRun's mirror, walking
 // edges backward: it's what makes reverse-topological rollback an ordinary
 // incremental fold instead of a second static plan, and is what makes
 // intra-transaction rollback safe with zero new locking — a downstream

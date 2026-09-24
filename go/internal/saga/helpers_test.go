@@ -337,8 +337,9 @@ func (w *world) drain(transactionID string) {
 
 // childTransfers lists every Transfer the Transaction has written about and
 // that has a stream of its own — including Reversals, which are Transfers too
-// and arrive on the same topic. A gated child is named but never requested, so
-// it has no stream and no trigger would ever be published for it.
+// and arrive on the same topic. A child whose intent is recorded but whose
+// request was never made has no stream, and no trigger would ever be published
+// for it.
 func (w *world) childTransfers(transactionID string) []string {
 	w.t.Helper()
 	ctx := context.Background()
@@ -374,8 +375,6 @@ func (w *world) childTransfers(transactionID string) []string {
 func transferIDsNamedBy(msg proto.Message) []string {
 	switch m := msg.(type) {
 	case *transactionpb.TransferRequestedWithinTransaction:
-		return []string{m.GetTransferId()}
-	case *transactionpb.TransferGatedWithinTransaction:
 		return []string{m.GetTransferId()}
 	case *transactionpb.TransferCompletedWithinTransaction:
 		return []string{m.GetTransferId()}

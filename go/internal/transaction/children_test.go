@@ -14,15 +14,14 @@ import (
 	"github.com/namelessnotion/money_flow/go/internal/transfer"
 )
 
-// Only a Transfer with a stream of its own can be woken. A gated child was
-// never asked for, and an intended one has not been asked for yet
-// (go/docs/adr/0011): neither has a stream.
+// Only a Transfer with a stream of its own can be woken. An intended child has
+// not been asked for yet (go/docs/adr/0011), so it has no stream.
 func TestChildTransferIDs_ListsRequestedChildrenAndReversalsOnly(t *testing.T) {
 	t.Parallel()
 	store := eventstore.NewMemoryStore()
 	ctx := context.Background()
 	txnID := testutil.ID("txn1")
-	a, gated, intended, reversal := testutil.ID("a"), testutil.ID("gated"), testutil.ID("intended"), testutil.ID("reversal")
+	a, intended, reversal := testutil.ID("a"), testutil.ID("intended"), testutil.ID("reversal")
 
 	for _, id := range []string{a, reversal} {
 		if err := store.Append(ctx, transfer.AggregateType, id, 0, &transferpb.TransferRequestAccepted{Id: id, TransactionId: txnID}); err != nil {
@@ -33,7 +32,6 @@ func TestChildTransferIDs_ListsRequestedChildrenAndReversalsOnly(t *testing.T) {
 		&pb.TransactionInitialized{Id: txnID},
 		&pb.TransactionStarted{Id: txnID},
 		&pb.TransferRequestedWithinTransaction{Id: txnID, TransferId: a},
-		&pb.TransferGatedWithinTransaction{Id: txnID, TransferId: gated},
 		&pb.TransferRequestedWithinTransaction{Id: txnID, TransferId: intended},
 		&pb.TransferCompletedWithinTransaction{Id: txnID, TransferId: a},
 		&pb.TransactionRollbackStarted{Id: txnID},

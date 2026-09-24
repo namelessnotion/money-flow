@@ -14,7 +14,6 @@ RSpec.describe Consumer::EventStateMap do
     %w[
       transaction.v1.Transfer
       transaction.v1.TransferIdList
-      transaction.v1.StartProcessingTransferRejected
       transfer.v1.TransferDestination
       transfer.v1.TransferLeg
       transfer.v1.StartPreparingTransfer

@@ -152,7 +152,6 @@ type childState int
 
 const (
 	childUntouched childState = iota
-	childGated
 	childRequested
 	childCompleted
 	childFailed
@@ -178,8 +177,6 @@ func foldChildStates(events []eventstore.Event) (map[string]childState, error) {
 			return nil, twirp.InternalErrorWith(err)
 		}
 		switch m := msg.(type) {
-		case *pb.TransferGatedWithinTransaction:
-			states[m.GetTransferId()] = childGated
 		case *pb.TransferRequestedWithinTransaction:
 			states[m.GetTransferId()] = childRequested
 		case *pb.TransferCompletedWithinTransaction:
@@ -246,11 +243,7 @@ func failureReason(events []eventstore.Event, transferID string) (string, error)
 	return "", nil
 }
 
-// allTerminal reports whether every child in the DAG has completed. Only
-// ever checked once nothing failed and nothing is dispatchable — a
-// leftover Gated child at that point just means the Transaction is
-// legitimately still waiting on an external StartProcessingTransfer, not
-// that it's stuck.
+// allTerminal reports whether every child in the DAG has completed.
 func allTerminal(transfers map[string]*pb.Transfer, children map[string]childState) bool {
 	for id := range transfers {
 		if children[id] != childCompleted {
@@ -269,8 +262,6 @@ func allTerminal(transfers map[string]*pb.Transfer, children map[string]childSta
 func childEventTransferID(msg proto.Message) string {
 	switch m := msg.(type) {
 	case *pb.TransferRequestedWithinTransaction:
-		return m.GetTransferId()
-	case *pb.TransferGatedWithinTransaction:
 		return m.GetTransferId()
 	case *pb.TransferCompletedWithinTransaction:
 		return m.GetTransferId()
@@ -373,7 +364,7 @@ func (s *Server) appendSagaStep(ctx context.Context, transactionID string, event
 //   - a child's rollback fact, while the Transaction is rolling back.
 //   - a conclusion, while the stream still concludes exactly that.
 //
-// Dispatch intents (TransferRequested/GatedWithinTransaction) are not here:
+// Dispatch intents (TransferRequestedWithinTransaction) are not here:
 // they are appended against the fold that chose them (recordIntents), because
 // the side effect they license must not happen at all once they are stale.
 func stillDecidable(events []eventstore.Event, transactionID string, event proto.Message) (bool, error) {
@@ -490,9 +481,8 @@ func (s *Server) Resume(ctx context.Context, transactionID string) error {
 
 // runSaga folds the Transaction's current state and dispatches the next
 // step, looping until it reaches a state that waits on something outside
-// this call — an in-flight or gated child, or an external
-// StartProcessingTransfer/StartTransactionRollback — a dispatch slice
-// boundary (see maxDispatchPerStep), or a true terminal (Completed,
+// this call — an in-flight child, or an external StartTransactionRollback — a
+// dispatch slice boundary (see maxDispatchPerStep), or a true terminal (Completed,
 // RolledBack, RollbackFailed, Rejected). Safe, and expected, to call
 // idempotently any number of times for the same id: each call resumes from
 // wherever the stream actually left off.
@@ -575,7 +565,7 @@ func (s *Server) runSaga(ctx context.Context, transactionID string) error {
 			if dispatched {
 				continue
 			}
-			return nil // waiting on an in-flight/gated child or an external StartProcessingTransfer
+			return nil // waiting on an in-flight child
 
 		case stateRollbackStarted:
 			transfers, deps, err := decodeSpec(events)
@@ -647,7 +637,7 @@ func (s *Server) runSaga(ctx context.Context, transactionID string) error {
 // halts the consumer for every other aggregate sharing it (ADR 0003).
 //
 // No cursor is stored, because none is needed. Every dispatched child is
-// recorded as a TransferRequested/GatedWithinTransaction intent on this
+// recorded as a TransferRequestedWithinTransaction intent on this
 // Transaction's own stream, and readyToRun excludes every touched child: the
 // stream is the cursor. Those same appends are published, so the writes that
 // record a slice are the triggers that fetch the next one. A slice that
@@ -663,10 +653,9 @@ func (s *Server) runSaga(ctx context.Context, transactionID string) error {
 // Transaction's width stays maxTransfersPerTransaction.
 const maxDispatchPerStep = 8
 
-// dispatchReady dispatches up to maxDispatchPerStep currently-ready children
-// (per readyToRun): auto_process=true children get an actual RequestTransfer
-// call; auto_process=false children are simply marked Gated, waiting for an
-// explicit StartProcessingTransfer.
+// dispatchReady requests up to maxDispatchPerStep currently-ready children (per
+// readyToRun). A child is requested as soon as its parents complete; nothing
+// holds a ready child back (go/docs/adr/0012).
 //
 // Intent comes before effect (go/docs/adr/0011). The whole slice is recorded
 // first, in one append against version — the length of the fold that chose
@@ -696,11 +685,7 @@ func (s *Server) dispatchReady(
 
 	intents := make([]proto.Message, 0, len(ready))
 	for _, childID := range ready {
-		if transfers[childID].GetAutoProcess() {
-			intents = append(intents, &pb.TransferRequestedWithinTransaction{Id: transactionID, TransferId: childID})
-		} else {
-			intents = append(intents, &pb.TransferGatedWithinTransaction{Id: transactionID, TransferId: childID})
-		}
+		intents = append(intents, &pb.TransferRequestedWithinTransaction{Id: transactionID, TransferId: childID})
 	}
 	switch recorded, err := s.recordIntents(ctx, transactionID, version, intents...); {
 	case err != nil:
@@ -710,10 +695,8 @@ func (s *Server) dispatchReady(
 	}
 
 	for _, childID := range ready {
-		if spec := transfers[childID]; spec.GetAutoProcess() {
-			if _, err := s.requestChildTransfer(ctx, transactionID, spec); err != nil {
-				return false, false, err
-			}
+		if _, err := s.requestChildTransfer(ctx, transactionID, transfers[childID]); err != nil {
+			return false, false, err
 		}
 	}
 	return true, more, nil
@@ -746,7 +729,7 @@ func (s *Server) recordIntents(ctx context.Context, transactionID string, versio
 // and reconcileInFlight reads them. A rejection is recorded here, as
 // TransferFailedWithinTransaction carrying the Transfer's reason, because a
 // rejected Transfer names no Transaction (transfer.OwningTransaction) and so
-// wakes none; it is returned too, for StartProcessingTransfer to answer with.
+// wakes none; it is returned too, so a caller knows something was recorded.
 func (s *Server) requestChildTransfer(ctx context.Context, transactionID string, spec *pb.Transfer) (*transferpb.TransferRequestRejected, error) {
 	resp, err := s.transfer.RequestTransfer(ctx, requestFor(transactionID, spec))
 	if err != nil {
@@ -974,9 +957,8 @@ func planRollback(transfers map[string]*pb.Transfer, deps map[string]*pb.Transfe
 // rollbackChild picks the rollback action for one ready child from its LIVE
 // transfer.Outcome: Committed -> RequestReversal; Staged/Pending ->
 // CancelStagedTransfer; InFlight (Accepted/Prepared) ->
-// CancelAcceptedTransfer; never requested (only Gated, or no entry at all)
-// -> nothing to call, straight to ABANDONED; already Failed/Cancelled on
-// its own, or rejected at accept -> nothing left to undo, also ABANDONED.
+// CancelAcceptedTransfer; already recorded as Failed, already Failed/Cancelled
+// on its own, or rejected at accept -> nothing left to undo, ABANDONED.
 //
 // A Requested child with no Transfer yet is an intent whose driver has not
 // made the request, or is making it now (go/docs/adr/0011). The request is

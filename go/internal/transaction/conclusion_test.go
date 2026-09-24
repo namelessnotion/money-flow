@@ -89,7 +89,7 @@ func TestTransaction_TheLastChildsOutcomeAndTheConclusionShareOneAppend(t *testi
 			if _, err := txns.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
 				Id: txnID,
 				Transfers: map[string]*pb.Transfer{
-					childID: {Id: childID, Amount: usd(10000), FromWalletId: from, ToWalletId: to, AutoProcess: true, Stage: tc.stage},
+					childID: {Id: childID, Amount: usd(10000), FromWalletId: from, ToWalletId: to, Stage: tc.stage},
 				},
 			}); err != nil {
 				t.Fatalf("StartInitializingTransaction() error = %v", err)

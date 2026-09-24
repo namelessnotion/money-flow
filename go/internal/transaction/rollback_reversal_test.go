@@ -76,8 +76,8 @@ func reversingRollbackFixture(t *testing.T, lc ledger.Client) (eventstore.Store,
 	if _, err := txnServer.StartInitializingTransaction(context.Background(), &pb.StartInitializingTransactionRequest{
 		Id: txnID,
 		Transfers: map[string]*pb.Transfer{
-			realID:   {Id: realID, Amount: usd(10000), FromWalletId: bankAccount, ToWalletId: cash, AutoProcess: true, MintSource: true},
-			shadowID: {Id: shadowID, Amount: usd(10000), FromWalletId: neverProvisioned, ToWalletId: uncleared, AutoProcess: true, MintSource: true},
+			realID:   {Id: realID, Amount: usd(10000), FromWalletId: bankAccount, ToWalletId: cash, MintSource: true},
+			shadowID: {Id: shadowID, Amount: usd(10000), FromWalletId: neverProvisioned, ToWalletId: uncleared, MintSource: true},
 		},
 		TransferDependency: map[string]*pb.TransferIdList{shadowID: {TransferId: []string{realID}}},
 	}); err != nil {

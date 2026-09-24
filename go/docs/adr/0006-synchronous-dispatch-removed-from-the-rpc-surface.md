@@ -10,6 +10,8 @@
   precondition this discharges; [ADR 0004](0004-transaction-accept-time-funding-preflight.md), whose
   closing "Not decided here" this resolves; [ADR 0007](0007-bounded-transaction-width-and-sliced-dispatch.md),
   which lands alongside it.
+- **Amended 2026-09-24 by** [ADR 0012](0012-a-ready-child-is-always-requested.md): `StartProcessingTransfer` and
+  gated children are removed, so the paragraph below explaining why it could still dispatch is historical.
 
 ## Context
 
