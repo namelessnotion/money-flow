@@ -10,13 +10,13 @@ require_relative 'offering_shape'
 
 module Services
   module Securities
-    # Opens a Security for subscription: its three Wallets, its row, and the
+    # Opens a Security for subscription: its four Wallets, its row, and the
     # Transaction that mints its Supply.
     #
     # 1. Validates the parties and the terms, and chooses the Security's id —
     #    every other id it needs is derived from that one, so they are all
     #    known before anything is written.
-    # 2. Provisions the three Wallets on the Issuer's existing Holder, outside
+    # 2. Provisions the four Wallets on the Issuer's existing Holder, outside
     #    any database transaction, all-or-nothing. A local row must never name
     #    a Wallet that was never opened.
     # 3. Records the Security and its accounts, with the ids it is about to
@@ -44,10 +44,13 @@ module Services
       AccountType = Types::Enums::AccountType
       EntityRole = Types::Enums::EntityRole
 
-      # The three Wallets an offering opens. They belong to the Security rather
-      # than to any entity, which is why onboarding never opens them.
+      # The Wallets an offering opens. They belong to the Security rather than
+      # to any entity, which is why onboarding never opens them. Escrow and
+      # repayment hold its cleared cash; SecurityCash holds the real money
+      # behind both (ruby/docs/adr/0009).
       WALLETS = T.let(
-        [AccountType::SecuritySupply, AccountType::SecurityEscrow, AccountType::SecurityRepayment].freeze,
+        [AccountType::SecuritySupply, AccountType::SecurityEscrow, AccountType::SecurityRepayment,
+         AccountType::SecurityCash].freeze,
         T::Array[AccountType]
       )
 

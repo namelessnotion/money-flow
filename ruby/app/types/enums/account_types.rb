@@ -24,13 +24,14 @@ module Types
         Gain = new('gain')                     # Gain account for tracking profits
         Loss = new('loss')                     # Loss account for tracking losses
 
-        # Securities. The first two belong to an entity; the last three belong
+        # Securities. The first two belong to an entity; the last four belong
         # to a Security and are opened per offering, never by onboarding.
         Investment = new('investment')                  # An Investor's claims
         IssuerControl = new('issuer_control')           # Where an Issuer mints claim supply from
         SecuritySupply = new('security_supply')         # A Security's unsold claims
         SecurityEscrow = new('security_escrow')         # Investor money held until the Draw
         SecurityRepayment = new('security_repayment')   # Borrower money held until disbursement
+        SecurityCash = new('security_cash')             # The real money behind escrow and repayment
       end
 
       # What the backing Wallet may do at the platform boundary: onramp brings
@@ -47,8 +48,9 @@ module Types
       # back into it. The same shape as BankControl.
       #
       # ALLOWS_NONE gives a Token debits_must_not_exceed_credits, and that is
-      # what makes SecuritySupply an oversubscription control and Investment a
-      # guarantee that no holder has more principal retired than they hold.
+      # what makes SecuritySupply an oversubscription control, Investment a
+      # guarantee that no holder has more principal retired than they hold,
+      # and SecurityCash unable to pay out real money nobody paid in.
       #
       # ALLOWS_NONE rather than ALLOWS_UNSPECIFIED: the Wallet service rejects
       # an unset policy, so "neither direction" has to be said out loud.
@@ -73,7 +75,7 @@ module Types
       # to explain later.
       BANKING = T.let([Bank, BankControl, UnclearedCash, ClearedCash, Cash].freeze, T::Array[AccountType])
 
-      # A Security's own three types appear in no role's list. They are opened
+      # A Security's own four types appear in no role's list. They are opened
       # per offering by Services::Securities::IssueOffering, and the
       # accounts_security_scoped_types CHECK refuses one with no security_id.
       BY_ROLE = T.let(

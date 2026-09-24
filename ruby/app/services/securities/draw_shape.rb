@@ -6,27 +6,32 @@ require_relative 'wallets'
 
 module Services
   module Securities
-    # How a fully-subscribed Security's money reaches its Borrower: one
-    # Transfer from the Security's Escrow into the Borrower's cleared cash.
+    # How a fully-subscribed Security's money reaches its Borrower: a money leg
+    # from the Security's Escrow into the Borrower's cleared cash, and its cash
+    # leg from the Security's cash into the Borrower's (ruby/docs/adr/0009).
     #
-    # Root and non-minting, so Go pre-flights it: a Security whose escrow is
-    # short — not actually fully subscribed, or a Draw sent twice under
-    # different ids — is refused before anything is written.
+    # Both are roots and neither mints, so Go pre-flights both: a Security
+    # whose escrow is short — not actually fully subscribed, or a Draw sent
+    # twice under different ids — is refused before anything is written. They
+    # draw on different wallets, so there is no shared snapshot for the
+    # pre-flight to over-accept against.
     #
     # It does not cross the bank boundary and so never stages. Getting that
-    # money out to a real bank is an ordinary ACH withdrawal from the
-    # Borrower's own cleared cash, on rails that already exist.
+    # money out to a real bank is an ordinary ACH withdrawal, on rails that
+    # already exist — and the cash leg is what gives that withdrawal's real
+    # leg something to draw on.
     class DrawShape < T::Struct
       FACTORY_NAME = 'security_draw'
       # Bumped whenever the legs or their order change, so Go's record of each
       # Transaction says which shape ran.
-      FACTORY_VERSION = '1'
+      # 1 moved cleared cash only, so a Borrower could never withdraw it.
+      FACTORY_VERSION = '2'
 
       AccountType = Types::Enums::AccountType
 
       const :transfer_id, String
-      const :escrow_wallet_id, String
-      const :borrower_wallet_id, String
+      const :escrow_money, Leg::MoneyWallets
+      const :borrower_money, Leg::MoneyWallets
 
       # `accounts` is the Security's and the Borrower's, concatenated.
       sig do
@@ -34,12 +39,9 @@ module Services
           .returns(DrawShape)
       end
       def self.for(security:, accounts:, transfer_id:)
-        of_security = Wallets.of_security(security.id, [AccountType::SecurityEscrow], accounts)
-        of_borrower = Wallets.of_entity(security.borrower_entity_id, [AccountType::ClearedCash], accounts)
-
         new(transfer_id: transfer_id,
-            escrow_wallet_id: of_security.fetch(AccountType::SecurityEscrow),
-            borrower_wallet_id: of_borrower.fetch(AccountType::ClearedCash))
+            escrow_money: Wallets.money_of_security(security.id, AccountType::SecurityEscrow, accounts),
+            borrower_money: Wallets.money_of_entity(security.borrower_entity_id, accounts))
       end
 
       sig { params(transaction_id: String, amount_minor_units: Integer).returns(T.untyped) }
@@ -48,10 +50,8 @@ module Services
           id: transaction_id,
           factory_name: FACTORY_NAME,
           factory_version: FACTORY_VERSION,
-          transfers: {
-            transfer_id => Leg.transfer(id: transfer_id, amount_minor_units: amount_minor_units,
-                                        from: escrow_wallet_id, to: borrower_wallet_id)
-          }
+          transfers: Leg.money(id: transfer_id, amount_minor_units: amount_minor_units,
+                               from: escrow_money, to: borrower_money)
         )
       end
     end

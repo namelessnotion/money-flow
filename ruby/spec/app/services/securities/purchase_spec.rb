@@ -30,8 +30,10 @@ RSpec.describe Services::Securities::Purchase do
       subscription = buy
 
       expect(sent_request.id).to eq(subscription.id)
+      # The cash leg is not recorded: its id is derived from the money leg's.
       expect(sent_request.transfers.keys)
-        .to contain_exactly(subscription.claim_transfer_id, subscription.money_transfer_id)
+        .to contain_exactly(subscription.claim_transfer_id, subscription.money_transfer_id,
+                            Services::Securities::Leg.cash_id_for(subscription.money_transfer_id))
       expect(subscription.amount_minor_units).to eq(25_000)
       expect(subscription.currency).to eq('USD')
     end

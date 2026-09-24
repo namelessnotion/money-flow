@@ -72,7 +72,7 @@ RSpec.describe Services::OnboardEntity do
       it "never opens a Security's own wallets, which belong to an offering rather than an entity" do
         Types::Enums::EntityRole.each_value do |role|
           expect(account_types_onboarded(role))
-            .not_to include('security_supply', 'security_escrow', 'security_repayment')
+            .not_to include('security_supply', 'security_escrow', 'security_repayment', 'security_cash')
         end
       end
 

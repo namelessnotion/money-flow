@@ -92,14 +92,15 @@ RSpec.describe Services::Securities do
       expect(sent.flat_map { |req| req.transfers.values.map(&:stage) }.uniq).to eq([false])
     end
 
-    it 'gates the money leg of every purchase behind its claim leg' do
+    it 'gates the money leg of every purchase, and its cash leg, behind its claim leg' do
       purchases = sent.select { |req| req.factory_name == 'security_purchase' }
 
       purchases.each do |req|
         gated = req.transfer_dependency.keys
-        expect(gated.size).to eq(1)
-        # The gated leg is the one leaving the investor's cleared cash.
-        expect(req.transfers[gated.first].to_wallet_id).to eq(escrow_wallet(security))
+        # The gated legs are the ones leaving the investor's cleared cash and
+        # cash; what is left at the root moves claims.
+        expect(gated.map { |id| req.transfers[id].to_wallet_id })
+          .to contain_exactly(escrow_wallet(security), cash_wallet(security))
       end
     end
 
@@ -162,12 +163,42 @@ RSpec.describe Services::Securities do
       disbursement_requests = sent.select { |req| req.factory_name == 'security_disbursement' }
 
       disbursement_requests.each do |req|
-        gated = req.transfer_dependency.keys.first
-        parent = req.transfer_dependency[gated].transfer_id.first
-        # The gated leg pays the investor; the one it waits on retires the claim.
-        expect(req.transfers[parent].to_wallet_id).to eq(control_wallet(issuer))
-        expect(req.transfers[gated].from_wallet_id).to eq(repayment_wallet(security))
+        # The gated legs pay the investor, on both sides; the one they wait on
+        # retires the claim.
+        paid_from = req.transfer_dependency.map do |gated, parents|
+          expect(req.transfers[parents.transfer_id.first].to_wallet_id).to eq(control_wallet(issuer))
+          req.transfers[gated].from_wallet_id
+        end
+        expect(paid_from).to contain_exactly(repayment_wallet(security), cash_wallet(security))
       end
+    end
+
+    # The invariant the cash legs exist for. An ACH withdrawal's funding draws
+    # on cleared cash and its real leg on cash, so a party whose two drift
+    # apart either cannot withdraw money it holds (a Borrower after a Draw, an
+    # Investor after a Disbursement) or still has cash for money it has spent.
+    it "moves every entity's cash exactly as far as its cleared cash" do
+      moved = net_by_wallet(sent)
+
+      [issuer, borrower, alice, bob].each do |entity|
+        cash, cleared = %w[cash cleared_cash].map { |type| moved.fetch(entity_wallet(entity, type), 0) }
+        expect(cash).to eq(cleared), "entity #{entity.id}: cash moved #{cash}, cleared cash #{cleared}"
+      end
+    end
+
+    it "holds exactly the Security's escrow and repayment money in its cash" do
+      moved = net_by_wallet(sent)
+      held = [escrow_wallet(security), repayment_wallet(security)].sum { |wallet| moved.fetch(wallet, 0) }
+
+      expect(moved.fetch(cash_wallet(security), 0)).to eq(held)
+    end
+
+    it 'leaves the Borrower holding cash for what they drew and have not repaid' do
+      moved = net_by_wallet(sent)
+
+      # Drew 100_000, repaid 110_000: short 10_000 of interest, which in life
+      # arrives by ACH deposit — so their cash is exactly as short.
+      expect(moved.fetch(entity_wallet(borrower, 'cash'))).to eq(-10_000)
     end
 
     it 'leaves nothing outstanding once the read model has seen every holder paid' do
@@ -221,6 +252,23 @@ RSpec.describe Services::Securities do
 
   def repayment_wallet(security)
     Models::Account.where(security_id: security.id, type: 'security_repayment').first.wallet_uuid
+  end
+
+  def cash_wallet(security)
+    Models::Account.where(security_id: security.id, type: 'security_cash').first.wallet_uuid
+  end
+
+  def entity_wallet(entity, type)
+    Models::Account.where(entity_id: entity.id, type: type, security_id: nil).first.wallet_uuid
+  end
+
+  # What every Transaction sent moves in or out of each wallet, as if all of
+  # them completed: credits positive, debits negative.
+  def net_by_wallet(requests)
+    requests.flat_map { |req| req.transfers.values }.each_with_object(Hash.new(0)) do |leg, net|
+      net[leg.from_wallet_id] -= leg.amount.minor_units
+      net[leg.to_wallet_id] += leg.amount.minor_units
+    end
   end
 
   def control_wallet(entity)

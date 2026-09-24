@@ -55,6 +55,15 @@ RSpec.describe Models::Security do
         .to raise_error(Sequel::CheckConstraintViolation, /security_scoped_types/)
     end
 
+    it "accepts a Security's cash wallet, and only on a Security" do
+      account = create(:account, entity: security.issuer, security: security, type: 'security_cash')
+
+      expect(security.accounts.map(&:type)).to eq(['security_cash'])
+      expect { create(:account, type: 'security_cash', security: nil) }
+        .to raise_error(Sequel::CheckConstraintViolation, /security_scoped_types/)
+      expect(account.entity_id).to eq(security.issuer_entity_id)
+    end
+
     it 'refuses an entity-scoped account hung off a security' do
       expect { create(:account, type: 'cleared_cash', security: security) }
         .to raise_error(Sequel::CheckConstraintViolation, /security_scoped_types/)
