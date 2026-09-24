@@ -132,7 +132,7 @@ func TestSelectSourceTokens_InsufficientBalanceRejects(t *testing.T) {
 
 func TestPlanDestinations_AlwaysOneInV1(t *testing.T) {
 	t.Parallel()
-	specs := planDestinations(usd(500))
+	specs := planDestinations(testutil.ID("xfer1"), usd(500))
 	if len(specs) != 1 {
 		t.Fatalf("planDestinations() = %v, want exactly one spec", specs)
 	}
@@ -140,7 +140,14 @@ func TestPlanDestinations_AlwaysOneInV1(t *testing.T) {
 		t.Errorf("Capacity = %+v, want 500", specs[0].Capacity)
 	}
 	if specs[0].TokenID == "" {
-		t.Error("TokenID is empty, want a freshly generated id")
+		t.Error("TokenID is empty, want an id")
+	}
+	if again := planDestinations(testutil.ID("xfer1"), usd(500)); again[0].TokenID != specs[0].TokenID {
+		t.Errorf("TokenID = %q then %q, want every planning of one Transfer to name the same Token",
+			specs[0].TokenID, again[0].TokenID)
+	}
+	if other := planDestinations(testutil.ID("xfer2"), usd(500)); other[0].TokenID == specs[0].TokenID {
+		t.Errorf("two Transfers both planned Token %q, want each its own", other[0].TokenID)
 	}
 }
 

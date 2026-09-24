@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"sort"
 	"time"
 
@@ -714,17 +715,20 @@ func (s *Server) requireClaim(ctx context.Context, transferID string, claimedSeq
 	return nil
 }
 
-// maxPrepareAttempts bounds how many times prepare re-plans after losing a
-// Wallet to a concurrent write. Each loss means some other write landed, so
-// contention always makes progress somewhere; the bound only stops one
-// Transfer being starved indefinitely, handing it back to its driver instead.
-// It sits comfortably above the orchestrator's partition count, the most
-// Transfers that can be preparing side by side in one process.
-const maxPrepareAttempts = 10
+// Between re-plans, prepare waits a random slice of a window that doubles
+// from replanBackoffBase up to replanBackoffCap. The wait is there to
+// decorrelate Transfers that just collided, so they don't all re-plan into
+// the same collision again, not to outlast a fault, so its scale is one
+// prepare (a few store round trips), not the orchestrator's retry backoff.
+const (
+	replanBackoffBase = time.Millisecond
+	replanBackoffCap  = 50 * time.Millisecond
+)
 
-// errWalletMoved is tryPrepare losing a race for a Wallet's stream to a
-// different write: its plan was built on a position that no longer holds.
-var errWalletMoved = errors.New("wallet moved while preparing")
+// errPlanOvertaken is tryPrepare losing its append to a write that landed on
+// a stream it planned against — a Wallet it mints into, or the Transfer's own
+// stream: the plan was built on a position that no longer holds.
+var errPlanOvertaken = errors.New("plan overtaken by a write to a stream it planned against")
 
 // prepare mints the destination Token(s) (skipped for a reversal — its
 // destinations are always the original Transfer's own, pre-existing source
@@ -733,22 +737,47 @@ var errWalletMoved = errors.New("wallet moved while preparing")
 // Operation stream are all *created together*, the same shape as
 // Holder.Provision.
 //
-// Minting appends to the Wallet at the position it was loaded at, so two
-// Transfers into one Wallet preparing at once collide there. That is
-// contention, not a fault — the same race token.Server.Mint retries — so
-// the loser re-plans against the Wallet as it now stands, reloading
-// everything, exactly as a fresh prepare would.
+// Minting appends to the Wallet at the position it was loaded at, so
+// Transfers minting into one Wallet — a shared destination, or a reserve
+// every mint_source Transfer mints its source from — collide there when they
+// prepare at once. That is contention, not a fault: the loser re-plans
+// against the Wallet as it now stands, reloading everything, exactly as a
+// fresh prepare would. It keeps re-planning for as long as it keeps losing,
+// because every loss is some other write landing, so a hot Wallet drains
+// rather than halting the orchestrator (go/docs/adr/0003, amended
+// 2026-09-24). No fixed number of re-plans is enough: with k Transfers
+// preparing against one Wallet at once, the last to land loses k-1 times,
+// and k grows with the orchestrator's partition count.
+//
+// Two things end the loop other than landing: ctx, and tryPrepare's check
+// that a lost race was lost *to* something. A conflict nothing landed to
+// cause is a fault, and goes back to the driver to retry and halt over.
 func (s *Server) prepare(ctx context.Context, transferID string) error {
-	for attempt := 0; attempt < maxPrepareAttempts; attempt++ {
-		if err := s.tryPrepare(ctx, transferID); !errors.Is(err, errWalletMoved) {
+	for attempt := 0; ; attempt++ {
+		if err := s.tryPrepare(ctx, transferID); !errors.Is(err, errPlanOvertaken) {
 			return err
 		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(replanBackoff(attempt)):
+		}
 	}
-	return fmt.Errorf("transfer %q: prepare conflicted and did not converge after %d attempts", transferID, maxPrepareAttempts)
+}
+
+// replanBackoff is how long prepare waits before re-planning for the
+// attempt'th time: a uniformly random slice of a window that doubles from
+// replanBackoffBase, capped at replanBackoffCap.
+func replanBackoff(attempt int) time.Duration {
+	window := replanBackoffCap
+	if attempt < 16 {
+		window = min(window, replanBackoffBase<<attempt)
+	}
+	return rand.N(window)
 }
 
 // tryPrepare is one planning of prepare against the store as it stands now.
-// It reports errWalletMoved when its write lost to a different one.
+// It reports errPlanOvertaken when its write lost to a different one.
 func (s *Server) tryPrepare(ctx context.Context, transferID string) error {
 	events, err := s.store.Load(ctx, AggregateType, transferID)
 	if err != nil {
@@ -756,6 +785,14 @@ func (s *Server) tryPrepare(ctx context.Context, transferID string) error {
 	}
 	if len(events) == 0 {
 		return fmt.Errorf("transfer %q: no accepted event to prepare from", transferID)
+	}
+	if currentState(events) != stateAccepted {
+		// Overtaken on the Transfer's own stream: a concurrent prepare of
+		// this Transfer landed, or a cancel did. Either way there is nothing
+		// left to prepare, and planning anyway would append TransferPrepared
+		// after the cancel — a cancelled Transfer brought back to move money.
+		// runSaga reloads and carries on from wherever it now is.
+		return nil
 	}
 	msg, err := events[0].Decode()
 	if err != nil {
@@ -783,7 +820,7 @@ func (s *Server) tryPrepare(ctx context.Context, transferID string) error {
 				return fmt.Errorf("transfer %q: prepare: mint_source re-validation failed after accept: %s", transferID, rejection.GetReason())
 			}
 
-			srcSpec := mintSourceLeg(accepted.GetAmount())
+			srcSpec := mintSourceLeg(transferID, accepted.GetAmount())
 			srcWalletEvents, err := s.store.Load(ctx, wallet.AggregateType, accepted.GetFromWalletId())
 			if err != nil {
 				return twirp.InternalErrorWith(err)
@@ -814,7 +851,7 @@ func (s *Server) tryPrepare(ctx context.Context, transferID string) error {
 			srcLegs = selected
 		}
 
-		destSpecs := planDestinations(accepted.GetAmount())
+		destSpecs := planDestinations(transferID, accepted.GetAmount())
 		walletEvents, err := s.store.Load(ctx, wallet.AggregateType, accepted.GetToWalletId())
 		if err != nil {
 			return twirp.InternalErrorWith(err)
@@ -898,19 +935,39 @@ func (s *Server) tryPrepare(ctx context.Context, transferID string) error {
 	case err == nil:
 		return nil
 	case errors.Is(err, eventstore.ErrConcurrencyConflict):
-		events, err := s.store.Load(ctx, AggregateType, transferID)
-		if err != nil {
-			return twirp.InternalErrorWith(err)
+		switch overtaken, loadErr := s.overtaken(ctx, writes); {
+		case loadErr != nil:
+			return loadErr
+		case !overtaken:
+			return fmt.Errorf("transfer %q: prepare: %w, yet no stream it planned against has moved", transferID, err)
 		}
-		for _, e := range events {
-			if e.EventType == eventstore.EventType(&pb.TransferPrepared{}) {
-				return nil // a concurrent prepare already landed
-			}
-		}
-		return errWalletMoved
+		return errPlanOvertaken
 	default:
 		return twirp.InternalErrorWith(err)
 	}
+}
+
+// overtaken reports whether any stream writes expected at a position has
+// since moved past it: whether an append that lost did so to a write that
+// really landed, which is what makes re-planning worth it. Only streams that
+// already existed are checked. Every stream a plan creates — its Tokens, its
+// Operations — is created in the same AppendAtomic as the Transfer's own
+// TransferPrepared, so anything that created one first moved the Transfer's
+// stream too.
+func (s *Server) overtaken(ctx context.Context, writes []eventstore.StreamWrite) (bool, error) {
+	for _, w := range writes {
+		if w.ExpectedSeq == 0 {
+			continue
+		}
+		events, err := s.store.Load(ctx, w.AggregateType, w.AggregateID)
+		if err != nil {
+			return false, twirp.InternalErrorWith(err)
+		}
+		if int64(len(events)) != w.ExpectedSeq {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // stage submits every leg's DEBIT as a TigerBeetle pending transfer

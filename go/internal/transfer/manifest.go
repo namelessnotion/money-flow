@@ -4,12 +4,11 @@ import (
 	"context"
 	"fmt"
 
-	"uuid"
-
 	"github.com/twitchtv/twirp"
 
 	sharedpb "github.com/namelessnotion/money_flow/go/gen/proto/shared/v1"
 	pb "github.com/namelessnotion/money_flow/go/gen/proto/transfer/v1"
+	"github.com/namelessnotion/money_flow/go/internal/detid"
 	"github.com/namelessnotion/money_flow/go/internal/eventstore"
 	"github.com/namelessnotion/money_flow/go/internal/ledger"
 	"github.com/namelessnotion/money_flow/go/internal/token"
@@ -121,15 +120,20 @@ func WouldAcceptTransfer(
 }
 
 // planDestinations decides how many new destination Tokens to mint for a
-// forward Transfer and how the amount splits across them, generating a
-// fresh id for each.
+// forward Transfer and how the amount splits across them.
+//
+// Each id is derived from transferID, not generated: minting creates a
+// Token's TigerBeetle account before the append that can lose a race for
+// the Wallet, so every planning of one Transfer — a re-plan, a redelivered
+// trigger, cmd/resume — has to name the same Tokens, or each lost plan
+// leaves an account behind.
 //
 // PROPOSED ASSUMPTION, per decision #2: v1 always mints exactly one
 // destination Token for the full amount. One-to-many is satisfied entirely
 // by reversing a many-to-one Transfer instead — see reversalManifest — so
 // no "max capacity per Token" splitting rule is needed here.
-func planDestinations(amount *sharedpb.Money) []token.MintSpec {
-	return []token.MintSpec{{TokenID: uuid.NewV7().String(), Capacity: amount}}
+func planDestinations(transferID string, amount *sharedpb.Money) []token.MintSpec {
+	return []token.MintSpec{{TokenID: detid.New(transferID + "/destination-token/0"), Capacity: amount}}
 }
 
 // mintSourceLeg builds the MintSpec for a mint_source=true request's sole
@@ -138,12 +142,13 @@ func planDestinations(amount *sharedpb.Money) []token.MintSpec {
 // to selectSourceTokens's existing-balance FIFO path. Pure — no I/O, same
 // reason planDestinations is pure — the actual TigerBeetle account and
 // event writes happen when the caller passes this spec into
-// token.MintWrites. No balance check here: the debit that follows is
-// expected to drive this fresh, zero-balance Token negative, which is
-// exactly what the source Wallet's Allows-derived account flags (validated
-// by validateMintSource) exist to legally permit.
-func mintSourceLeg(amount *sharedpb.Money) token.MintSpec {
-	return token.MintSpec{TokenID: uuid.NewV7().String(), Capacity: amount}
+// token.MintWrites; its id is derived from transferID for the same reason
+// planDestinations derives its own. No balance check here: the debit that
+// follows is expected to drive this fresh, zero-balance Token negative,
+// which is exactly what the source Wallet's Allows-derived account flags
+// (validated by validateMintSource) exist to legally permit.
+func mintSourceLeg(transferID string, amount *sharedpb.Money) token.MintSpec {
+	return token.MintSpec{TokenID: detid.New(transferID + "/source-token"), Capacity: amount}
 }
 
 // TransactionExistsChecker reports whether transactionID names a real,
