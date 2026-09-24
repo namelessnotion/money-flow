@@ -208,19 +208,21 @@ func (s *Server) wouldAcceptReadyChildren(
 	return "", nil
 }
 
-// readyToRollback returns every touched child (not yet rolled back) that has
-// no remaining *active* dependent — every child that lists it as a parent is
-// either untouched (never started, so trivially resolved) or already rolled
-// back. This is readyToRun's mirror, walking
+// readyToRollback returns every touched child not yet resolved that has no
+// remaining *active* dependent — every child that lists it as a parent is
+// either untouched (never started, so trivially resolved) or resolved. A
+// resolved child needs nothing more from the rollback: it has been rolled
+// back, or it failed and so moved nothing (see planRollback). This is
+// readyToRun's mirror, walking
 // edges backward: it's what makes reverse-topological rollback an ordinary
 // incremental fold instead of a second static plan, and is what makes
 // intra-transaction rollback safe with zero new locking — a downstream
 // consumer's debit against an upstream producer's Token is always undone
 // before the upstream producer's own reversal runs.
-func readyToRollback(transfers map[string]*pb.Transfer, deps map[string]*pb.TransferIdList, touched, rolledBack, inFlight map[string]bool) []string {
+func readyToRollback(transfers map[string]*pb.Transfer, deps map[string]*pb.TransferIdList, touched, resolved, inFlight map[string]bool) []string {
 	var ready []string
 	for id := range transfers {
-		if !touched[id] || rolledBack[id] {
+		if !touched[id] || resolved[id] {
 			continue
 		}
 		if inFlight[id] {
@@ -228,7 +230,7 @@ func readyToRollback(transfers map[string]*pb.Transfer, deps map[string]*pb.Tran
 		}
 		blocked := false
 		for childID, parents := range deps {
-			if !touched[childID] || rolledBack[childID] {
+			if !touched[childID] || resolved[childID] {
 				continue // never started, or already resolved — doesn't block
 			}
 			for _, parentID := range parents.GetTransferId() {

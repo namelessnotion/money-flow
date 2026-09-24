@@ -187,7 +187,10 @@ enum RollbackMethod {
   ROLLBACK_METHOD_UNSPECIFIED = 0;
   ROLLBACK_METHOD_REVERSED = 1;   // child was Committed -> RequestReversal
   ROLLBACK_METHOD_CANCELLED = 2;  // child was Accepted/Prepared/Staged/Pending -> Cancel*Transfer
-  ROLLBACK_METHOD_ABANDONED = 3;  // child moved no money (rejected, failed or cancelled on its own) -> nothing to call
+  // The rollback found the child rejected, failed or cancelled on its own, so it
+  // moved no money -> nothing to call. A child already recorded as
+  // TransferFailedWithinTransaction gets no rollback record at all (go/docs/adr/0013).
+  ROLLBACK_METHOD_ABANDONED = 3;
 }
 
 // A committed child is undone by RequestReversal, and a Reversal is itself a

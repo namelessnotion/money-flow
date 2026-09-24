@@ -28,7 +28,10 @@ const (
 	RollbackMethod_ROLLBACK_METHOD_UNSPECIFIED RollbackMethod = 0
 	RollbackMethod_ROLLBACK_METHOD_REVERSED    RollbackMethod = 1 // child was Committed -> RequestReversal
 	RollbackMethod_ROLLBACK_METHOD_CANCELLED   RollbackMethod = 2 // child was Accepted/Prepared/Staged/Pending -> Cancel*Transfer
-	RollbackMethod_ROLLBACK_METHOD_ABANDONED   RollbackMethod = 3 // child moved no money (rejected, failed or cancelled on its own) -> nothing to call
+	// The rollback found the child rejected, failed or cancelled on its own, so it
+	// moved no money -> nothing to call. A child already recorded as
+	// TransferFailedWithinTransaction gets no rollback record at all (go/docs/adr/0013).
+	RollbackMethod_ROLLBACK_METHOD_ABANDONED RollbackMethod = 3
 )
 
 // Enum value maps for RollbackMethod.

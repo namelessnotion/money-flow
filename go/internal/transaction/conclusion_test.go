@@ -3,6 +3,7 @@ package transaction
 import (
 	"context"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/namelessnotion/money_flow/go/internal/eventstore"
 	"github.com/namelessnotion/money_flow/go/internal/ledger"
 	"github.com/namelessnotion/money_flow/go/internal/testutil"
+	"github.com/namelessnotion/money_flow/go/internal/transfer"
 )
 
 // appendRecordingStore records the event types of every append that landed on
@@ -108,4 +110,97 @@ func TestTransaction_TheLastChildsOutcomeAndTheConclusionShareOneAppend(t *testi
 			}
 		})
 	}
+}
+
+// A child's failure decides that the Transaction rolls back, and nothing has
+// to happen in between, so the rollback starts in the same append as the
+// failure (go/docs/adr/0013). When the failed child is the only one that moved
+// anything — it moved nothing — the rollback has nothing to undo and concludes
+// in that append too.
+func TestTransaction_AChildsFailureAndTheRollbackItStartsShareOneAppend(t *testing.T) {
+	t.Parallel()
+	failed := eventstore.EventType(&pb.TransferFailedWithinTransaction{})
+	started := eventstore.EventType(&pb.TransactionRollbackStarted{})
+	rolledBack := eventstore.EventType(&pb.TransactionRolledBack{})
+
+	newWorld := func(t *testing.T) (*appendRecordingStore, *Server, *transfer.Server, string, string) {
+		t.Helper()
+		base := eventstore.NewMemoryStore()
+		lc := ledger.NewFakeClient()
+		bankAccount, cash, _, _ := achWallets(t, base)
+		store := &appendRecordingStore{Store: base}
+		xfers := newTransferServer(store, lc)
+		return store, NewServer(store, xfers), xfers, bankAccount, cash
+	}
+	// A mint_source leg from a Wallet that was never opened passes the
+	// accept-time pre-flight (mint_source has no balance to check) and is
+	// rejected when requested.
+	neverOpened := testutil.ID("never-opened")
+
+	t.Run("nothing else to undo", func(t *testing.T) {
+		t.Parallel()
+		store, txns, xfers, _, cash := newWorld(t)
+		ctx := context.Background()
+		txnID, childID := testutil.ID("txn-alone"), testutil.ID("child-alone")
+		if _, err := txns.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
+			Id: txnID,
+			Transfers: map[string]*pb.Transfer{
+				childID: {Id: childID, Amount: usd(1000), FromWalletId: neverOpened, ToWalletId: cash, MintSource: true},
+			},
+		}); err != nil {
+			t.Fatalf("StartInitializingTransaction() error = %v", err)
+		}
+		driveSaga(t, txns, xfers, store, txnID)
+
+		if got, want := store.appendCarrying(started), []string{failed, started, rolledBack}; !slices.Equal(got, want) {
+			t.Errorf("the append carrying %s was %v, want %v", started, got, want)
+		}
+		// Initialized, Started, the dispatch intent, then that one append.
+		if got := len(store.appends); got != 4 {
+			t.Errorf("the Transaction took %d appends, want 4: %v", got, store.appends)
+		}
+
+		events, err := store.Load(ctx, AggregateType, txnID)
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		reason, err := lastEventReason(events)
+		if err != nil {
+			t.Fatalf("lastEventReason() error = %v", err)
+		}
+		if !strings.Contains(reason, childID) {
+			t.Errorf("TransactionRolledBack reason = %q, want it to name the child whose failure started the rollback", reason)
+		}
+	})
+
+	t.Run("a committed sibling to reverse", func(t *testing.T) {
+		t.Parallel()
+		store, txns, xfers, bankAccount, cash := newWorld(t)
+		ctx := context.Background()
+		txnID, realID, shadowID := testutil.ID("txn-sibling"), testutil.ID("real"), testutil.ID("shadow")
+		if _, err := txns.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
+			Id: txnID,
+			Transfers: map[string]*pb.Transfer{
+				realID:   {Id: realID, Amount: usd(1000), FromWalletId: bankAccount, ToWalletId: cash, MintSource: true},
+				shadowID: {Id: shadowID, Amount: usd(1000), FromWalletId: neverOpened, ToWalletId: cash, MintSource: true},
+			},
+			TransferDependency: map[string]*pb.TransferIdList{shadowID: {TransferId: []string{realID}}},
+		}); err != nil {
+			t.Fatalf("StartInitializingTransaction() error = %v", err)
+		}
+		driveSaga(t, txns, xfers, store, txnID)
+
+		// real committed, so the rollback has a Reversal to request before it
+		// can conclude: it starts with the failure and ends later.
+		if got, want := store.appendCarrying(started), []string{failed, started}; !slices.Equal(got, want) {
+			t.Errorf("the append carrying %s was %v, want %v", started, got, want)
+		}
+		events, err := store.Load(ctx, AggregateType, txnID)
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if got := topLevelState(events); got != stateRolledBack {
+			t.Fatalf("state = %v, want rolled_back; events = %v", got, eventTypesOf(events))
+		}
+	})
 }
