@@ -328,6 +328,7 @@ make simulate ARGS="-entities 150 -transactions 2000 -concurrency 32 -seed 42"
 | `-transactions` | `200` | How many to drive |
 | `-concurrency` | `8` | How many are in flight at once |
 | `-rollback-rate` | `0.3` | Share steered to roll back |
+| `-seed-batch` | `8` | How many entities are funded at once before the load. Every seed debits the one reserve Wallet, so this bounds how many race on its stream |
 | `-seed` | time | Fix it to repeat a run |
 | `-skip-verify` | `false` | Skip the ledger check at the end |
 
