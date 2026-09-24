@@ -3,21 +3,6 @@
 require 'spec_helper'
 
 RSpec.describe Services::Securities::Positions do
-  # "I wrote it to batch" is not evidence that it batches — the only way to
-  # know is to count the queries. This is the same recorder the GraphQL specs
-  # use (spec/app/graphql/types/query_type_spec.rb).
-  def capture_sql
-    statements = []
-    recorder = Object.new
-    %i[info warn error].each { |level| recorder.define_singleton_method(level) { |message| statements << message } }
-
-    DB.loggers << recorder
-    yield
-    statements
-  ensure
-    DB.loggers.delete(recorder)
-  end
-
   def security_with_holders(count)
     world = securities_world(principal_minor_units: 100_000)
     count.times do

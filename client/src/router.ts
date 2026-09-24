@@ -2,6 +2,7 @@ import { createRouter, createWebHistory, type RouterHistory } from 'vue-router'
 import EntitiesView from './views/EntitiesView.vue'
 import EntityView from './views/EntityView.vue'
 import AchTransactionView from './views/AchTransactionView.vue'
+import MoneyFlowView from './views/MoneyFlowView.vue'
 
 export const routes = [
   { path: '/', name: 'entities', component: EntitiesView },
@@ -12,6 +13,8 @@ export const routes = [
     component: AchTransactionView,
     props: true,
   },
+  // A graph needs the width the entity pages do not.
+  { path: '/money-flow', name: 'money-flow', component: MoneyFlowView, meta: { wide: true } },
 ]
 
 export function makeRouter(history: RouterHistory = createWebHistory()) {

@@ -9,10 +9,15 @@ import { makeRouter } from '../router'
 type Mocks = ConstructorParameters<typeof MockLink>[0]
 
 // Mounts `component` against a mocked GraphQL link and an in-memory router
-// sitting at `path`.
+// sitting at `path`, with any child components replaced by `stubs`.
 export async function mountWithApollo(
   component: Component,
-  { mocks, props = {}, path = '/' }: { mocks: Mocks; props?: Record<string, unknown>; path?: string },
+  {
+    mocks,
+    props = {},
+    path = '/',
+    stubs = {},
+  }: { mocks: Mocks; props?: Record<string, unknown>; path?: string; stubs?: Record<string, Component> },
 ) {
   const client = new ApolloClient({
     link: new MockLink(mocks, { defaultOptions: { delay: 0 } }),
@@ -26,6 +31,7 @@ export async function mountWithApollo(
     props,
     global: {
       plugins: [router],
+      stubs,
       provide: { [DefaultApolloClient as unknown as string]: client },
     },
   })

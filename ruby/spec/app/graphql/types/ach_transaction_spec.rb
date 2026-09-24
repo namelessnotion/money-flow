@@ -13,17 +13,6 @@ RSpec.describe Types::AchTransaction do
     GRAPHQL
   end
 
-  def capture_sql
-    statements = []
-    recorder = Object.new
-    %i[info warn error].each { |level| recorder.define_singleton_method(level) { |message| statements << message } }
-    DB.loggers << recorder
-    yield
-    statements
-  ensure
-    DB.loggers.delete(recorder)
-  end
-
   it "joins in each Transaction's projected state and its real leg's" do
     ach = create(:ach_transaction, entity: entity)
     create(:transaction_projection, aggregate_id: ach.id, state: 'rollback_started', reason: 'R01')

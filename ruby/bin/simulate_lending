@@ -1,0 +1,62 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+# typed: strict
+
+# Plays out a Groundfloor-like lending market on a compressed timeline through
+# the real stack, then checks the money flow it left behind
+# (lib/lending_simulation.rb). Needs the whole pipeline up — Go, the
+# orchestrator, CDC and the read-model consumer — since every step waits for
+# the projections to see the last one complete.
+#
+#   docker compose exec -T ruby bin/simulate_lending --seed 42
+#
+# Exits non-zero when a conservation check fails.
+
+require 'logger'
+require 'optparse'
+require_relative '../lib/environment'
+require_relative '../lib/lending_simulation'
+
+$stdout.sync = true
+
+options = T.let(
+  { seed: 42, investors: 40, borrowers: 8, issue_days: 180, max_days: 1_500, seconds_per_day: 0.1,
+    start_date: Date.today, profile: LendingSimulation::Profile::DEFAULT_PATH, tag: nil },
+  T::Hash[Symbol, T.untyped] # OptionParser hands back whatever each switch's coercion produced
+)
+OptionParser.new do |parser|
+  parser.banner = 'Usage: bin/simulate_lending [options]'
+  parser.on('--seed N', Integer, 'Random seed; the same seed plays the same market') { |v| options[:seed] = v }
+  parser.on('--investors N', Integer, 'Investors (default 40)') { |v| options[:investors] = v }
+  parser.on('--borrowers N', Integer, 'Borrowers (default 8)') { |v| options[:borrowers] = v }
+  parser.on('--issue-days N', Integer, 'Days new loans are offered (default 180)') { |v| options[:issue_days] = v }
+  parser.on('--max-days N', Integer, 'Hard stop, in simulated days (default 1500)') { |v| options[:max_days] = v }
+  parser.on('--seconds-per-day S', Float, 'Least real time per simulated day (default 0.1)') do |v|
+    options[:seconds_per_day] = v
+  end
+  parser.on('--start-date DATE', 'First simulated day, YYYY-MM-DD (default today)') do |v|
+    options[:start_date] = Date.iso8601(v)
+  end
+  parser.on('--profile PATH', 'Market profile YAML') { |v| options[:profile] = v }
+  parser.on('--tag TAG', 'Prefix for every entity name (default sim-<seed>-<time>)') { |v| options[:tag] = v }
+end.parse!
+
+seed = Integer(options.fetch(:seed))
+tag = String(options[:tag] || "sim-#{seed}-#{Time.now.to_i.to_s(36)}")
+logger = Logger.new($stdout, progname: tag)
+
+settings = LendingSimulation::Settings.new(
+  tag: tag, seed: seed, investors: Integer(options.fetch(:investors)), borrowers: Integer(options.fetch(:borrowers)),
+  issue_days: Integer(options.fetch(:issue_days)), max_days: Integer(options.fetch(:max_days)),
+  start_date: T.cast(options.fetch(:start_date), Date), seconds_per_day: Float(options.fetch(:seconds_per_day))
+)
+world = LendingSimulation::World.new(
+  settings: settings, profile: LendingSimulation::Profile.load(String(options.fetch(:profile))),
+  platform: LendingSimulation::Platform.new(await: LendingSimulation::Await.new)
+)
+market = LendingSimulation::Market.new(world: world, logger: logger)
+
+started = Time.now
+market.run
+logger.info("#{world.day} simulated days in #{(Time.now - started).round}s")
+exit(LendingSimulation::Report.new(tag: tag, book: world.book, logger: logger).call(market.entity_ids) ? 0 : 1)

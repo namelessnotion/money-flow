@@ -7,6 +7,7 @@ require_relative 'objects/ach_transaction'
 require_relative 'objects/security'
 require_relative 'objects/subscription'
 require_relative 'objects/repayment'
+require_relative '../resolvers/money_flow'
 
 module Types
   # Root Query type.
@@ -57,6 +58,8 @@ module Types
           description: 'A Security’s Repayments, oldest first, paginated at 100 per page.' do |field|
       field.argument :security_id, ID, required: true
     end
+
+    field :money_flow, resolver: Resolvers::MoneyFlow
 
     sig { returns(T::Boolean) }
     def ok?

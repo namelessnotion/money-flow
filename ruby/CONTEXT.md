@@ -176,6 +176,29 @@ phase when the Transaction behind one was rejected or rolled back. `Services::Se
 the way `Services::Ach::Progress` owns an ACH Transaction's; GraphQL exposes it as `Security.stages`, and
 clients render it rather than re-deriving it from raw states.
 
+**Money flow**
+Where money has gone: every **Movement** the read model has seen complete, and the **Parties** it ran
+between, oldest first. `Services::MoneyFlow` derives it and GraphQL exposes it as `moneyFlow`. It is never
+stored, for the same reason a Position is not: each business row already says who paid whom and how much,
+and its projection says whether and when that completed. It covers money only. Claims being minted, bought
+and retired are not money, so they are left out.
+
+**Movement**
+One completed Transaction's money, from one Party to another, dated by when Go says the Transaction
+completed. Each kind has exactly one entity at one end:
+- a deposit runs Bank → entity, and a withdrawal entity → Bank;
+- a Subscription runs Investor → Security;
+- the Draw runs Security → Borrower;
+- a Repayment runs Borrower → Security;
+- a Disbursement runs Security → Investor, as two Movements: its principal and its interest.
+
+**Party**
+Somewhere money moves between: an entity (by its Role), a Security (its Escrow and Repayment Wallets seen as
+one), or the **Bank**. The Bank stands for the world outside the platform, across the ACH boundary.
+
+_Avoid_: "node" and "edge" outside the client. Those are how a graph draws Parties and Movements, not what
+they are.
+
 **Business day**
 A Federal Reserve business day: not a weekend, not a Fed holiday as the Reserve Banks observe it. Counted in
 Eastern time.

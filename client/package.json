@@ -13,6 +13,7 @@
     "@apollo/client": "^4.2.12",
     "@tailwindcss/vite": "^4.3.3",
     "@vue/apollo-composable": "^5.0.0-alpha.4",
+    "cytoscape": "^3.34.3",
     "graphql": "^16.14.2",
     "rxjs": "^7.8.1",
     "tailwindcss": "^4.3.3",

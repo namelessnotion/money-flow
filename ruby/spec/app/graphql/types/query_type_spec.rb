@@ -7,21 +7,6 @@ RSpec.describe Types::QueryType do
     MoneyFlowSchema.execute(query, variables: variables).to_h
   end
 
-  # Records every SQL statement Sequel logs while the block runs, so tests can
-  # assert on exactly which queries (and columns) were issued without stubbing
-  # Sequel.
-  def capture_sql
-    statements = []
-    recorder = Object.new
-    %i[info warn error].each { |level| recorder.define_singleton_method(level) { |message| statements << message } }
-
-    DB.loggers << recorder
-    yield
-    statements
-  ensure
-    DB.loggers.delete(recorder)
-  end
-
   def create_entity(name:)
     create(:entity, name: name)
   end

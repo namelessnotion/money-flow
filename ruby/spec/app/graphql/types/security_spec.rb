@@ -5,18 +5,6 @@ require 'spec_helper'
 RSpec.describe Types::Security do
   let(:world) { securities_world(principal_minor_units: 100_000) }
 
-  def capture_sql
-    statements = []
-    recorder = Object.new
-    %i[info warn error].each { |level| recorder.define_singleton_method(level) { |message| statements << message } }
-
-    DB.loggers << recorder
-    yield
-    statements
-  ensure
-    DB.loggers.delete(recorder)
-  end
-
   def execute(query, variables = {})
     MoneyFlowSchema.execute(query, variables: variables).to_h
   end

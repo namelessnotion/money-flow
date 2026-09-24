@@ -1,5 +1,6 @@
 .PHONY: up down restart migrate ssl proto cdc-up cdc-down orchestrator-up orchestrator-down orchestrator-logs \
-	consumer-up consumer-down consumer-logs events resume resume-open jobs-up jobs-down jobs-logs clear-ach-now submit-ach-now
+	consumer-up consumer-down consumer-logs events resume resume-open jobs-up jobs-down jobs-logs clear-ach-now submit-ach-now \
+	simulate-lending
 
 up:
 	docker compose up -d
@@ -144,3 +145,11 @@ submit-ach-now:
 clear-ach-now:
 	docker compose exec resque-worker bundle exec ruby -e \
 	  'require "./lib/resque_boot"; ResqueBoot.load!; Resque.enqueue(Jobs::ClearAchDeposits); puts "enqueued"'
+
+# Plays out a Groundfloor-like lending market through the real stack
+# (ruby/lib/lending_simulation.rb): needs Go, the orchestrator, CDC and the
+# consumer up. Pass options through ARGS, e.g.
+#   make simulate-lending ARGS="--seed 7 --investors 20"
+# then open /money-flow?run=<tag it prints> in the client.
+simulate-lending:
+	docker compose exec -T ruby bin/simulate_lending $(ARGS)

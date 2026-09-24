@@ -299,6 +299,92 @@ type IssueSecurityPayload {
   security: Security
 }
 
+"""
+Where money has gone: every Movement the read model has seen complete, oldest
+first, and the Parties they ran between. Derived from the business rows and
+projections, never stored.
+"""
+type MoneyFlow {
+  """
+  Oldest first.
+  """
+  movements: [Movement!]!
+
+  """
+  Every Party a Movement touches, and no other.
+  """
+  parties: [MoneyFlowParty!]!
+}
+
+"""
+Somewhere money moves between: an entity, a Security, or the Bank outside the platform.
+"""
+type MoneyFlowParty {
+  """
+  Stable across queries: `entity:<id>`, `security:<id>`, or `bank`. Movements name their ends by it.
+  """
+  id: ID!
+  kind: MoneyFlowPartyKind!
+
+  """
+  The entity’s or Security’s name.
+  """
+  label: String!
+}
+
+"""
+What a Party in the money flow is: an entity by its role, a Security, or the Bank.
+"""
+enum MoneyFlowPartyKind {
+  BANK
+  BORROWER
+  INVESTOR
+  ISSUER
+  SECURITY
+}
+
+"""
+One completed Transaction’s money, from one Party to another. A Disbursement is
+two: the principal it returns and the interest it pays.
+"""
+type Movement {
+  amountMinorUnits: BigInt!
+  kind: MovementKind!
+
+  """
+  When Go says the Transaction completed.
+  """
+  occurredAt: ISO8601DateTime!
+
+  """
+  The Party the money left.
+  """
+  source: ID!
+
+  """
+  The Party the money reached.
+  """
+  target: ID!
+
+  """
+  The Go Transaction that moved it.
+  """
+  transactionId: ID!
+}
+
+"""
+What moved the money in a Movement, which decides where it ran from and to.
+"""
+enum MovementKind {
+  DEPOSIT
+  DISBURSEMENT_INTEREST
+  DISBURSEMENT_PRINCIPAL
+  DRAW
+  REPAYMENT
+  SUBSCRIPTION
+  WITHDRAWAL
+}
+
 type Mutation {
   """
   Clear a completed deposit now, without waiting for its return window (for demonstrations).
@@ -507,6 +593,22 @@ type Query {
   One entity by id, or null when there is none.
   """
   entity(id: ID!): Entity
+
+  """
+  Every completed Movement of money and the Parties it ran between, oldest
+  first. Not paginated: a graph of it needs every edge, so narrow it instead.
+  """
+  moneyFlow(
+    """
+    Only Movements whose entity’s name starts with this, taken literally — how one simulation run is picked out.
+    """
+    namePrefix: String
+
+    """
+    Only Movements completed at or after this.
+    """
+    since: ISO8601DateTime
+  ): MoneyFlow!
 
   """
   Health check placeholder until real queries exist.
