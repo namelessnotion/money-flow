@@ -4,27 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand/v2"
-	"time"
 
 	"github.com/twitchtv/twirp"
 	"google.golang.org/protobuf/proto"
 
 	pb "github.com/namelessnotion/money_flow/go/gen/proto/token/v1"
+	"github.com/namelessnotion/money_flow/go/internal/contention"
 	"github.com/namelessnotion/money_flow/go/internal/eventstore"
 	"github.com/namelessnotion/money_flow/go/internal/ledger"
-)
-
-// Between attempts, recordBalance waits a random slice of a window that
-// doubles from recordBackoffBase up to recordBackoffCap. The wait is there to
-// decorrelate recorders that just collided, so they don't all re-read into
-// the same collision again, not to outlast a fault, so its scale is one
-// recording (a store and a ledger round trip), not the orchestrator's retry
-// backoff. It matches transfer.prepare's re-plan backoff: the same policy
-// for the same kind of contention (go/docs/adr/0003, amended 2026-09-24).
-const (
-	recordBackoffBase = time.Millisecond
-	recordBackoffCap  = 50 * time.Millisecond
 )
 
 // tokenStream is one Token's stream as RecordBalances needs it: where to
@@ -106,10 +93,8 @@ func recordBalance(
 			return twirp.InternalErrorWith(conflict)
 		}
 
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(recordBackoff(attempt)):
+		if err := contention.Wait(ctx, attempt); err != nil {
+			return err
 		}
 		lost := stream.seq
 		if stream, err = loadTokenStream(ctx, store, tokenID); err != nil {
@@ -123,17 +108,6 @@ func recordBalance(
 			return twirp.InternalErrorWith(fmt.Errorf("ledger: Balances: %w", err))
 		}
 	}
-}
-
-// recordBackoff is how long recordBalance waits before its attempt'th
-// re-read: a uniformly random slice of a window that doubles from
-// recordBackoffBase, capped at recordBackoffCap.
-func recordBackoff(attempt int) time.Duration {
-	window := recordBackoffCap
-	if attempt < 16 {
-		window = min(window, recordBackoffBase<<attempt)
-	}
-	return rand.N(window)
 }
 
 func balanceRecorded(tokenID, walletID string, balances map[string]ledger.Balance) (*pb.TokenBalanceRecorded, error) {
