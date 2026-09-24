@@ -264,9 +264,9 @@ func (s *Server) CancelAcceptedTransfer(ctx context.Context, req *pb.CancelAccep
 			if currentState(events) == stateCancelled {
 				return acceptedTransferCancelledResponse(req.GetId(), req.GetReason()), nil
 			}
-			// cancelPrepared()'s claim (go/docs/adr/0005) was lost to a
-			// concurrent caller — possibly one that staged or committed
-			// instead. Reload and re-decide rather than assuming
+			// cancelPrepared()'s append lost to a concurrent write —
+			// possibly a prepare, a stage or a commit instead
+			// (go/docs/adr/0009). Reload and re-decide rather than assuming
 			// cancellation landed.
 			continue
 		default:

@@ -950,6 +950,9 @@ func (x *StartCancellingPreparedTransfer) GetReason() string {
 	return ""
 }
 
+// No longer written: cancelling a Prepared Transfer is one append, with no
+// claim ahead of it (go/docs/adr/0009). Kept so older streams still decode;
+// the saga treats one left on a stream as noise, not a claim.
 type CancellingPreparedTransferStarted struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`

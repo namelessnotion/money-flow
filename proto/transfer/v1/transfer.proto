@@ -170,6 +170,9 @@ message StartCancellingPreparedTransfer {
   string reason = 2;
 }
 
+// No longer written: cancelling a Prepared Transfer is one append, with no
+// claim ahead of it (go/docs/adr/0009). Kept so older streams still decode;
+// the saga treats one left on a stream as noise, not a claim.
 message CancellingPreparedTransferStarted {
   string id = 1;
   string reason = 2;

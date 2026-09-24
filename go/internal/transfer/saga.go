@@ -532,14 +532,16 @@ const claimPollInterval = 20 * time.Millisecond
 // own 30s per-RPC timeout.
 var claimStaleAfter = 5 * time.Second
 
-// isClaimMarkerType reports whether eventType is one of the four claim
-// markers stage()/commit()/cancelStaged()/cancelPrepared() append.
+// isClaimMarkerType reports whether eventType is one of the three claim
+// markers stage()/commit()/cancelStaged() append — the steps with a
+// TigerBeetle side effect to guard. CancellingPreparedTransferStarted is
+// deliberately absent: cancelPrepared() stopped claiming (go/docs/adr/0009),
+// and one an older build left on a stream guards nothing that outlived it.
 func isClaimMarkerType(eventType string) bool {
 	switch eventType {
 	case eventstore.EventType(&pb.StagingTransferStarted{}),
 		eventstore.EventType(&pb.TransferCommittingStarted{}),
-		eventstore.EventType(&pb.CancellingStagedTransferStarted{}),
-		eventstore.EventType(&pb.CancellingPreparedTransferStarted{}):
+		eventstore.EventType(&pb.CancellingStagedTransferStarted{}):
 		return true
 	default:
 		return false
@@ -589,9 +591,9 @@ func liveMarker(events []eventstore.Event) (eventstore.Event, bool) {
 // merely slow and mid-step, and even if it did crash it may have
 // half-applied its step (some chains voided in TigerBeetle, not yet all)
 // — the same transition converges over that, a different one contradicts
-// it. runSaga finishes an abandoned cancel of a Prepared
-// Transfer itself (claimedPreparedCancel), so the orchestrator never
-// trips this refusal on its own dispatch. Staleness is
+// it. The orchestrator never trips this refusal on its own dispatch: from
+// Prepared it only ever stages or commits, whichever the Transfer's stage
+// flag says, never both. Staleness is
 // measured on the store's own clock (store.Now), not the Go process's:
 // PostgresStore's occurred_at is set by Postgres's now(), and comparing it
 // against a different machine's clock can make every marker look
@@ -605,7 +607,7 @@ func liveMarker(events []eventstore.Event) (eventstore.Event, bool) {
 // step (this codebase has already measured multi-second Postgres write
 // latency under load) can still be reclaimed out from under its own
 // caller. stillHoldsClaim, called by stage()/commit()/cancelStaged()/
-// cancelPrepared()/compensate() immediately before each externally visible
+// compensate() immediately before each externally visible
 // action, stops the slow winner at its next step. It cannot stop it mid-step
 // (inside a TigerBeetle round trip, or a wide batch's run of chains), which
 // is why only the same marker type may take a stale claim over: that overlap
@@ -618,29 +620,9 @@ func liveMarker(events []eventstore.Event) (eventstore.Event, bool) {
 // sequence number the marker landed at, for stillHoldsClaim.
 func (s *Server) claimForDispatch(ctx context.Context, transferID string, preClaimState transferState, marker proto.Message) (claimedSeq int64, won bool, err error) {
 	for {
-		events, err := s.store.Load(ctx, AggregateType, transferID)
-		if err != nil {
-			return 0, false, twirp.InternalErrorWith(err)
-		}
-		if currentState(events) != preClaimState {
-			return 0, false, nil
-		}
-		if live, ok := liveMarker(events); ok {
-			now, err := s.store.Now(ctx)
-			if err != nil {
-				return 0, false, twirp.InternalErrorWith(err)
-			}
-			if now.Sub(live.OccurredAt) < claimStaleAfter {
-				select {
-				case <-ctx.Done():
-					return 0, false, twirp.InternalErrorWith(ctx.Err())
-				case <-time.After(claimPollInterval):
-				}
-				continue
-			}
-			if live.EventType != eventstore.EventType(marker) {
-				return 0, false, abandonedClaimError(transferID, live.EventType, marker)
-			}
+		events, moved, err := s.awaitUnclaimed(ctx, transferID, preClaimState, marker)
+		if err != nil || moved {
+			return 0, false, err
 		}
 
 		expectedSeq := int64(len(events))
@@ -653,6 +635,48 @@ func (s *Server) claimForDispatch(ctx context.Context, transferID string, preCla
 		}
 		// Lost the CAS for this exact slot to a concurrent claimant; loop
 		// and re-evaluate from scratch rather than assuming who won it.
+	}
+}
+
+// awaitUnclaimed waits until transferID has no fresh live claim, and returns
+// its stream as it then stands — the wait half of claimForDispatch, shared
+// with cancelPrepared(), which has no side effect of its own to claim but
+// must still not land while another step's is in flight. moved=true means
+// the Transfer left preClaimState while waiting (or already had), and the
+// caller has nothing left to do.
+//
+// A stale marker may be taken over only by the transition that wrote it:
+// next is the caller's own marker, or its outcome event when it claims
+// nothing, which never matches a marker and so never takes one over
+// (errAbandonedClaim).
+func (s *Server) awaitUnclaimed(ctx context.Context, transferID string, preClaimState transferState, next proto.Message) (events []eventstore.Event, moved bool, err error) {
+	for {
+		events, err := s.store.Load(ctx, AggregateType, transferID)
+		if err != nil {
+			return nil, false, twirp.InternalErrorWith(err)
+		}
+		if currentState(events) != preClaimState {
+			return nil, true, nil
+		}
+		live, ok := liveMarker(events)
+		if !ok {
+			return events, false, nil
+		}
+		now, err := s.store.Now(ctx)
+		if err != nil {
+			return nil, false, twirp.InternalErrorWith(err)
+		}
+		if now.Sub(live.OccurredAt) >= claimStaleAfter {
+			if live.EventType != eventstore.EventType(next) {
+				return nil, false, abandonedClaimError(transferID, live.EventType, next)
+			}
+			return events, false, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, false, twirp.InternalErrorWith(ctx.Err())
+		case <-time.After(claimPollInterval):
+		}
 	}
 }
 
@@ -671,32 +695,10 @@ func abandonedClaimError(transferID, abandonedMarkerType string, wanted proto.Me
 	)), errAbandonedClaim)
 }
 
-// claimedPreparedCancel reports whether events' live claim marker
-// (liveMarker) is a CancellingPreparedTransferStarted, and its reason. A
-// Prepared Transfer carrying one is being cancelled, not staged or
-// committed: runSaga must finish that cancel (the claimant crashed, or is
-// still working and cancelPrepared will wait on it) rather than dispatch
-// its usual next step, which claimForDispatch would refuse.
-func claimedPreparedCancel(events []eventstore.Event) (reason string, ok bool, err error) {
-	live, ok := liveMarker(events)
-	if !ok || live.EventType != eventstore.EventType(&pb.CancellingPreparedTransferStarted{}) {
-		return "", false, nil
-	}
-	msg, err := live.Decode()
-	if err != nil {
-		return "", false, twirp.InternalErrorWith(err)
-	}
-	marker, ok := msg.(*pb.CancellingPreparedTransferStarted)
-	if !ok {
-		return "", false, twirp.InternalError(fmt.Sprintf("claim marker decoded as %T", msg))
-	}
-	return marker.GetReason(), true, nil
-}
-
 // stillHoldsClaim reports whether transferID's live marker (liveMarker) is
 // still the one this caller appended at claimedSeq — called immediately
 // before each externally visible action in stage()/commit()/cancelStaged()/
-// cancelPrepared()/compensate() (go/docs/adr/0005: a claim can be
+// compensate() (go/docs/adr/0005: a claim can be
 // legitimately reclaimed out from under a caller that is merely slow, not
 // crashed, so "I won the claim earlier" is not enough — a caller has to
 // keep checking it still holds as its own work takes real time). false
@@ -719,7 +721,7 @@ var errClaimSuperseded = errors.New("transfer: claim superseded")
 
 // requireClaim wraps stillHoldsClaim for the early-return shape every
 // side-effecting checkpoint in stage()/commit()/cancelStaged()/
-// cancelPrepared()/compensate() needs: nil means still held, proceed;
+// compensate() needs: nil means still held, proceed;
 // errClaimSuperseded means stop, the caller should return nil; anything
 // else is a real error to propagate.
 func (s *Server) requireClaim(ctx context.Context, transferID string, claimedSeq int64) error {
@@ -1195,17 +1197,17 @@ func (s *Server) compensate(ctx context.Context, transferID string, claimedSeq i
 // cancelPrepared handles user-driven cancellation via CancelAcceptedTransfer
 // — only legal while the Transfer is still Accepted or Prepared, before
 // anything has been submitted to TigerBeetle. Unlike cancelStaged, no
-// TigerBeetle call is ever needed here.
+// TigerBeetle call is ever needed here, so it claims nothing
+// (go/docs/adr/0009): the cancel is one append, landing on the stream
+// exactly as it was loaded. That append is the compare-and-swap against
+// every other writer. If a prepare() or a stage()/commit() claim lands
+// first, the append loses and the caller re-decides; if the cancel lands
+// first, their claim loses and they find the Transfer cancelled.
 //
-// stateAccepted has no side effect to guard, so — like prepare() — it
-// needs no claim, only to land on the stream exactly as it was loaded: if
-// prepare() lands first, this append loses and CancelAcceptedTransfer
-// re-decides against the Prepared Transfer. The statePrepared branch claims
-// CancellingPreparedTransferStarted (go/docs/adr/0005) so it waits out,
-// rather than races, a stage()/commit() already submitting to TigerBeetle —
-// a client retry of CancelAcceptedTransfer, or the orchestrator's automatic
-// dispatch from the same Prepared state — and any that arrives after it
-// waits in turn.
+// From Prepared it first waits out any fresh claim (awaitUnclaimed): a
+// stage() or commit() already submitting to TigerBeetle must finish, never
+// be overtaken by a cancel recorded underneath it. It refuses over an
+// abandoned one (errAbandonedClaim) — only that transition may resume it.
 func (s *Server) cancelPrepared(ctx context.Context, transferID, reason string) error {
 	events, err := s.store.Load(ctx, AggregateType, transferID)
 	if err != nil {
@@ -1220,20 +1222,18 @@ func (s *Server) cancelPrepared(ctx context.Context, transferID, reason string) 
 		_, err := s.tryAppend(ctx, transferID, int64(len(events)), &pb.AcceptedTransferCancelled{Id: transferID, Reason: reason})
 		return err
 	case statePrepared:
-		claimedSeq, won, err := s.claimForDispatch(ctx, transferID, statePrepared, &pb.CancellingPreparedTransferStarted{Id: transferID, Reason: reason})
-		if err != nil {
-			return err
-		}
-		if !won {
-			return nil
-		}
-		if err := s.requireClaim(ctx, transferID, claimedSeq); err != nil {
-			if errors.Is(err, errClaimSuperseded) {
-				return nil
+		cancelled := &pb.PreparedTransferCancelled{Id: transferID, Reason: reason}
+		for {
+			events, moved, err := s.awaitUnclaimed(ctx, transferID, statePrepared, cancelled)
+			if err != nil || moved {
+				return err
 			}
-			return err
+			// A lost append means some other write landed; wait out
+			// whatever it was and re-decide.
+			if landed, err := s.tryAppend(ctx, transferID, int64(len(events)), cancelled); err != nil || landed {
+				return err
+			}
 		}
-		return s.appendSagaStep(ctx, transferID, &pb.PreparedTransferCancelled{Id: transferID, Reason: reason})
 	case stateCommitted, stateFailed, stateCancelled:
 		// Already resolved — idempotent no-op rather than an error.
 		return nil
@@ -1301,14 +1301,6 @@ func (s *Server) runSaga(ctx context.Context, transferID string) error {
 				return err
 			}
 		case statePrepared:
-			if reason, cancelling, err := claimedPreparedCancel(events); err != nil {
-				return err
-			} else if cancelling {
-				if err := s.cancelPrepared(ctx, transferID, reason); err != nil {
-					return err
-				}
-				break
-			}
 			requiresStaging, err := stageRequested(events)
 			if err != nil {
 				return err

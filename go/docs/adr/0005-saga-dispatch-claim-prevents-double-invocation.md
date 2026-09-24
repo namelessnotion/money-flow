@@ -11,7 +11,10 @@
   now a Transfer's legs, not aggregates, so `operation/server.go` and its terminal-state guard are gone. The
   same tripwire is now `appendSagaStep`'s `transitions` table on the Transfer itself, and it is stricter.
   Mentions below of `operation.Stage/Perform/Cancel/Fail`, and of per-leg writes inside a claimed step,
-  describe the code as it stood when this was decided. The claims themselves are unchanged.
+  describe the code as it stood when this was decided. The claims themselves are unchanged, except that
+  `cancelPrepared()` no longer claims `CancellingPreparedTransferStarted`. It waits out any live claim and
+  appends its outcome by compare-and-swap (ADR 0009's amendment), so the table row, Round 4's
+  `claimedPreparedCancel` recovery, and `TestResume_FinishesAnAbandonedCancelPreparedClaim` below are historical.
 
 ## Context
 
