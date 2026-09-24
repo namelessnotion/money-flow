@@ -86,6 +86,7 @@ func main() {
 		minAmount      = flag.Uint64("min-amount", 100, "minimum transfer amount, in minor units")
 		maxAmount      = flag.Uint64("max-amount", 10_000, "maximum transfer amount, in minor units")
 		initialBalance = flag.Uint64("initial-balance", 1_000_000, "starting balance seeded into every entity, in minor units")
+		seedBatch      = flag.Int("seed-batch", 8, "how many seeds settle at once; every seed debits the one reserve Wallet, so this bounds how many race on its stream")
 		currency       = flag.String("currency", "USD", "currency for every simulated amount")
 		serverURL      = flag.String("server-url", env("SERVER_URL", defaultServerURL), "base URL of a running go/cmd/server (no /twirp suffix)")
 		databaseURL    = flag.String("database-url", env("DATABASE_URL", defaultDatabaseURL), "Postgres event log, for the post-run correctness check")
@@ -105,6 +106,9 @@ func main() {
 	}
 	if *mode != "transaction" && *mode != "transfer" {
 		log.Fatalf(`simulate: -mode must be "transaction" or "transfer", got %q`, *mode)
+	}
+	if *seedBatch < 1 {
+		log.Fatal("simulate: -seed-batch must be at least 1")
 	}
 	if *waitAttempts < 1 {
 		// Nothing settles inside a call any more, so a tool that never looks
@@ -134,7 +138,8 @@ func main() {
 		log.Fatalf("simulate: %v", err)
 	}
 
-	if err := seedAll(ctx, transactions, reserve, entities, *initialBalance, *currency, wait); err != nil {
+	log.Printf("simulate: seeding %d entities, %d at a time", len(entities), *seedBatch)
+	if err := seedAll(ctx, transactions, reserve, entities, *initialBalance, *currency, *seedBatch, wait); err != nil {
 		log.Fatalf("simulate: %v", err)
 	}
 	initial := make(map[string]int64, len(entities))

@@ -34,9 +34,31 @@ const simulatedRollover = "simulated rollover"
 // committed. Accepting a seed funds nothing, and the load that follows spends
 // what the seeds put there.
 //
-// Every seed is started before any is waited on, so they settle side by side
-// rather than one orchestrator round trip at a time.
+// Seeds settle batch at a time: every seed in a batch is started before any
+// is waited on, so they settle side by side rather than one orchestrator
+// round trip at a time, but the next batch waits for the last to commit.
+// Every seed debits the one reserve Wallet, so seeds preparing together race
+// on its stream, and every loser re-plans after a backoff (go/docs/adr/0003).
+// batch bounds that race however many entities there are, or however many
+// partitions the orchestrator runs concurrently, so seeding, which is setup
+// rather than the load being measured, does not spend the run on retries.
+// It must be at least 1.
 func seedAll(
+	ctx context.Context, transactions transactionpb.TransactionService,
+	reserve entity, entities []entity, amount uint64, currency string, batch int, wait settleWait,
+) error {
+	for start := 0; start < len(entities); start += batch {
+		end := min(start+batch, len(entities))
+		if err := seedBatch(ctx, transactions, reserve, entities[start:end], amount, currency, wait); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// seedBatch starts a seed for every one of entities, then waits for each to
+// commit.
+func seedBatch(
 	ctx context.Context, transactions transactionpb.TransactionService,
 	reserve entity, entities []entity, amount uint64, currency string, wait settleWait,
 ) error {

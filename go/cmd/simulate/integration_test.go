@@ -67,7 +67,7 @@ func provisionAndSeed(t *testing.T, w simulateWorld) ([]entity, map[string]int64
 	if err != nil {
 		t.Fatalf("provisionAll: %v", err)
 	}
-	if err := seedAll(ctx, w.servers.Transaction, reserve, entities, initialBalance, currency, integrationWait); err != nil {
+	if err := seedAll(ctx, w.servers.Transaction, reserve, entities, initialBalance, currency, len(entities), integrationWait); err != nil {
 		t.Fatalf("seedAll: %v", err)
 	}
 
