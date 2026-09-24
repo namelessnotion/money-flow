@@ -27,13 +27,13 @@ RSpec.describe Services::Ach::TransactionShape do
     it 'pulls from the bank account into cash on a staged real leg, minting at the source' do
       real = request.transfers[real_id]
       expect([real.from_wallet_id, real.to_wallet_id]).to eq([wallets['bank'], wallets['cash']])
-      expect([real.stage, real.mint_source, real.auto_process]).to eq([true, true, true])
+      expect([real.stage, real.mint_source]).to eq([true, true])
     end
 
     it 'mirrors it from bank control into uncleared cash on the shadow leg' do
       shadow = request.transfers[shadow_id]
       expect([shadow.from_wallet_id, shadow.to_wallet_id]).to eq([wallets['bank_control'], wallets['uncleared_cash']])
-      expect([shadow.stage, shadow.mint_source, shadow.auto_process]).to eq([false, true, true])
+      expect([shadow.stage, shadow.mint_source]).to eq([false, true])
     end
 
     it 'holds the shadow leg until the real leg completes' do

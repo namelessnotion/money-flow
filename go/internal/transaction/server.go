@@ -12,7 +12,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 
 	"github.com/twitchtv/twirp"
 	"google.golang.org/protobuf/proto"
@@ -115,12 +114,11 @@ func TerminalEventTypes() []string {
 // ChildTransferIDs lists every Transfer transactionID has requested — its
 // dispatched children, then any Reversals its rollback asked for — in the
 // order its stream recorded them. Only Transfers with a stream of their own are
-// listed: a gated child that was never requested has none, and neither has a
-// child whose intent is recorded but whose request has not been made yet
-// (go/docs/adr/0011) — the Transaction's own next run makes it. It lets an
-// out-of-band driver (cmd/resume) wake a Transaction's children the way their
-// own published triggers would, and a Transfer with no stream has published
-// nothing.
+// listed: a child whose intent is recorded but whose request has not been made
+// yet (go/docs/adr/0011) has none — the Transaction's own next run makes it. It
+// lets an out-of-band driver (cmd/resume) wake a Transaction's children the way
+// their own published triggers would, and a Transfer with no stream has
+// published nothing.
 func ChildTransferIDs(ctx context.Context, store eventstore.Store, transactionID string) ([]string, error) {
 	events, err := store.Load(ctx, AggregateType, transactionID)
 	if err != nil {
@@ -267,135 +265,6 @@ func initializedResponse(e *pb.TransactionInitialized) *pb.StartInitializingTran
 func rejectedResponse(e *pb.TransactionRejected) *pb.StartInitializingTransactionResponse {
 	return &pb.StartInitializingTransactionResponse{
 		Id: e.GetId(), Result: &pb.StartInitializingTransactionResponse_TransactionRejected{TransactionRejected: e},
-	}
-}
-
-// StartProcessingTransfer triggers exactly one currently-gated child
-// (auto_process=false, otherwise ready per its dependencies) despite its
-// own auto_process flag saying to wait. Rejects — transiently; unlike a
-// Transfer's own domain rejections, this isn't recorded onto the stream,
-// since it reflects a caller-timing mistake rather than a durable business
-// fact — when transfer_id isn't in this Transaction's DAG at all, or isn't
-// currently Gated (not found, dependencies unsatisfied, or already
-// processed). A child the saga has simply not gated yet (see awaitingGate) is
-// answered with a retryable twirp Unavailable instead of a rejection.
-//
-// It requests that one child in-process, which looks like an exception to this
-// package's no-dispatch rule and is not: a gated child is already touched, so
-// readyToRun will never return it and dispatchReady can never reach it. This
-// call is the only thing that can, and it is one child by construction — the
-// same "one transition, never a fold" shape the settlement RPCs on Transfer
-// keep. What it no longer does is fold afterward, so the response reports that
-// the child was requested (or refused at accept time), never that it finished.
-//
-// Like dispatchReady, it records the intent before making the request, against
-// the fold that found the child Gated (go/docs/adr/0011). A rollback that
-// abandons the child first makes that append lose, and the call re-decides and
-// refuses; one that lands after finds the child Requested and undoes it.
-func (s *Server) StartProcessingTransfer(ctx context.Context, req *pb.StartProcessingTransferRequest) (*pb.StartProcessingTransferResponse, error) {
-	if err := id.Validate("id", req.GetId()); err != nil {
-		return nil, err
-	}
-	if err := id.Validate("transfer_id", req.GetTransferId()); err != nil {
-		return nil, err
-	}
-
-	for attempt := 0; attempt < maxConcurrencyAttempts; attempt++ {
-		events, err := s.store.Load(ctx, AggregateType, req.GetId())
-		if err != nil {
-			return nil, twirp.InternalErrorWith(err)
-		}
-		if len(events) == 0 {
-			return rejectedProcessing(req, "transaction not found"), nil
-		}
-
-		transfers, deps, err := decodeSpec(events)
-		if err != nil {
-			return nil, err
-		}
-		spec, ok := transfers[req.GetTransferId()]
-		if !ok {
-			return rejectedProcessing(req, "transfer not found in this transaction's DAG"), nil
-		}
-
-		children, err := foldChildStates(events)
-		if err != nil {
-			return nil, err
-		}
-		state := topLevelState(events)
-		if children[req.GetTransferId()] != childGated {
-			if awaitingGate(state, transfers, deps, children, req.GetTransferId()) {
-				return nil, twirp.NewError(twirp.Unavailable, fmt.Sprintf(
-					"transaction %q has not gated transfer %q yet; retry once its saga has caught up", req.GetId(), req.GetTransferId(),
-				))
-			}
-			return rejectedProcessing(req, fmt.Sprintf(
-				"transfer %q is not gated (dependencies not yet satisfied, or already processed)", req.GetTransferId(),
-			)), nil
-		}
-		if state != stateStarted {
-			return rejectedProcessing(req, fmt.Sprintf("transaction %q is %s, not processing transfers", req.GetId(), state)), nil
-		}
-
-		recorded, err := s.recordIntents(ctx, req.GetId(), int64(len(events)),
-			&pb.TransferRequestedWithinTransaction{Id: req.GetId(), TransferId: req.GetTransferId()})
-		if err != nil {
-			return nil, err
-		}
-		if !recorded {
-			continue // something landed since the fold — reload and re-decide
-		}
-
-		rejected, err := s.requestChildTransfer(ctx, req.GetId(), spec)
-		if err != nil {
-			return nil, twirp.InternalErrorWith(err)
-		}
-		if rejected != nil {
-			return &pb.StartProcessingTransferResponse{
-				Id: req.GetId(),
-				Result: &pb.StartProcessingTransferResponse_TransferFailedWithinTransaction{
-					TransferFailedWithinTransaction: &pb.TransferFailedWithinTransaction{
-						Id: req.GetId(), TransferId: req.GetTransferId(), Reason: rejected.GetReason(),
-					},
-				},
-			}, nil
-		}
-		// The Transfer has accepted, and its own saga runs from the trigger
-		// that acceptance published.
-		return &pb.StartProcessingTransferResponse{
-			Id: req.GetId(),
-			Result: &pb.StartProcessingTransferResponse_TransferRequestedWithinTransaction{
-				TransferRequestedWithinTransaction: &pb.TransferRequestedWithinTransaction{Id: req.GetId(), TransferId: req.GetTransferId()},
-			},
-		}, nil
-	}
-	return nil, abortedRetry(req.GetId())
-}
-
-// awaitingGate reports whether transferID is a gated child the saga simply
-// has not reached yet: auto_process=false, untouched, every parent completed,
-// and the Transaction still going forward — Initialized counts, since the fold
-// that starts it gates its roots. The next fold will gate it, so a caller
-// asking now is early rather than wrong, and hearing "not gated" would read as
-// a refusal that only publication lag caused.
-func awaitingGate(
-	state transactionState, transfers map[string]*pb.Transfer, deps map[string]*pb.TransferIdList, children map[string]childState, transferID string,
-) bool {
-	if state != stateInitialized && state != stateStarted {
-		return false
-	}
-	if transfers[transferID].GetAutoProcess() {
-		return false
-	}
-	return slices.Contains(readyToRun(transfers, deps, touchedSet(children), completedSet(children)), transferID)
-}
-
-func rejectedProcessing(req *pb.StartProcessingTransferRequest, reason string) *pb.StartProcessingTransferResponse {
-	return &pb.StartProcessingTransferResponse{
-		Id: req.GetId(),
-		Result: &pb.StartProcessingTransferResponse_StartProcessingTransferRejected{
-			StartProcessingTransferRejected: &pb.StartProcessingTransferRejected{Id: req.GetId(), TransferId: req.GetTransferId(), Reason: reason},
-		},
 	}
 }
 

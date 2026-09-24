@@ -197,11 +197,11 @@ func run(ctx context.Context, tr transport, handler saga.Handler) error {
 // The wait belongs here, inside the topic's own goroutine, rather than in
 // run's loop: waited for in sequence, a topic nothing has published to yet
 // holds up every consumer behind it. On a fresh CDC database that is the
-// ordinary starting state rather than a corner of one — a Transaction whose
-// children are all auto_process:false, or one rejected at initialization,
-// leaves transfer-events uncreated — and after the cutover it is a bootstrap
-// deadlock, because the only thing that can dispatch the first Transfer is a
-// transaction trigger this orchestrator would be blocked from consuming.
+// ordinary starting state rather than a corner of one — a Transaction rejected
+// at initialization leaves transfer-events uncreated — and after the cutover it
+// is a bootstrap deadlock, because the only thing that can dispatch the first
+// Transfer is a transaction trigger this orchestrator would be blocked from
+// consuming.
 func consume(ctx context.Context, tr transport, aggregateType string, handler saga.Handler) error {
 	topic, group := saga.Topic(aggregateType), groupPrefix+aggregateType
 

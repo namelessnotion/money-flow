@@ -51,11 +51,11 @@ func TestACHDeposit_RealAndShadowHappyPath(t *testing.T) {
 		Transfers: map[string]*pb.Transfer{
 			realID: {
 				Id: realID, Amount: usd(10000), FromWalletId: bankAccount, ToWalletId: cash,
-				AutoProcess: true, Stage: true, MintSource: true,
+				Stage: true, MintSource: true,
 			},
 			shadowID: {
 				Id: shadowID, Amount: usd(10000), FromWalletId: bankControl, ToWalletId: uncleared,
-				AutoProcess: true, Stage: false, MintSource: true,
+				Stage: false, MintSource: true,
 			},
 		},
 		TransferDependency: map[string]*pb.TransferIdList{
@@ -136,7 +136,7 @@ func TestTransaction2_SingleNodeClearingHappyPath(t *testing.T) {
 	resp, err := txnServer.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
 		Id: txnID,
 		Transfers: map[string]*pb.Transfer{
-			clearID: {Id: clearID, Amount: usd(10000), FromWalletId: uncleared, ToWalletId: cleared, AutoProcess: true},
+			clearID: {Id: clearID, Amount: usd(10000), FromWalletId: uncleared, ToWalletId: cleared},
 		},
 	})
 	if err != nil {
@@ -201,8 +201,8 @@ func TestACHWithdrawal_SymmetricFlowNeedsNoNewMechanism(t *testing.T) {
 		Transfers: map[string]*pb.Transfer{
 			// Neither leg sets MintSource — both source Wallets already
 			// hold real, FIFO-selectable balance.
-			realID:   {Id: realID, Amount: usd(10000), FromWalletId: cash, ToWalletId: bankAccount, AutoProcess: true},
-			shadowID: {Id: shadowID, Amount: usd(10000), FromWalletId: cleared, ToWalletId: bankControl, AutoProcess: true},
+			realID:   {Id: realID, Amount: usd(10000), FromWalletId: cash, ToWalletId: bankAccount},
+			shadowID: {Id: shadowID, Amount: usd(10000), FromWalletId: cleared, ToWalletId: bankControl},
 		},
 		TransferDependency: map[string]*pb.TransferIdList{
 			shadowID: {TransferId: []string{realID}},
@@ -222,119 +222,5 @@ func TestACHWithdrawal_SymmetricFlowNeedsNoNewMechanism(t *testing.T) {
 	}
 	if outcome, err := transfer.Outcome(ctx, store, shadowID); err != nil || outcome != transfer.OutcomeCommitted {
 		t.Fatalf("shadow Outcome() = (%v, %v), want OutcomeCommitted — Bank Control must accept its first-ever credit", outcome, err)
-	}
-}
-
-func TestGenericManualGating_GatedChildWaitsForStartProcessingTransfer(t *testing.T) {
-	t.Parallel()
-	store := eventstore.NewMemoryStore()
-	lc := ledger.NewFakeClient()
-	w1, w2 := testutil.ID("w1"), testutil.ID("w2")
-	openWallet(t, store, w1, sharedpb.Allows_ALLOWS_ONRAMP_AND_OFFRAMP)
-	openWallet(t, store, w2, sharedpb.Allows_ALLOWS_ONRAMP_AND_OFFRAMP)
-	mintAndFundToken(t, store, lc, w1, testutil.ID("t1"), usd(1000))
-
-	xferServer := newTransferServer(store, lc)
-	txnServer := NewServer(store, xferServer)
-	ctx := context.Background()
-
-	txnID := testutil.ID("txn1")
-	rootID := testutil.ID("root")
-	gatedID := testutil.ID("gated")
-	_, err := txnServer.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
-		Id: txnID,
-		Transfers: map[string]*pb.Transfer{
-			rootID:  {Id: rootID, Amount: usd(100), FromWalletId: w1, ToWalletId: w2, AutoProcess: true},
-			gatedID: {Id: gatedID, Amount: usd(50), FromWalletId: w1, ToWalletId: w2, AutoProcess: false},
-		},
-		TransferDependency: map[string]*pb.TransferIdList{
-			gatedID: {TransferId: []string{rootID}},
-		},
-	})
-	if err != nil {
-		t.Fatalf("StartInitializingTransaction() error = %v", err)
-	}
-	driveSaga(t, txnServer, xferServer, store, txnID)
-
-	events, err := store.Load(ctx, AggregateType, txnID)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	children, err := foldChildStates(events)
-	if err != nil {
-		t.Fatalf("foldChildStates() error = %v", err)
-	}
-	if children[rootID] != childCompleted {
-		t.Fatalf("root child state = %v, want completed", children[rootID])
-	}
-	if children[gatedID] != childGated {
-		t.Fatalf("gated child state = %v, want gated (auto_process=false, dependency satisfied but not triggered)", children[gatedID])
-	}
-	if topLevelState(events) != stateStarted {
-		t.Fatalf("top-level state = %v, want started (still waiting on StartProcessingTransfer)", topLevelState(events))
-	}
-
-	// Resuming without triggering it changes nothing — still gated.
-	if err := txnServer.Resume(ctx, txnID); err != nil {
-		t.Fatalf("Resume() error = %v", err)
-	}
-	events, _ = store.Load(ctx, AggregateType, txnID)
-	children, _ = foldChildStates(events)
-	if children[gatedID] != childGated {
-		t.Fatalf("gated child state after Resume = %v, want still gated", children[gatedID])
-	}
-
-	processResp, err := txnServer.StartProcessingTransfer(ctx, &pb.StartProcessingTransferRequest{Id: txnID, TransferId: gatedID})
-	if err != nil {
-		t.Fatalf("StartProcessingTransfer() error = %v", err)
-	}
-	if processResp.GetTransferRequestedWithinTransaction() == nil {
-		t.Fatalf("result = %v, want TransferRequestedWithinTransaction", processResp.GetResult())
-	}
-
-	// Ungating requests the child and nothing more — the response says
-	// "requested", never "completed". The child's own acceptance is the trigger
-	// that runs it and then completes the Transaction.
-	driveSaga(t, txnServer, xferServer, store, txnID)
-
-	events, err = store.Load(ctx, AggregateType, txnID)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if topLevelState(events) != stateCompleted {
-		t.Fatalf("top-level state = %v, want completed once the gated child is triggered and commits", topLevelState(events))
-	}
-}
-
-func TestStartProcessingTransfer_RejectsWhenNotGated(t *testing.T) {
-	t.Parallel()
-	store := eventstore.NewMemoryStore()
-	lc := ledger.NewFakeClient()
-	w1, w2 := testutil.ID("w1"), testutil.ID("w2")
-	openWallet(t, store, w1, sharedpb.Allows_ALLOWS_ONRAMP_AND_OFFRAMP)
-	openWallet(t, store, w2, sharedpb.Allows_ALLOWS_ONRAMP_AND_OFFRAMP)
-	mintAndFundToken(t, store, lc, w1, testutil.ID("t1"), usd(1000))
-
-	xferServer := newTransferServer(store, lc)
-	txnServer := NewServer(store, xferServer)
-	ctx := context.Background()
-
-	txnID := testutil.ID("txn1")
-	rootID := testutil.ID("root")
-	if _, err := txnServer.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
-		Id:        txnID,
-		Transfers: map[string]*pb.Transfer{rootID: {Id: rootID, Amount: usd(100), FromWalletId: w1, ToWalletId: w2, AutoProcess: true}},
-	}); err != nil {
-		t.Fatalf("StartInitializingTransaction() error = %v", err)
-	}
-	driveSaga(t, txnServer, xferServer, store, txnID)
-
-	// rootID already ran to completion (auto_process=true) — not gated.
-	resp, err := txnServer.StartProcessingTransfer(ctx, &pb.StartProcessingTransferRequest{Id: txnID, TransferId: rootID})
-	if err != nil {
-		t.Fatalf("StartProcessingTransfer() error = %v", err)
-	}
-	if resp.GetStartProcessingTransferRejected() == nil {
-		t.Fatalf("result = %v, want StartProcessingTransferRejected", resp.GetResult())
 	}
 }

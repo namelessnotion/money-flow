@@ -51,7 +51,6 @@ module Services
           amount: Shared::V1::Money.new(minor_units: amount_minor_units, currency: TransactionShape::CURRENCY),
           from_wallet_id: from_wallet_id,
           to_wallet_id: to_wallet_id,
-          auto_process: true,
           stage: false,
           mint_source: false
         )

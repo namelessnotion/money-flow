@@ -2,10 +2,8 @@ package transaction
 
 import (
 	"context"
-	"errors"
 	"testing"
 
-	"github.com/twitchtv/twirp"
 	"google.golang.org/protobuf/proto"
 
 	sharedpb "github.com/namelessnotion/money_flow/go/gen/proto/shared/v1"
@@ -42,7 +40,7 @@ func TestStartTransactionRollback_RollsBackATransactionThatHasNotStartedYet(t *t
 	txnID, rootID := testutil.ID("txn1"), testutil.ID("root")
 	if _, err := txnServer.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
 		Id:        txnID,
-		Transfers: map[string]*pb.Transfer{rootID: {Id: rootID, Amount: usd(100), FromWalletId: w1, ToWalletId: w2, AutoProcess: true}},
+		Transfers: map[string]*pb.Transfer{rootID: {Id: rootID, Amount: usd(100), FromWalletId: w1, ToWalletId: w2}},
 	}); err != nil {
 		t.Fatalf("StartInitializingTransaction() error = %v", err)
 	}
@@ -112,7 +110,7 @@ func TestRunSaga_DoesNotStartATransactionThatWasRolledBackWhileStarting(t *testi
 	txnID, rootID := testutil.ID("txn1"), testutil.ID("root")
 	if _, err := txnServer.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
 		Id:        txnID,
-		Transfers: map[string]*pb.Transfer{rootID: {Id: rootID, Amount: usd(100), FromWalletId: w1, ToWalletId: w2, AutoProcess: true}},
+		Transfers: map[string]*pb.Transfer{rootID: {Id: rootID, Amount: usd(100), FromWalletId: w1, ToWalletId: w2}},
 	}); err != nil {
 		t.Fatalf("StartInitializingTransaction() error = %v", err)
 	}
@@ -138,56 +136,5 @@ func TestRunSaga_DoesNotStartATransactionThatWasRolledBackWhileStarting(t *testi
 	}
 	if outcome, err := transfer.Outcome(ctx, memory, rootID); err != nil || outcome != transfer.OutcomeNotFound {
 		t.Errorf("root Outcome() = (%v, %v), want not_found", outcome, err)
-	}
-}
-
-// A gated child the saga simply has not reached yet is not the same answer as
-// one that cannot be processed. The first is lag, and says so in a way a
-// caller can retry; the second stays a domain rejection.
-func TestStartProcessingTransfer_AsksForARetryWhenTheSagaHasNotGatedTheChildYet(t *testing.T) {
-	t.Parallel()
-	store, lc, w1, w2 := initializedWorld(t)
-	xferServer := newTransferServer(store, lc)
-	txnServer := NewServer(store, xferServer)
-	ctx := context.Background()
-
-	txnID, rootID, childID := testutil.ID("txn1"), testutil.ID("root"), testutil.ID("child")
-	if _, err := txnServer.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
-		Id: txnID,
-		Transfers: map[string]*pb.Transfer{
-			rootID:  {Id: rootID, Amount: usd(100), FromWalletId: w1, ToWalletId: w2, AutoProcess: false},
-			childID: {Id: childID, Amount: usd(50), FromWalletId: w1, ToWalletId: w2, AutoProcess: false},
-		},
-		TransferDependency: map[string]*pb.TransferIdList{childID: {TransferId: []string{rootID}}},
-	}); err != nil {
-		t.Fatalf("StartInitializingTransaction() error = %v", err)
-	}
-
-	// Still Initialized: the root will be gated the moment the saga folds.
-	_, err := txnServer.StartProcessingTransfer(ctx, &pb.StartProcessingTransferRequest{Id: txnID, TransferId: rootID})
-	var twerr twirp.Error
-	if !errors.As(err, &twerr) || twerr.Code() != twirp.Unavailable {
-		t.Fatalf("StartProcessingTransfer(root) error = %v, want a twirp Unavailable asking for a retry", err)
-	}
-
-	// The child's parent has not completed: that is a real refusal, lag or no lag.
-	resp, err := txnServer.StartProcessingTransfer(ctx, &pb.StartProcessingTransferRequest{Id: txnID, TransferId: childID})
-	if err != nil {
-		t.Fatalf("StartProcessingTransfer(child) error = %v", err)
-	}
-	if resp.GetStartProcessingTransferRejected() == nil {
-		t.Fatalf("StartProcessingTransfer(child) result = %v, want StartProcessingTransferRejected", resp.GetResult())
-	}
-
-	// Once folded, the same call for the root goes through.
-	if err := txnServer.Resume(ctx, txnID); err != nil {
-		t.Fatalf("Resume() error = %v", err)
-	}
-	resp, err = txnServer.StartProcessingTransfer(ctx, &pb.StartProcessingTransferRequest{Id: txnID, TransferId: rootID})
-	if err != nil {
-		t.Fatalf("StartProcessingTransfer(root) after the fold error = %v", err)
-	}
-	if resp.GetTransferRequestedWithinTransaction() == nil {
-		t.Fatalf("StartProcessingTransfer(root) after the fold = %v, want TransferRequestedWithinTransaction", resp.GetResult())
 	}
 }

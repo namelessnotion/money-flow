@@ -32,7 +32,6 @@ module Consumer
         'transaction.v1.TransactionRollbackFailed' => TransactionState::RollbackFailed,
         # Per-child saga steps: they move a child Transfer, not the Transaction.
         'transaction.v1.TransferRequestedWithinTransaction' => nil,
-        'transaction.v1.TransferGatedWithinTransaction' => nil,
         'transaction.v1.TransferCompletedWithinTransaction' => nil,
         'transaction.v1.TransferFailedWithinTransaction' => nil,
         'transaction.v1.TransferReversalRequestedWithinTransaction' => nil,

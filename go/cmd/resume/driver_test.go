@@ -42,8 +42,8 @@ func chainedTransaction(t *testing.T) (d driver, store eventstore.Store, transac
 	resp, err := servers.Transaction.StartInitializingTransaction(ctx, &transactionpb.StartInitializingTransactionRequest{
 		Id: transactionID,
 		Transfers: map[string]*transactionpb.Transfer{
-			first:  {Id: first, Amount: usd, FromWalletId: reserve, ToWalletId: target, AutoProcess: true, MintSource: true},
-			second: {Id: second, Amount: usd, FromWalletId: reserve, ToWalletId: target, AutoProcess: true, MintSource: true},
+			first:  {Id: first, Amount: usd, FromWalletId: reserve, ToWalletId: target, MintSource: true},
+			second: {Id: second, Amount: usd, FromWalletId: reserve, ToWalletId: target, MintSource: true},
 		},
 		TransferDependency: map[string]*transactionpb.TransferIdList{second: {TransferId: []string{first}}},
 	})

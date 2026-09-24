@@ -44,21 +44,29 @@ func requireSliceable(t *testing.T) {
 	}
 }
 
-// gatedRoots builds n independent, auto_process=false roots. Gating is one
-// append per child and never reaches into a transferClient, which is what
-// lets these tests pass a nil one: a run that tried to dispatch for real
-// would panic rather than quietly pass.
-func gatedRoots(n int) map[string]*pb.Transfer {
+// independentRoots builds n independent roots. The dispatch tests below
+// request them through an acceptingTransferClient, and the rollback tests
+// never request them at all, so no ledger is needed to count slices.
+func independentRoots(n int) map[string]*pb.Transfer {
 	out := make(map[string]*pb.Transfer, n)
 	for i := 0; i < n; i++ {
-		id := testutil.ID(fmt.Sprintf("gated-%d", i))
+		id := testutil.ID(fmt.Sprintf("root-%d", i))
 		out[id] = &pb.Transfer{
 			Id: id, Amount: usd(100),
 			FromWalletId: testutil.ID("w1"), ToWalletId: testutil.ID("w2"),
-			AutoProcess: false,
 		}
 	}
 	return out
+}
+
+// requestedAndFailed seeds childID as a child that was requested and failed
+// on its own. It moved no money, so rolling it back is one append to
+// ABANDONED that reaches into no transferClient.
+func requestedAndFailed(txnID, childID string) []proto.Message {
+	return []proto.Message{
+		&pb.TransferRequestedWithinTransaction{Id: txnID, TransferId: childID},
+		&pb.TransferFailedWithinTransaction{Id: txnID, TransferId: childID, Reason: "seeded as failed"},
+	}
 }
 
 func childrenOf(t *testing.T, store eventstore.Store, txnID string) map[string]childState {
@@ -88,17 +96,21 @@ func streamLen(t *testing.T, store eventstore.Store, txnID string) int {
 func TestDispatchReady_StopsAtTheSliceBoundary(t *testing.T) {
 	t.Parallel()
 	store := eventstore.NewMemoryStore()
-	server := NewServer(store, nil)
+	client := newAcceptingTransferClient()
+	server := NewServer(store, client)
 
 	requireSliceable(t)
 	txnID := testutil.ID("txn-slice")
-	seedInitialized(t, store, txnID, gatedRoots(slicedChildren))
+	seedInitialized(t, store, txnID, independentRoots(slicedChildren))
 
 	if err := server.Resume(context.Background(), txnID); err != nil {
 		t.Fatalf("Resume() error = %v", err)
 	}
 	if got := len(childrenOf(t, store, txnID)); got != maxDispatchPerStep {
 		t.Fatalf("%d children touched after one resume, want exactly %d", got, maxDispatchPerStep)
+	}
+	if got := len(client.requested); got != maxDispatchPerStep {
+		t.Fatalf("%d children requested after one resume, want exactly %d", got, maxDispatchPerStep)
 	}
 }
 
@@ -109,13 +121,13 @@ func TestDispatchReady_StopsAtTheSliceBoundary(t *testing.T) {
 func TestDispatchReady_EverySliceAppendsAtLeastOneEvent(t *testing.T) {
 	t.Parallel()
 	store := eventstore.NewMemoryStore()
-	server := NewServer(store, nil)
+	server := NewServer(store, newAcceptingTransferClient())
 	ctx := context.Background()
 
 	requireSliceable(t)
 	txnID := testutil.ID("txn-progress")
 	total := slicedChildren
-	seedInitialized(t, store, txnID, gatedRoots(total))
+	seedInitialized(t, store, txnID, independentRoots(total))
 
 	for round := 1; len(childrenOf(t, store, txnID)) < total; round++ {
 		before := streamLen(t, store, txnID)
@@ -140,7 +152,7 @@ func mintSourceRoots(n int, from, to string) map[string]*pb.Transfer {
 		id := testutil.ID(fmt.Sprintf("mint-%d", i))
 		out[id] = &pb.Transfer{
 			Id: id, Amount: usd(100), FromWalletId: from, ToWalletId: to,
-			AutoProcess: true, MintSource: true,
+			MintSource: true,
 		}
 	}
 	return out
@@ -229,15 +241,16 @@ func TestRollbackNext_NeverReportsFailedWhileAChildCouldStillBeReversed(t *testi
 		ctx := context.Background()
 
 		txnID := testutil.ID(fmt.Sprintf("txn-mixed-%d", attempt))
-		specs := gatedRoots(slicedChildren)
+		specs := independentRoots(slicedChildren)
 		seedInitialized(t, store, txnID, specs)
 
-		// Every child is gated (so rolling one back is an append to ABANDONED
-		// and needs no transferClient), and all but one is already stuck.
+		// Every child failed on its own (so rolling one back is an append to
+		// ABANDONED and needs no transferClient), and all but one is already
+		// stuck.
 		var reversible string
 		seeded := []proto.Message{&pb.TransactionStarted{Id: txnID}}
 		for childID := range specs {
-			seeded = append(seeded, &pb.TransferGatedWithinTransaction{Id: txnID, TransferId: childID})
+			seeded = append(seeded, requestedAndFailed(txnID, childID)...)
 		}
 		seeded = append(seeded, &pb.TransactionRollbackStarted{Id: txnID, Reason: "seeded"})
 		for childID := range specs {
@@ -284,7 +297,7 @@ func TestRollbackNext_AllStuckChildrenReachRollbackFailed(t *testing.T) {
 
 	requireSliceable(t)
 	txnID := testutil.ID("txn-stuck")
-	specs := gatedRoots(slicedChildren)
+	specs := independentRoots(slicedChildren)
 	seedInitialized(t, store, txnID, specs)
 
 	seeded := []proto.Message{&pb.TransactionStarted{Id: txnID}}
@@ -326,17 +339,17 @@ func TestRollbackNext_StopsAtTheSliceBoundary(t *testing.T) {
 
 	requireSliceable(t)
 	txnID := testutil.ID("txn-rollback-slice")
-	specs := gatedRoots(slicedChildren)
+	specs := independentRoots(slicedChildren)
 	seedInitialized(t, store, txnID, specs)
 
-	// Gated children were never requested, so rolling one back is an append to
+	// Failed children moved no money, so rolling one back is an append to
 	// ABANDONED and reaches into no transferClient — which is what lets this
 	// count slices without a ledger.
 	seeded := []proto.Message{
 		&pb.TransactionStarted{Id: txnID},
 	}
 	for childID := range specs {
-		seeded = append(seeded, &pb.TransferGatedWithinTransaction{Id: txnID, TransferId: childID})
+		seeded = append(seeded, requestedAndFailed(txnID, childID)...)
 	}
 	seeded = append(seeded, &pb.TransactionRollbackStarted{Id: txnID, Reason: "seeded"})
 	appendAll(t, store, txnID, seeded...)
@@ -376,12 +389,12 @@ func TestRollbackNext_SlicedRollbackCompletesAcrossResumes(t *testing.T) {
 
 	requireSliceable(t)
 	txnID := testutil.ID("txn-rollback-complete")
-	specs := gatedRoots(slicedChildren)
+	specs := independentRoots(slicedChildren)
 	seedInitialized(t, store, txnID, specs)
 
 	seeded := []proto.Message{&pb.TransactionStarted{Id: txnID}}
 	for childID := range specs {
-		seeded = append(seeded, &pb.TransferGatedWithinTransaction{Id: txnID, TransferId: childID})
+		seeded = append(seeded, requestedAndFailed(txnID, childID)...)
 	}
 	seeded = append(seeded, &pb.TransactionRollbackStarted{Id: txnID, Reason: "seeded"})
 	appendAll(t, store, txnID, seeded...)

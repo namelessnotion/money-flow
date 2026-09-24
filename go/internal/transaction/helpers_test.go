@@ -5,8 +5,9 @@ import (
 	"testing"
 
 	sharedpb "github.com/namelessnotion/money_flow/go/gen/proto/shared/v1"
-	pb "github.com/namelessnotion/money_flow/go/gen/proto/transaction/v1"
 	tokenpb "github.com/namelessnotion/money_flow/go/gen/proto/token/v1"
+	pb "github.com/namelessnotion/money_flow/go/gen/proto/transaction/v1"
+	transferpb "github.com/namelessnotion/money_flow/go/gen/proto/transfer/v1"
 	walletpb "github.com/namelessnotion/money_flow/go/gen/proto/wallet/v1"
 	"github.com/namelessnotion/money_flow/go/internal/eventstore"
 	"github.com/namelessnotion/money_flow/go/internal/ledger"
@@ -21,9 +22,39 @@ import (
 // tests exercise the real cross-transaction Token-reservation and
 // mint_source-guarantee mechanisms, not a fake.
 func newTransferServer(store eventstore.Store, lc ledger.Client) *transfer.Server {
-	isOpen := func(ctx context.Context, transactionID string) (bool, error) { return IsOpen(ctx, store, transactionID) }
-	exists := func(ctx context.Context, transactionID string) (bool, error) { return Exists(ctx, store, transactionID) }
+	isOpen := func(ctx context.Context, transactionID string) (bool, error) {
+		return IsOpen(ctx, store, transactionID)
+	}
+	exists := func(ctx context.Context, transactionID string) (bool, error) {
+		return Exists(ctx, store, transactionID)
+	}
 	return transfer.NewServer(store, lc, isOpen, exists)
+}
+
+// acceptingTransferClient accepts every RequestTransfer and writes nothing,
+// for tests about what the Transaction records rather than what its children
+// do. It never creates a Transfer stream, so a child it accepted stays an
+// intent with no Transfer (transfer.OutcomeNotFound), and the next fold
+// completes that request again — harmlessly, since this accepts again. Any
+// other transferClient method is the nil embedded interface's, and panics:
+// a test that reached one needed a real transfer.Server.
+type acceptingTransferClient struct {
+	transferClient
+	requested map[string]int
+}
+
+func newAcceptingTransferClient() *acceptingTransferClient {
+	return &acceptingTransferClient{requested: map[string]int{}}
+}
+
+func (c *acceptingTransferClient) RequestTransfer(_ context.Context, req *transferpb.RequestTransferRequest) (*transferpb.RequestTransferResponse, error) {
+	c.requested[req.GetId()]++
+	return &transferpb.RequestTransferResponse{
+		Id: req.GetId(),
+		Result: &transferpb.RequestTransferResponse_TransferRequestAccepted{
+			TransferRequestAccepted: &transferpb.TransferRequestAccepted{Id: req.GetId(), TransactionId: req.GetTransactionId()},
+		},
+	}, nil
 }
 
 func openWallet(t *testing.T, store eventstore.Store, walletID string, allows sharedpb.Allows) {
@@ -122,10 +153,9 @@ func driveSaga(t *testing.T, ts *Server, xfers *transfer.Server, store eventstor
 // knownChildren lists every Transfer this Transaction has recorded anything
 // about and that has a stream of its own, including the Reversals its rollback
 // created — those are Transfer aggregates too, and they need resuming exactly
-// like a forward child. A gated child is named on the Transaction's stream but
-// was never requested, so it has no stream and is left out: the orchestrator
-// only ever gets a trigger for an aggregate that has actually written
-// something.
+// like a forward child. A child whose intent was recorded but whose request was
+// never made has no stream and is left out: the orchestrator only ever gets a
+// trigger for an aggregate that has actually written something.
 func knownChildren(t *testing.T, store eventstore.Store, transactionID string) []string {
 	t.Helper()
 	events, err := store.Load(context.Background(), AggregateType, transactionID)

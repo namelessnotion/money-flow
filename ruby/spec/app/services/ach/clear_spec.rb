@@ -24,7 +24,7 @@ RSpec.describe Services::Ach::Clear do
     expect(sent_request.transfers.size).to eq(1)
     expect([transfer.from_wallet_id, transfer.to_wallet_id]).to eq([wallets['uncleared_cash'], wallets['cleared_cash']])
     expect([transfer.amount.minor_units, transfer.amount.currency]).to eq([12_500, 'USD'])
-    expect([transfer.stage, transfer.mint_source, transfer.auto_process]).to eq([false, false, true])
+    expect([transfer.stage, transfer.mint_source]).to eq([false, false])
   end
 
   # Derived from the deposit, so a second sweep — or a Ruby that forgot it

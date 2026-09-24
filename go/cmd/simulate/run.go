@@ -103,8 +103,8 @@ func startSeed(
 		Transfers: map[string]*transactionpb.Transfer{
 			transferID: {
 				Id: transferID, FromWalletId: reserve.walletID, ToWalletId: target.walletID,
-				Amount:      &sharedpb.Money{MinorUnits: amount, Currency: currency},
-				AutoProcess: true, MintSource: true,
+				Amount:     &sharedpb.Money{MinorUnits: amount, Currency: currency},
+				MintSource: true,
 			},
 		},
 	})
@@ -194,8 +194,8 @@ func (d transactionDriver) drive(ctx context.Context, from, to entity, amount ui
 		Transfers: map[string]*transactionpb.Transfer{
 			transferID: {
 				Id: transferID, FromWalletId: from.walletID, ToWalletId: to.walletID,
-				Amount:      &sharedpb.Money{MinorUnits: amount, Currency: currency},
-				AutoProcess: true, Stage: true,
+				Amount: &sharedpb.Money{MinorUnits: amount, Currency: currency},
+				Stage:  true,
 			},
 		},
 	})

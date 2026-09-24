@@ -205,7 +205,7 @@ func TestTransactionServiceOverHTTP(t *testing.T) {
 			xferID: {
 				Id: xferID, Amount: &sharedpb.Money{MinorUnits: 500, Currency: "USD"},
 				FromWalletId: testutil.ID("w1"), ToWalletId: testutil.ID("w2"),
-				AutoProcess: true, MintSource: true,
+				MintSource: true,
 			},
 		},
 	})

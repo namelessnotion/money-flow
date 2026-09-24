@@ -70,7 +70,6 @@ module Services
           amount: Shared::V1::Money.new(minor_units: amount_minor_units, currency: CURRENCY),
           from_wallet_id: from,
           to_wallet_id: to,
-          auto_process: true,
           stage: false,
           mint_source: mint_source
         )

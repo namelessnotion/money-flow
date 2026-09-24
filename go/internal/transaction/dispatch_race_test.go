@@ -98,9 +98,9 @@ func TestDispatch_AChildFailingMidDispatchRollsBackTheChildBeingRequested(t *tes
 	if _, err := txns.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
 		Id: txnID,
 		Transfers: map[string]*pb.Transfer{
-			aID: {Id: aID, Amount: usd(100), FromWalletId: bankAccount, ToWalletId: cash, AutoProcess: true, MintSource: true},
-			cID: {Id: cID, Amount: usd(100), FromWalletId: bankAccount, ToWalletId: cash, AutoProcess: true, MintSource: true},
-			bID: {Id: bID, Amount: usd(100), FromWalletId: bankAccount, ToWalletId: cash, AutoProcess: true, MintSource: true},
+			aID: {Id: aID, Amount: usd(100), FromWalletId: bankAccount, ToWalletId: cash, MintSource: true},
+			cID: {Id: cID, Amount: usd(100), FromWalletId: bankAccount, ToWalletId: cash, MintSource: true},
+			bID: {Id: bID, Amount: usd(100), FromWalletId: bankAccount, ToWalletId: cash, MintSource: true},
 		},
 		TransferDependency: map[string]*pb.TransferIdList{bID: {TransferId: []string{cID}}},
 	}); err != nil {
@@ -149,8 +149,8 @@ func TestDispatch_ARollbackRequestedMidDispatchRollsBackTheChildBeingRequested(t
 	if _, err := txns.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
 		Id: txnID,
 		Transfers: map[string]*pb.Transfer{
-			aID: {Id: aID, Amount: usd(100), FromWalletId: bankAccount, ToWalletId: cash, AutoProcess: true, MintSource: true},
-			bID: {Id: bID, Amount: usd(100), FromWalletId: bankAccount, ToWalletId: cash, AutoProcess: true, MintSource: true},
+			aID: {Id: aID, Amount: usd(100), FromWalletId: bankAccount, ToWalletId: cash, MintSource: true},
+			bID: {Id: bID, Amount: usd(100), FromWalletId: bankAccount, ToWalletId: cash, MintSource: true},
 		},
 	}); err != nil {
 		t.Fatalf("StartInitializingTransaction() error = %v", err)
@@ -164,48 +164,6 @@ func TestDispatch_ARollbackRequestedMidDispatchRollsBackTheChildBeingRequested(t
 	}
 	requireRolledBackWithout(t, store, xfers, txnID, bID)
 	requireRolledBackWithout(t, store, xfers, txnID, aID)
-}
-
-// StartProcessingTransfer has the same shape one child at a time: it reads B
-// as Gated, and a rollback that abandons B lands before it records the
-// request it has already made.
-func TestStartProcessingTransfer_ARollbackMidRequestRollsBackTheChild(t *testing.T) {
-	t.Parallel()
-	store := eventstore.NewMemoryStore()
-	lc := ledger.NewFakeClient()
-	bankAccount, cash, _, _ := achWallets(t, store)
-	xfers := newTransferServer(store, lc)
-	ctx := context.Background()
-
-	txnID, bID := testutil.ID("txn-gated"), testutil.ID("b")
-	client := &rollbackDuringRequestClient{Server: xfers, target: bID}
-	txns := NewServer(store, client)
-	client.meanwhile = func() {
-		if _, err := txns.StartTransactionRollback(ctx, &pb.StartTransactionRollbackRequest{Id: txnID, Reason: "returned"}); err != nil {
-			t.Fatalf("StartTransactionRollback() error = %v", err)
-		}
-		driveSaga(t, txns, xfers, store, txnID)
-	}
-
-	if _, err := txns.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
-		Id: txnID,
-		Transfers: map[string]*pb.Transfer{
-			bID: {Id: bID, Amount: usd(100), FromWalletId: bankAccount, ToWalletId: cash, AutoProcess: false, MintSource: true},
-		},
-	}); err != nil {
-		t.Fatalf("StartInitializingTransaction() error = %v", err)
-	}
-	if err := txns.Resume(ctx, txnID); err != nil {
-		t.Fatalf("Resume() error = %v", err)
-	}
-
-	if _, err := txns.StartProcessingTransfer(ctx, &pb.StartProcessingTransferRequest{Id: txnID, TransferId: bID}); err != nil {
-		t.Fatalf("StartProcessingTransfer() error = %v", err)
-	}
-	if !client.fired {
-		t.Fatalf("B was never requested; the test proved nothing")
-	}
-	requireRolledBackWithout(t, store, xfers, txnID, bID)
 }
 
 // seedIntendedChild writes a Transaction that recorded its intent to request
@@ -233,7 +191,7 @@ func TestResume_RequestsAChildWhoseIntentOutlivedItsDriver(t *testing.T) {
 	txns := NewServer(store, xfers)
 
 	txnID, bID := testutil.ID("txn-intent-forward"), testutil.ID("b")
-	seedIntendedChild(t, store, txnID, &pb.Transfer{Id: bID, Amount: usd(100), FromWalletId: bankAccount, ToWalletId: cash, AutoProcess: true, MintSource: true})
+	seedIntendedChild(t, store, txnID, &pb.Transfer{Id: bID, Amount: usd(100), FromWalletId: bankAccount, ToWalletId: cash, MintSource: true})
 
 	driveSaga(t, txns, xfers, store, txnID)
 	events, err := store.Load(context.Background(), AggregateType, txnID)
@@ -257,7 +215,7 @@ func TestRollback_ResolvesAChildWhoseIntentOutlivedItsDriver(t *testing.T) {
 	ctx := context.Background()
 
 	txnID, bID := testutil.ID("txn-intent-rollback"), testutil.ID("b")
-	seedIntendedChild(t, store, txnID, &pb.Transfer{Id: bID, Amount: usd(100), FromWalletId: bankAccount, ToWalletId: cash, AutoProcess: true, MintSource: true})
+	seedIntendedChild(t, store, txnID, &pb.Transfer{Id: bID, Amount: usd(100), FromWalletId: bankAccount, ToWalletId: cash, MintSource: true})
 
 	if _, err := txns.StartTransactionRollback(ctx, &pb.StartTransactionRollbackRequest{Id: txnID, Reason: "returned"}); err != nil {
 		t.Fatalf("StartTransactionRollback() error = %v", err)
@@ -279,7 +237,7 @@ func TestAppendSagaStep_DropsAChildOutcomeOnceTheTransactionHasConcluded(t *test
 	txnID, bID := testutil.ID("txn-late-outcome"), testutil.ID("b")
 	if err := store.Append(ctx, AggregateType, txnID, 0,
 		&pb.TransactionInitialized{Id: txnID, FactoryName: "dispatch_race_test", FactoryVersion: "1", Transfers: map[string]*pb.Transfer{
-			bID: {Id: bID, Amount: usd(100), FromWalletId: testutil.ID("w1"), ToWalletId: testutil.ID("w2"), AutoProcess: true},
+			bID: {Id: bID, Amount: usd(100), FromWalletId: testutil.ID("w1"), ToWalletId: testutil.ID("w2")},
 		}},
 		&pb.TransactionStarted{Id: txnID},
 		&pb.TransferRequestedWithinTransaction{Id: txnID, TransferId: bID},
@@ -314,7 +272,7 @@ func TestAppendSagaStep_DropsARollbackDecidedBeforeTheTransactionCompleted(t *te
 	txnID, bID := testutil.ID("txn-late-rollback"), testutil.ID("b")
 	if err := store.Append(ctx, AggregateType, txnID, 0,
 		&pb.TransactionInitialized{Id: txnID, FactoryName: "dispatch_race_test", FactoryVersion: "1", Transfers: map[string]*pb.Transfer{
-			bID: {Id: bID, Amount: usd(100), FromWalletId: testutil.ID("w1"), ToWalletId: testutil.ID("w2"), AutoProcess: true},
+			bID: {Id: bID, Amount: usd(100), FromWalletId: testutil.ID("w1"), ToWalletId: testutil.ID("w2")},
 		}},
 		&pb.TransactionStarted{Id: txnID},
 		&pb.TransferRequestedWithinTransaction{Id: txnID, TransferId: bID},

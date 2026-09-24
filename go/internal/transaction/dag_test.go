@@ -22,7 +22,7 @@ func deps(m map[string][]string) map[string]*pb.TransferIdList {
 func transfers(ids ...string) map[string]*pb.Transfer {
 	out := make(map[string]*pb.Transfer, len(ids))
 	for _, id := range ids {
-		out[id] = &pb.Transfer{Id: id, Amount: usd(100), AutoProcess: true}
+		out[id] = &pb.Transfer{Id: id, Amount: usd(100)}
 	}
 	return out
 }
@@ -82,7 +82,7 @@ func TestValidateDAG_RejectsDanglingParentReference(t *testing.T) {
 
 func TestValidateDAG_RejectsMismatchedTransferID(t *testing.T) {
 	t.Parallel()
-	xfers := map[string]*pb.Transfer{"A": {Id: "not-a", Amount: usd(100), AutoProcess: true}}
+	xfers := map[string]*pb.Transfer{"A": {Id: "not-a", Amount: usd(100)}}
 	if err := validateDAG(xfers, nil); err == nil {
 		t.Fatal("validateDAG() error = nil, want an error when a Transfer's own id doesn't match its map key")
 	}
@@ -144,7 +144,7 @@ func TestValidateDAG_RejectsAmountsNoTransferWouldAccept(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			xfers := map[string]*pb.Transfer{"A": {Id: "A", Amount: tc.amount, AutoProcess: true}}
+			xfers := map[string]*pb.Transfer{"A": {Id: "A", Amount: tc.amount}}
 			err := validateDAG(xfers, nil)
 			if err == nil {
 				t.Fatalf("validateDAG() error = nil for a leg with %s, want a rejection", name)
