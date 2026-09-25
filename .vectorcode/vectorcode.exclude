@@ -9,3 +9,4 @@ ruby/app/graphql/schemas/money_flow_schema.graphql
 .claude/**
 **/.ruby-lsp/**
 .vectorcode/**
+spec/tools/tla2tools.jar
