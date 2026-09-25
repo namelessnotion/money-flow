@@ -1,0 +1,8 @@
+{"kind":"header","maxAttempts":3,"handlers":{"RequestTransfer":["transfer.v1.TransferRequestAccepted","transfer.v1.TransferRequestRejected"],"RequestReversal":["transfer.v1.ReversalRequestAccepted","transfer.v1.ReversalRequestRejected"]}}
+{"kind":"Receive","req":"r1","command":"RequestReversal","stream":"x"}
+{"kind":"Load","req":"r1","stream":"x","len":0}
+{"kind":"Append","req":"r1","stream":"x","expectedSeq":0,"types":["transfer.v1.ReversalRequestRejected"],"outcome":"ok"}
+{"kind":"Answer","req":"r1","stream":"x","outcome":"transfer.v1.ReversalRequestRejected"}
+{"kind":"Receive","req":"r2","command":"RequestTransfer","stream":"x"}
+{"kind":"Load","req":"r2","stream":"x","len":1,"types":["transfer.v1.ReversalRequestRejected"]}
+{"kind":"Answer","req":"r2","stream":"x","outcome":"Failed"}

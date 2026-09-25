@@ -1,6 +1,6 @@
 .PHONY: up down restart migrate ssl proto cdc-up cdc-down orchestrator-up orchestrator-down orchestrator-logs \
 	consumer-up consumer-down consumer-logs events resume resume-open jobs-up jobs-down jobs-logs clear-ach-now submit-ach-now \
-	disburse-now simulate simulate-lending
+	disburse-now simulate simulate-lending tla-check tla-trace
 
 up:
 	docker compose up -d
@@ -168,3 +168,26 @@ simulate:
 # then open /money-flow?run=<tag it prints> in the client.
 simulate-lending:
 	docker compose exec -T ruby bin/simulate_lending $(ARGS)
+
+# TLC, vendored so every run checks the specs with the same model checker
+# (see spec/tools/README.md). The tla-* targets need Java on the host.
+TLA2TOOLS := $(CURDIR)/spec/tools/tla2tools.jar
+TLC := java -XX:+UseParallelGC -cp $(TLA2TOOLS) tlc2.TLC -nowarning -noGenerateSpecTE -workers auto
+
+# Model-checks the event log's contract (spec/eventlog.tla) and that the
+# handlers' design refines it (spec/eventstore.tla).
+tla-check:
+	cd spec && $(TLC) -metadir "$$(mktemp -d)" -config MCeventlog.cfg MCeventlog.tla
+	cd spec && $(TLC) -metadir "$$(mktemp -d)" -config MCeventstore.cfg MCeventstore.tla
+
+# Records traces of concurrent RequestTransfer/RequestReversal calls against
+# the real Postgres store (go/internal/transfer/tlatrace_test.go) and checks
+# each is a behavior of spec/eventstore.tla, along with the fixtures that test
+# the trace spec itself. The harness runs in the go container, as it links
+# TigerBeetle's native client. Replay a workload with TLA_TRACE_SEED=<seed it
+# printed>.
+tla-trace:
+	rm -rf go/.tla-traces && mkdir -p go/.tla-traces
+	docker compose exec -T -e TLA_TRACE_DIR=/app/.tla-traces -e TLA_TRACE_SEED=$(TLA_TRACE_SEED) \
+		go go test ./internal/transfer -run '^TestTLATrace$$' -count=1 -v
+	TLA2TOOLS=$(TLA2TOOLS) spec/trace/validate.sh spec/trace/fixtures go/.tla-traces

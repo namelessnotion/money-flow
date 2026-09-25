@@ -35,3 +35,10 @@ docker/proxy/certs/*
 /go/orchestrator
 /go/server
 /go/simulate
+
+# TLC's working files (make tla-check, spec/trace/validate.sh) and the traces
+# make tla-trace records.
+states/
+*_TTrace_*.tla
+*_TTrace_*.bin
+/go/.tla-traces/

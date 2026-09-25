@@ -55,6 +55,31 @@ jobs:
         working-directory: go
         run: go test ./...
 
+      # TLC (spec/tools/tla2tools.jar) runs on the JVM.
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Model-check the specs
+        run: make tla-check
+
+      # The same harness make tla-trace runs, here against the job's own
+      # Postgres rather than the go container.
+      - name: Record traces of the transfer handlers
+        working-directory: go
+        env:
+          TLA_TRACE_DIR: ${{ github.workspace }}/go/.tla-traces
+        run: |
+          mkdir -p "$TLA_TRACE_DIR"
+          go test ./internal/transfer -run '^TestTLATrace$' -count=1 -v
+
+      - name: Check the traces are behaviors of spec/eventstore.tla
+        env:
+          TLA2TOOLS: spec/tools/tla2tools.jar
+        run: spec/trace/validate.sh spec/trace/fixtures go/.tla-traces
+
   ruby:
     name: Ruby specs
     runs-on: ubuntu-latest
