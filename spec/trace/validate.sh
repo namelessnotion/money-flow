@@ -14,6 +14,13 @@
 set -euo pipefail
 
 : "${TLA2TOOLS:?set TLA2TOOLS to the path of tla2tools.jar}"
+if [[ ! -f "$TLA2TOOLS" ]]; then
+  echo "validate.sh: TLA2TOOLS=$TLA2TOOLS is not a file" >&2
+  exit 2
+fi
+# TLC runs from a scratch directory, so a relative path would stop resolving.
+TLA2TOOLS="$(cd "$(dirname "$TLA2TOOLS")" && pwd)/$(basename "$TLA2TOOLS")"
+export TLA2TOOLS
 JAVA="${JAVA:-java}"
 SPEC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
