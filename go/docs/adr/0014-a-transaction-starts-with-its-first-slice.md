@@ -47,4 +47,27 @@ TransferRequestedWithinTransaction × one slice]` in one append, and exactly one
 **Initialized still lasts until the orchestrator folds it**, so a Transaction sitting in Initialized still means
 publication or the orchestrator is behind. What goes away is the brief Started state with nothing dispatched.
 
-Not measured under `cmd/simulate` yet.
+**It saves a commit, not throughput, on the local stack.** Measured 2026-09-24 on the local Docker Desktop
+stack. Each run was `cmd/simulate -entities 150 -transactions 3000 -concurrency 48` with the ledger check on. The
+comparison covers ADRs 0011–0014 together against ADR 0010 (`263ad33`). `go` and `orchestrator` were recreated
+before every block, and the blocks alternated old, new, old, new so that drift across the sitting would show:
+
+| Block | Code | transaction mode | transfer mode (control) |
+|---|---|---|---|
+| A1 | ADR 0010 | 260.8, 261.4 /s | 357.6 /s |
+| B1 | ADR 0014 | 262.3, 261.5 /s | 365.7 /s |
+| A2 | ADR 0010 | 263.0, 264.5 /s | 393.0 /s |
+| B2 | ADR 0014 | 261.2, 270.4 /s | 396.7 /s |
+
+- **Transaction mode:** ADR 0010 averaged 262.4/s and this change 263.9/s. The +0.6% is inside the spread
+  between runs of the same code.
+- **WAL flushes (`wal_sync`) per transaction-mode run:** ~33.6k before and ~33.0k after.
+- **The transfer control drifted up through the sitting on both sides**, so compare only within one block pair.
+  An earlier comparison that restarted only the new side read as +9%. That gain came from the restart.
+- **The commit saving itself is exact.** Counting distinct `xmin` per Transaction stream across the runs gave
+  4.00 → 3.00 commits for a completed Transaction and 5.00 → 4.00 for a rolled-back one, with Started sharing
+  its first slice's commit in 100% of streams.
+
+At concurrency 48, group commit already shares one WAL flush among concurrent commits, so one fewer commit per
+Transaction is not one fewer flush. The saving should matter more where flushes are not shared: lower
+concurrency, or a disk with slower fsync than this one.
