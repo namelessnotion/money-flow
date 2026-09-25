@@ -71,5 +71,9 @@ recorded failure no longer costs the rollback an append.
 them. `dispatchReady` recorded their intents first (ADR 0011), so the rollback finds them Requested and undoes them.
 Before, it would have started from another run's fold, a moment later.
 
-Not measured under `cmd/simulate` yet. In the dev log, most rollbacks were started by `StartTransactionRollback`,
-which this does not change, so a throughput gain there would be small.
+**`cmd/simulate` does not exercise it.** Its rollbacks (`-rollback-rate`, 0.30 by default) all go through
+`StartTransactionRollback`, which this does not change, and its children do not fail. In the dev log, likewise,
+most rollbacks were started by `StartTransactionRollback`. The A/B recorded under
+[ADR 0014](0014-a-transaction-starts-with-its-first-slice.md)'s Consequences covers ADRs 0011–0014 together. It
+found no throughput difference in transaction mode (262.4 vs 263.9/s), and says nothing specific to this change.
+Its saving is pinned by commit count instead.
