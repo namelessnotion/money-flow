@@ -104,6 +104,7 @@ var stateByEventType = map[string]transferState{
 var transitions = map[transferState][]string{
 	stateAccepted: {
 		eventstore.EventType(&pb.AcceptedTransferCancelled{}),
+		eventstore.EventType(&pb.TransferFailed{}), // failUnprepared: its wallet no longer covers it
 	},
 	statePrepared: {
 		eventstore.EventType(&pb.TransferStaged{}),
@@ -781,6 +782,30 @@ func (s *Server) requireClaim(ctx context.Context, transferID string, claimedSeq
 	return nil
 }
 
+// failUnprepared records TransferFailed on an Accepted Transfer whose source
+// wallet no longer covers it when prepare selects its Tokens again: a
+// concurrent Transaction spent the money between accept and prepare.
+// Nothing has reached TigerBeetle yet, so there is nothing to compensate, and
+// the shortfall is a domain outcome, like TigerBeetle refusing a batch
+// (compensate). An error here would be retried and then halt the
+// orchestrator (go ADR 0003, namelessnotion/money_flow#6).
+//
+// The failure lands only on the stream exactly as prepare loaded it. If
+// anything landed first, it reports errPlanOvertaken, and prepare re-decides
+// from the new state. Going through recordOutcome instead would re-fold on
+// a conflict and could fail a Transfer that a concurrent prepare had
+// already moved on.
+func (s *Server) failUnprepared(ctx context.Context, transferID string, expectedSeq int64, reason string) error {
+	ok, err := s.tryAppend(ctx, transferID, expectedSeq, &pb.TransferFailed{Id: transferID, Reason: reason})
+	switch {
+	case err != nil:
+		return err
+	case !ok:
+		return errPlanOvertaken
+	}
+	return nil
+}
+
 // errPlanOvertaken is tryPrepare losing its append to a write that landed on
 // a stream it planned against — a Wallet it mints into, or the Transfer's own
 // stream: the plan was built on a position that no longer holds.
@@ -865,10 +890,10 @@ func (s *Server) tryPrepare(ctx context.Context, transferID string) (*claimedSte
 		var srcMintWrites []eventstore.StreamWrite
 
 		if accepted.GetMintSource() {
-			// Re-validate the same way selectSourceTokens is re-validated
-			// below, in case anything changed between accept and prepare —
-			// defensive, mirroring the existing "re-selection failed after
-			// accept" pattern.
+			// Re-validate in case anything changed between accept and
+			// prepare, as selectSourceTokens is re-run below. Defensive:
+			// unlike a source wallet running short, nothing is known to
+			// invalidate a mint_source between the two.
 			rejection, err := validateMintSource(ctx, s.store, s.transactionExists, accepted.GetTransactionId(), accepted.GetFromWalletId())
 			if err != nil {
 				return nil, err
@@ -903,7 +928,7 @@ func (s *Server) tryPrepare(ctx context.Context, transferID string) (*claimedSte
 				return nil, err
 			}
 			if rejection != nil {
-				return nil, fmt.Errorf("transfer %q: prepare: re-selection failed after accept: %s", transferID, rejection.GetReason())
+				return nil, s.failUnprepared(ctx, transferID, int64(len(events)), "prepare: "+rejection.GetReason())
 			}
 			srcLegs = selected
 		}
