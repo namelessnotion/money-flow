@@ -204,9 +204,16 @@ $(ALLOY):
 	echo "$(ALLOY_SHA256)  $@.tmp" | shasum -a 256 -c -
 	mv $@.tmp $@
 
-# Checks the ledger's money model (spec/alloy/ledger.als). Every command
-# carries an `expect`, and exec exits non-zero when a result contradicts it.
-# -n drops instances whose Int arithmetic overflows.
+# Checks the ledger's money model (spec/alloy/ledger.als). Each command it
+# runs carries an `expect`, and exec exits non-zero when a result contradicts
+# it. -n drops instances whose Int arithmetic overflows. Expect about 40
+# minutes: proving FundedWithdrawalCanBePaid alone takes about 26.
+# SidesAgreeAtRest and EveryStartedTransactionConcludes aren't listed: they
+# haven't finished at their scopes yet, so they have no `expect`.
+ALLOY_COMMANDS := FundedWithdrawalCanBePaid DrawRollbackNeverFails DepositSettlesThenClears WithdrawalPaidOut
+
 alloy-check: $(ALLOY)
-	cd spec/alloy && java --enable-native-access=ALL-UNNAMED -jar $(ALLOY) \
-		exec -n -f -q -s glucose -t none -o "$$(mktemp -d)" -c '*' ledger.als
+	cd spec/alloy && for command in $(ALLOY_COMMANDS); do \
+		java --enable-native-access=ALL-UNNAMED -jar $(ALLOY) \
+			exec -n -f -q -s glucose -t none -o "$$(mktemp -d)" -c "$$command" ledger.als || exit 1; \
+	done

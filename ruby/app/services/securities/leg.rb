@@ -49,10 +49,23 @@ module Services
         }
       end
 
-      # The ids of a money leg and its cash leg, in that order — what a
-      # dependency gates when it gates a payment.
+      # A money leg and its cash leg run one after the other, never side by
+      # side, so that an entity's cash always covers its cleared cash, even
+      # while a Transaction is in flight. An ACH withdrawal's Funding checks
+      # only cleared cash, and its real leg then needs the cash behind it
+      # (ruby/docs/adr/0010).
+      #
+      # The two legs move both parties at once, so one order can't cover
+      # both. It covers the entity: every Securities shape runs between an
+      # entity and a Security, and only an entity can withdraw.
+
+      # When the entity pays: its cleared cash leaves first, then its cash.
       sig { params(id: String).returns(T::Array[String]) }
-      def self.money_ids(id) = [id, cash_id_for(id)]
+      def self.entity_pays(id) = [id, cash_id_for(id)]
+
+      # When the entity is paid: its cash arrives first, then its cleared cash.
+      sig { params(id: String).returns(T::Array[String]) }
+      def self.entity_is_paid(id) = [cash_id_for(id), id]
 
       sig { params(id: String).returns(String) }
       def self.cash_id_for(id) = DetId.for("#{id}:cash")
@@ -75,12 +88,14 @@ module Services
         )
       end
 
-      # The dependency map saying each of `children` waits for `parent`. A
-      # child with no entry is a DAG root, which is how a shape says "this one
-      # gates".
-      sig { params(children: T::Array[String], parent: String).returns(T::Hash[String, T.untyped]) }
-      def self.after(children, parent)
-        children.to_h { |child| [child, Transaction::V1::TransferIdList.new(transfer_id: [parent])] }
+      # The dependency map that runs `ids` in order: each waits for the one
+      # before it. The first has no entry, so it's the DAG root, which is the
+      # leg Go pre-flights and the one that gates the rest.
+      sig { params(ids: T::Array[String]).returns(T::Hash[String, T.untyped]) }
+      def self.chain(ids)
+        ids.drop(1).each_with_index.to_h do |child, index|
+          [child, Transaction::V1::TransferIdList.new(transfer_id: [ids.fetch(index)])]
+        end
       end
     end
   end

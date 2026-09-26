@@ -20,7 +20,7 @@ RSpec.describe Services::Securities::DisbursementShape do
     let(:request) { request_for(principal: 40_000, interest: 3_000) }
 
     it 'names the factory that built it' do
-      expect([request.factory_name, request.factory_version]).to eq(%w[security_disbursement 2])
+      expect([request.factory_name, request.factory_version]).to eq(%w[security_disbursement 3])
     end
 
     it "retires the repaid claim back into the Issuer's control wallet" do
@@ -52,10 +52,15 @@ RSpec.describe Services::Securities::DisbursementShape do
       # debits_must_not_exceed_credits: putting the retirement leg at the root
       # means an over-payment of principal is refused before any money leaves
       # the repayment wallet. It is also the only leg Go pre-flights.
-      expect(request.transfer_dependency.keys).to contain_exactly(payout_id, cash_id)
-      [payout_id, cash_id].each do |id|
-        expect(request.transfer_dependency[id].transfer_id).to eq([retirement_id])
-      end
+      expect(request.transfer_dependency.keys).not_to include(retirement_id)
+      expect(request.transfer_dependency[cash_id].transfer_id).to eq([retirement_id])
+    end
+
+    it "credits the Investor's cleared cash only once their cash has arrived, so their cash always covers it" do
+      # Otherwise the Investor could fund a withdrawal from the payout's
+      # cleared cash whose cash hasn't landed, and have it refused
+      # (ruby/docs/adr/0010, namelessnotion/money_flow#7).
+      expect(request.transfer_dependency[payout_id].transfer_id).to eq([cash_id])
     end
 
     it 'stages nothing and mints nothing' do
@@ -76,8 +81,10 @@ RSpec.describe Services::Securities::DisbursementShape do
       expect(request.transfers.keys).to contain_exactly(payout_id, cash_id)
     end
 
-    it 'makes both payout legs roots, so they are the ones Go pre-flights' do
-      expect(request.transfer_dependency.keys).to be_empty
+    it 'makes the cash leg the root, so it is the one Go pre-flights, and the payout leg follows it' do
+      dependency = request.transfer_dependency.to_h.transform_values { |ids| ids[:transfer_id] }
+
+      expect(dependency).to eq(payout_id => [cash_id])
     end
 
     it 'pays the interest on both legs' do

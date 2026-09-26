@@ -16,7 +16,7 @@ RSpec.describe Services::Securities::DrawShape do
   def cash_leg = request.transfers[cash_id]
 
   it 'names the factory that built it' do
-    expect([request.factory_name, request.factory_version]).to eq(%w[security_draw 2])
+    expect([request.factory_name, request.factory_version]).to eq(%w[security_draw 3])
   end
 
   it "moves the Security's escrow into the Borrower's cleared cash" do
@@ -37,11 +37,16 @@ RSpec.describe Services::Securities::DrawShape do
     expect(request.transfers.keys).to contain_exactly(transfer_id, cash_id)
   end
 
-  it 'makes both legs roots and mints nothing, so a short escrow or short cash is refused before anything is written' do
-    # Two roots on two different wallets: Go's pre-flight checks each against
-    # its own balance, so there is no shared snapshot to over-accept against.
+  it 'makes the cash leg the root and mints nothing, so short cash is refused before anything is written' do
     [leg, cash_leg].each { |transfer| expect(transfer.mint_source).to be false }
-    expect(request.transfer_dependency.keys).to be_empty
+    expect(request.transfer_dependency.keys).to eq([transfer_id])
+  end
+
+  it "credits the Borrower's cleared cash only once their cash has arrived, so their cash always covers it" do
+    # Otherwise the Borrower could fund a withdrawal from drawn cleared cash
+    # whose cash hasn't landed, and have it refused
+    # (ruby/docs/adr/0010, namelessnotion/money_flow#7).
+    expect(request.transfer_dependency[transfer_id].transfer_id).to eq([cash_id])
   end
 
   it 'never stages: it does not cross the bank boundary' do
