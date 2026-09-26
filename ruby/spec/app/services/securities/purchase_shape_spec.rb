@@ -17,7 +17,7 @@ RSpec.describe Services::Securities::PurchaseShape do
   def leg(id) = request.transfers[id]
 
   it 'names the factory that built it' do
-    expect([request.factory_name, request.factory_version]).to eq(%w[security_purchase 2])
+    expect([request.factory_name, request.factory_version]).to eq(%w[security_purchase 3])
   end
 
   it "moves claims out of the Security's supply into the Investor's claims" do
@@ -57,7 +57,7 @@ RSpec.describe Services::Securities::PurchaseShape do
     end
   end
 
-  it 'leaves the claim leg a root and gates both money legs behind it, ' \
+  it 'leaves the claim leg a root and gates the money behind it, ' \
      'so oversubscription is settled before any investor money moves' do
     # security_supply is the hot wallet — every concurrent purchase of this
     # Security draws on it, and it is exactly where Go's accept-time pre-flight
@@ -70,10 +70,14 @@ RSpec.describe Services::Securities::PurchaseShape do
     # dispatch with the money leg never having run: nothing to reverse, and no
     # Investor money moved. Had the money leg been a root, every lost race
     # would reverse a committed payment instead.
-    expect(request.transfer_dependency.keys).to contain_exactly(money_id, cash_id)
-    [money_id, cash_id].each do |id|
-      expect(request.transfer_dependency[id].transfer_id).to eq([claim_id])
-    end
+    expect(request.transfer_dependency.keys).not_to include(claim_id)
+    expect(request.transfer_dependency[money_id].transfer_id).to eq([claim_id])
+  end
+
+  it "moves the Investor's cash only once their cleared cash has gone, so their cash always covers it" do
+    # Otherwise a withdrawal the Investor funds meanwhile finds its cash taken
+    # and is refused (ruby/docs/adr/0010, namelessnotion/money_flow#7).
+    expect(request.transfer_dependency[cash_id].transfer_id).to eq([money_id])
   end
 
   it 'refuses an investor with nowhere to hold claims' do

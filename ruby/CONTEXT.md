@@ -30,9 +30,11 @@ The two sides of the ledger every party keeps money on. The cash side is the rea
 for a party: an entity's `cash`, or a Security's **Security cash**. The cleared side says how much of it may
 be spent: an entity's `uncleared_cash` and `cleared_cash`, or a Security's Escrow and Repayment wallets. A
 real leg moves the cash side and a shadow leg moves the cleared side. Anything that moves money between two
-parties inside the platform moves both by the same amount, so an entity's `cash` never holds less than its
-cleared cash, and a withdrawal that is funded can always be paid
-([ADR 0009](docs/adr/0009-securities-money-moves-cash-too.md)).
+parties inside the platform moves both by the same amount
+([ADR 0009](docs/adr/0009-securities-money-moves-cash-too.md)), and in the order that keeps the entity
+covered: its cleared cash leaves before its cash, and its cash arrives before its cleared cash. So an entity's
+`cash` never holds less than its cleared cash, even while Transactions are in flight, and a withdrawal that is
+funded can always be paid ([ADR 0010](docs/adr/0010-an-entitys-cash-covers-its-cleared-cash-in-flight.md)).
 
 _Avoid_: reading both sides of one party as two amounts of money. They are the same money, seen twice.
 
@@ -129,12 +131,14 @@ of a Subscription's DAG and runs first, so an oversubscription is settled before
 In a Securities Transaction, the Transfer that moves money on the cleared side. For a Subscription it moves
 the Investor's cleared cash into the Security's **Escrow**. It waits for the claim leg, so it is never
 pre-flighted: a shortfall shows up as a Transaction that initialized and then rolled back, which the
-projection reports.
+projection reports. Its cash leg waits for it in turn.
 
 **Cash leg**
-The Transfer beside every money leg: the same amount, between the same two parties, on the cash side. Its
-id is derived from its money leg's, and it has the same parents in the DAG. `Leg.money` builds the two
-together, and never one alone.
+The Transfer paired with every money leg: the same amount, between the same two parties, on the cash side.
+Its id is derived from its money leg's. `Leg.money` builds the two together, and never one alone. The pair
+runs in order, never side by side: after the money leg when the entity pays (`Leg.entity_pays`), and before
+it when the entity is paid (`Leg.entity_is_paid`)
+([ADR 0010](docs/adr/0010-an-entitys-cash-covers-its-cleared-cash-in-flight.md)).
 
 _Avoid_: "real leg" for the cash leg. A real leg crosses the bank boundary, and no Securities leg does.
 

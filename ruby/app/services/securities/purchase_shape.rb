@@ -13,7 +13,7 @@ module Services
     # Investor's `investment` account. The **money leg** moves the Investor's
     # cleared cash into the Security's Escrow, and its **cash leg** moves the
     # real money behind it from the Investor's `cash` into the Security's
-    # (ruby/docs/adr/0009). Both wait for the claim leg.
+    # (ruby/docs/adr/0009). They run in that order, after the claim leg.
     #
     # That order is the whole design (ruby/docs/adr/0006). `security_supply` is
     # the hot wallet: every concurrent purchase of this Security draws on it,
@@ -31,9 +31,10 @@ module Services
     # Had the money leg been a root, every lost race would reverse a committed
     # Investor payment instead.
     #
-    # The cash leg is the money leg's sibling rather than its child: with the
-    # two sides kept in step, an Investor with the cleared cash has the cash,
-    # so chaining them would only add a dispatch round trip.
+    # The cash leg is the money leg's child, not its sibling: the Investor's
+    # cleared cash leaves before their cash, so their cash always covers their
+    # cleared cash. Otherwise a withdrawal they fund meanwhile could find its
+    # cash taken (ruby/docs/adr/0010).
     #
     # The cost, stated rather than hidden: a child behind a dependency edge
     # gets no pre-flight at all, so an Investor short of cleared cash gets a
@@ -47,8 +48,8 @@ module Services
       # Bumped whenever the legs or their order change, so Go's record of each
       # Transaction says which shape ran.
       # 1 moved cleared cash only, leaving the Investor's `cash` holding money
-      # they had spent.
-      FACTORY_VERSION = '2'
+      # they had spent. 2 ran the cash leg beside the money leg, unordered.
+      FACTORY_VERSION = '3'
 
       AccountType = Types::Enums::AccountType
 
@@ -87,7 +88,7 @@ module Services
           factory_name: FACTORY_NAME,
           factory_version: FACTORY_VERSION,
           transfers: transfers(amount_minor_units),
-          transfer_dependency: Leg.after(Leg.money_ids(money_transfer_id), claim_transfer_id)
+          transfer_dependency: Leg.chain([claim_transfer_id, *Leg.entity_pays(money_transfer_id)])
         )
       end
 

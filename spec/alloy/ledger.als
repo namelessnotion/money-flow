@@ -229,8 +229,10 @@ fact AchShapes {
   all d: Deposit | lone deposit.d
 }
 
--- ruby/app/services/securities/*_shape.rb, with the legs as ruby ADR 0009
--- lays them out.
+-- ruby/app/services/securities/*_shape.rb, version 3. Legs as ruby ADR 0009
+-- lays them out, ordered as ruby ADR 0010 does: an entity's cleared cash
+-- leaves before its cash, and its cash arrives before its cleared cash, so
+-- its cash always covers its cleared cash.
 fact SecuritiesShapes {
   -- Supply is minted once, from the Issuer's issuer_control (ruby ADR 0006).
   all x: Offering {
@@ -240,41 +242,44 @@ fact SecuritiesShapes {
     no x.waitsFor
   }
   all s: Security | lone offered.s
-  -- Purchase v2. The claim leg is the root, so an oversubscription is
-  -- refused before any Investor money moves. The money leg and the cash
-  -- leg are siblings: both wait for the claim leg, neither waits for the
-  -- other.
+  -- Purchase. The claim leg is the root, so an oversubscription is refused
+  -- before any Investor money moves. Then the money leg, then its cash leg:
+  -- the Investor pays.
   all x: Purchase {
     leg[x.claim,   x, acct[x.sec, SecuritySupply], acct[x.buyer, Investment],   x.amount]
     leg[x.money,   x, acct[x.buyer, ClearedCash],  acct[x.sec, SecurityEscrow], x.amount]
     leg[x.cashLeg, x, acct[x.buyer, Cash],         acct[x.sec, SecurityCash],   x.amount]
     no x.claim.parents
     x.money.parents = x.claim
-    x.cashLeg.parents = x.claim
+    x.cashLeg.parents = x.money
     legs[x] = x.claim + x.money + x.cashLeg
     no x.waitsFor
   }
   -- Draw: an operator moves escrowed money to the Borrower, on both sides.
-  -- Both legs are roots.
+  -- The Borrower is paid, so the cash leg runs first.
   all x: Draw {
     leg[x.money,   x, acct[x.sec, SecurityEscrow], acct[x.sec.borrower, ClearedCash], x.amount]
     leg[x.cashLeg, x, acct[x.sec, SecurityCash],   acct[x.sec.borrower, Cash],        x.amount]
-    no (x.money + x.cashLeg).parents
+    no x.cashLeg.parents
+    x.money.parents = x.cashLeg
     legs[x] = x.money + x.cashLeg
     no x.waitsFor
   }
-  -- Repayment: the Borrower pays into the Security, on both sides.
+  -- Repayment: the Borrower pays into the Security, on both sides, money leg
+  -- first.
   all x: Repayment {
     leg[x.money,   x, acct[x.sec.borrower, ClearedCash], acct[x.sec, SecurityRepayment], x.amount]
     leg[x.cashLeg, x, acct[x.sec.borrower, Cash],        acct[x.sec, SecurityCash],      x.amount]
-    no (x.money + x.cashLeg).parents
+    no x.money.parents
+    x.cashLeg.parents = x.money
     legs[x] = x.money + x.cashLeg
     no x.waitsFor
   }
   -- Disbursement (ruby ADR 0007) is one holder's share of one Repayment.
   -- Retirement (investment -> issuer_control) is the root, so a holder is
-  -- never paid principal they don't hold. With no principal to retire,
-  -- there's no retirement leg, and the payout and cash legs are roots.
+  -- never paid principal they don't hold. The Investor is paid, so the cash
+  -- leg comes next, then the payout. With no principal to retire, there's no
+  -- retirement leg, and the cash leg is the root.
   all x: Disbursement {
     x.principal >= 0 and x.principal <= x.amount
     (x.principal > 0) iff (some x.retire)
@@ -283,8 +288,8 @@ fact SecuritiesShapes {
     leg[x.money,   x, acct[x.sec, SecurityRepayment], acct[x.payee, ClearedCash], x.amount]
     leg[x.cashLeg, x, acct[x.sec, SecurityCash],      acct[x.payee, Cash],        x.amount]
     no x.retire.parents
-    x.money.parents = x.retire
     x.cashLeg.parents = x.retire
+    x.money.parents = x.cashLeg
     legs[x] = x.retire + x.money + x.cashLeg
     one x.waitsFor and x.waitsFor in Repayment and x.waitsFor.sec = x.sec
   }
@@ -503,9 +508,9 @@ assert SidesAgreeAtRest {
 -- the cleared cash out, the real leg must not be refused by the cap on
 -- `cash`. If it is, the entity was allowed to spend cleared cash that had
 -- no cash behind it at that moment.
--- This fails today, hence `expect 1` below: a concurrent Repayment's cash
--- leg can take the cash after Funding has committed
--- (namelessnotion/money_flow#7). Flip it to `expect 0` when that is fixed.
+-- With the cash leg beside the money leg (shapes version 2), a concurrent
+-- Repayment's cash leg could take the cash after Funding had committed
+-- (namelessnotion/money_flow#7). Ordering the legs (ruby ADR 0010) closes it.
 assert FundedWithdrawalCanBePaid {
   always all w: Withdrawal |
     (w.xs = Started and w.shadow.st = Posted and w.real.st = Idle)
@@ -550,8 +555,14 @@ assert EveryStartedTransactionConcludes {
 check SidesAgreeAtRest
   for 3 but 6 Int, 8 Account, 5 Transfer, 2 Txn, 1..8 steps
 
+-- The scope the version 2 counterexample needed: one Repayment beside one
+-- withdrawal. On 2026-09-26, with glucose, the version 2 shapes pinned to
+-- exactly that cast (6 Accounts, 4 Transfers, 1 Repayment, 1 Withdrawal)
+-- gave the counterexample in about 11 minutes: the Repayment's cash leg
+-- posted before its money leg, then Funding. Version 3 is UNSAT at this
+-- scope, which contains that cast, in about 26 minutes.
 check FundedWithdrawalCanBePaid
-  for 3 but 6 Int, 8 Account, 5 Transfer, 2 Txn, 1..8 steps expect 1
+  for 3 but 6 Int, 6 Account, 4 Transfer, 2 Txn, 1..6 steps expect 0
 
 check EveryStartedTransactionConcludes
   for 3 but 6 Int, 8 Account, 5 Transfer, 2 Txn, 1..14 steps
@@ -564,9 +575,14 @@ run WithdrawalPaidOut {
   some w: Withdrawal | eventually w.xs = Completed
 } for 3 but 6 Int, 6 Account, 2 Transfer, 1 Txn, 1..8 steps expect 1
 
--- A hypothesis to review, not a known bug. A Draw's cash leg fails. Before
--- the rollback reverses its money leg, the Borrower funds a withdrawal out
--- of the cleared cash that leg delivered. The Draw ends RollbackFailed.
-run DrawRollbackCanFail {
-  some d: Draw | eventually d.xs = RollbackFailed
-} for 3 but 6 Int, 6 Account, 4 Transfer, 2 Txn, 1..10 steps expect 1
+-- With its legs side by side (version 2), a Draw could end RollbackFailed:
+-- its money leg posted and its cash leg failed, and the Borrower withdrew the
+-- cleared cash before the rollback could reverse it. With the cash leg
+-- first, the Borrower is only ever credited cash they can't spend yet, so
+-- reversing it can't be refused.
+assert DrawRollbackNeverFails {
+  always all d: Draw | d.xs != RollbackFailed
+}
+
+check DrawRollbackNeverFails
+  for 3 but 6 Int, 6 Account, 4 Transfer, 2 Txn, 1..8 steps expect 0

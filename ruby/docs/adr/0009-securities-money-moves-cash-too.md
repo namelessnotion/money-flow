@@ -1,6 +1,6 @@
 # 9. Every Securities money leg has a cash leg, and a Security holds real cash
 
-- **Status:** Accepted
+- **Status:** Accepted. Decision 4 is superseded by [ADR 0010](0010-an-entitys-cash-covers-its-cleared-cash-in-flight.md).
 - **Date:** 2026-09-23
 - **Scope:** `ruby/` context only. Go is unchanged: it treats factory names and versions as opaque, and
   the widest shape here is three legs, well under
@@ -73,6 +73,11 @@ own cleared cash". That was false.
    ([go ADR 0002](../../../go/docs/adr/0002-asynchronous-rollback-and-reversal-reconciliation.md)).
    Neither leg is staged, so that rollback finishes in one call.
 
+   > **Superseded on 2026-09-26 by [ADR 0010](0010-an-entitys-cash-covers-its-cleared-cash-in-flight.md).**
+   > "It would buy nothing" held for one Transaction on its own. With two in flight, a Repayment's cash leg
+   > could take the cash after a withdrawal's Funding had taken the cleared cash, and a funded withdrawal was
+   > refused. Each pair now runs in order, so the entity's cash always covers its cleared cash.
+
 5. **Every shape that moves money is bumped to version `2`:** `security_purchase`, `security_draw`,
    `security_repayment`, `security_disbursement`. `security_offering` stays at `1`, because it moves
    claims, not money. The ACH factories are unchanged.
@@ -100,10 +105,13 @@ own cleared cash". That was false.
 - An entity's `cash` never holds less than its cleared cash. Every movement either moves both by the same
   amount, credits `cash` first (a deposit), or debits cleared cash first (Funding). So a withdrawal whose
   Funding succeeds always has cash for its real leg.
+  > That was only true at rest, because the two legs of a pair ran side by side. ADR 0010 makes it true in
+  > flight too.
 - Each Securities Transaction runs one more Transfer: a purchase or Disbursement goes from 2 to 3, and a
   Draw or Repayment from 1 to 2. That is roughly 30–100% more Transfer sagas and events for Securities
   traffic, and the Postgres event store is the throughput ceiling. This is the price of the ledger being
-  right. It is also a reason to keep cash legs as siblings rather than chaining them.
+  right. It is also a reason to keep cash legs as siblings rather than chaining them. ADR 0010 chains them
+  anyway, and pays one extra dispatch hop.
 - A Security's four Wallets are not four piles of money. `security_cash` is the other side of Escrow +
   Repayment, so anything that sums "what a Security holds" must read one side only.
 - **No backfill.** A Security issued before this change has no `security_cash`. Any v2 shape for it raises

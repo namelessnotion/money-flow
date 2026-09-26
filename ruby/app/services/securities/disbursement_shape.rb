@@ -16,8 +16,10 @@ module Services
     # plus interest from the Security's repayment wallet into the Investor's
     # cleared cash, and its **cash leg** moves the real money behind it from
     # the Security's cash into the Investor's (ruby/docs/adr/0009) — without
-    # which an Investor could never withdraw what they earned. Both wait for
-    # the retirement leg.
+    # which an Investor could never withdraw what they earned. They run after
+    # the retirement leg, cash leg first: the Investor's cash arrives before
+    # their cleared cash, so their cash always covers it
+    # (ruby/docs/adr/0010).
     #
     # The exact mirror of a purchase, for the same reason: the claim is the
     # scarce, ledger-enforced thing. `investment` permits neither direction, so
@@ -27,7 +29,7 @@ module Services
     # leg Go's accept-time pre-flight can see, since the other is gated.
     #
     # **An interest-only Repayment retires nothing, so it has no retirement leg
-    # at all** and the payout leg and its cash leg become roots. The leg is
+    # at all**, and the cash leg becomes the root. The leg is
     # absent rather than zero, and that was once the difference between
     # survivable and not:
     # Go turned a zero-amount Transfer into a transport error the saga
@@ -40,8 +42,9 @@ module Services
       FACTORY_NAME = 'security_disbursement'
       # Bumped whenever the legs or their order change, so Go's record of each
       # Transaction says which shape ran.
-      # 1 paid cleared cash only, so an Investor could never withdraw it.
-      FACTORY_VERSION = '2'
+      # 1 paid cleared cash only, so an Investor could never withdraw it. 2 ran
+      # the cash leg beside the payout leg, unordered.
+      FACTORY_VERSION = '3'
 
       AccountType = Types::Enums::AccountType
 
@@ -95,9 +98,8 @@ module Services
           factory_version: FACTORY_VERSION,
           transfers: transfers(payout, principal_minor_units, retirement),
           # With no principal to retire there is nothing to wait for, so the
-          # payout leg and its cash leg are roots and get the pre-flight
-          # themselves.
-          transfer_dependency: retirement ? Leg.after(Leg.money_ids(payout_transfer_id), retirement) : {}
+          # cash leg is the root and gets the pre-flight itself.
+          transfer_dependency: Leg.chain([retirement, *Leg.entity_is_paid(payout_transfer_id)].compact)
         )
       end
 

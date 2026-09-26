@@ -42,12 +42,30 @@ RSpec.describe Services::Securities::Leg do
     end
   end
 
-  describe '.after' do
-    it 'gates every child on the one parent' do
-      dependency = described_class.after(%w[a b], 'root')
+  # An entity's cash must cover its cleared cash even while a Transaction is
+  # in flight, or a withdrawal it funds meanwhile can't be paid
+  # (ruby/docs/adr/0010, namelessnotion/money_flow#7).
+  describe '.entity_pays' do
+    it "moves the entity's cleared cash out before its cash" do
+      expect(described_class.entity_pays('money')).to eq(['money', described_class.cash_id_for('money')])
+    end
+  end
 
-      expect(dependency.keys).to eq(%w[a b])
-      expect(dependency.values.map(&:transfer_id)).to eq([['root'], ['root']])
+  describe '.entity_is_paid' do
+    it 'moves cash in before cleared cash' do
+      expect(described_class.entity_is_paid('money')).to eq([described_class.cash_id_for('money'), 'money'])
+    end
+  end
+
+  describe '.chain' do
+    it 'makes each leg wait for the one before it, leaving the first a root' do
+      dependency = described_class.chain(%w[a b c])
+
+      expect(dependency.transform_values(&:transfer_id)).to eq('b' => ['a'], 'c' => ['b'])
+    end
+
+    it 'gates nothing for a single leg' do
+      expect(described_class.chain(%w[a])).to be_empty
     end
   end
 end

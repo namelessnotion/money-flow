@@ -163,12 +163,12 @@ RSpec.describe Services::Securities do
       disbursement_requests = sent.select { |req| req.factory_name == 'security_disbursement' }
 
       disbursement_requests.each do |req|
-        # The gated legs pay the investor, on both sides; the one they wait on
-        # retires the claim.
-        paid_from = req.transfer_dependency.map do |gated, parents|
-          expect(req.transfers[parents.transfer_id.first].to_wallet_id).to eq(control_wallet(issuer))
-          req.transfers[gated].from_wallet_id
-        end
+        # The one root retires the claim; the legs paying the investor, on
+        # both sides, all wait behind it.
+        roots = req.transfers.keys - req.transfer_dependency.keys
+        expect(roots.map { |id| req.transfers[id].to_wallet_id }).to eq([control_wallet(issuer)])
+
+        paid_from = req.transfer_dependency.keys.map { |id| req.transfers[id].from_wallet_id }
         expect(paid_from).to contain_exactly(repayment_wallet(security), cash_wallet(security))
       end
     end

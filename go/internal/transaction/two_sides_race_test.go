@@ -13,17 +13,17 @@ import (
 	"github.com/namelessnotion/money_flow/go/internal/wallet"
 )
 
-// These tests replay, step by step, the interleaving spec/alloy/ledger.als
-// found against FundedWithdrawalCanBePaid: a Borrower's Repayment and ACH
+// These tests replay, step by step, the race spec/alloy/ledger.als found
+// against FundedWithdrawalCanBePaid: a Borrower's Repayment and ACH
 // withdrawal, started together against one dollar that is both cleared and
 // cash. Each Transaction debits the two sides with separate legs (ruby ADR
-// 0009, ADR 0004), and nothing orders one Transaction's cash leg against
-// the other's, so each can take one side of the same money.
+// 0009, ADR 0004). When the Repayment ran its cash leg beside its money leg,
+// it could take the cash after the withdrawal's Funding had taken the cleared
+// cash, and a funded withdrawal was refused (namelessnotion/money_flow#7).
 //
-// The first pins today's behavior, which breaks ruby/CONTEXT.md's promise
-// that a withdrawal that is funded can always be paid
-// (namelessnotion/money_flow#7). When that is fixed, its assertions are the
-// ones to flip.
+// Both shapes now debit the cleared cash first (ruby ADR 0010), so whichever
+// Transaction takes the cleared cash has the cash behind it. These tests run
+// both orders the Borrower's cleared cash can be taken in.
 
 // twoSidesWorld is one Borrower's money on both sides, a Security's Repayment
 // wallets, and the bank boundary: every Wallet the two shapes touch.
@@ -61,14 +61,14 @@ func newTwoSidesWorld(t *testing.T, amount uint64) *twoSidesWorld {
 		w.withdrawalReal, w.withdrawalShadow, usd(amount))
 	w.start(t, w.withdrawalID, transfers, deps)
 
-	// security_repayment v2 (ruby/app/services/securities/repayment_shape.rb):
-	// a money leg and its cash leg, both roots.
+	// security_repayment v3 (ruby/app/services/securities/repayment_shape.rb):
+	// a money leg, and its cash leg after it.
 	w.repaymentID = testutil.ID("repayment")
 	w.repaymentMoney, w.repaymentCash = testutil.ID("repayment-money"), testutil.ID("repayment-cash")
 	w.start(t, w.repaymentID, map[string]*pb.Transfer{
 		w.repaymentMoney: {Id: w.repaymentMoney, Amount: usd(amount), FromWalletId: w.cleared, ToWalletId: w.securityRepayment},
 		w.repaymentCash:  {Id: w.repaymentCash, Amount: usd(amount), FromWalletId: w.cash, ToWalletId: w.securityCash},
-	}, nil)
+	}, map[string]*pb.TransferIdList{w.repaymentCash: {TransferId: []string{w.repaymentMoney}}})
 	return w
 }
 
@@ -151,37 +151,35 @@ func (w *twoSidesWorld) posted(t *testing.T, walletID string) int64 {
 	return total
 }
 
-// The Repayment's cash leg commits first, then the withdrawal's Funding. The
-// withdrawal is funded, yet its real leg finds `cash` empty and is refused,
-// so the withdrawal rolls back. The Repayment then completes on the cleared
-// cash that rollback returned. No money is lost, but a funded withdrawal
-// was not paid.
-func TestTwoSidesRace_AFundedWithdrawalIsRefusedWhenARepaymentTakesTheCashFirst(t *testing.T) {
+// The Repayment takes the cleared cash first. The withdrawal's Funding is
+// then refused, so the withdrawal rolls back without ever having been funded,
+// and the Repayment's cash leg finds the cash its money leg left behind. When
+// the cash leg ran beside the money leg, it could take the cash first, and
+// a withdrawal funded meanwhile was refused (namelessnotion/money_flow#7).
+func TestTwoSidesRace_ARepaymentThatTakesTheClearedCashFirstLeavesTheWithdrawalUnfunded(t *testing.T) {
 	t.Parallel()
 	const amount = 10000
 	w := newTwoSidesWorld(t, amount)
 
 	w.dispatch(t, w.repaymentID)
-	w.commit(t, w.repaymentCash) // cash: amount -> 0, cleared untouched
-
-	w.dispatch(t, w.withdrawalID)
-	w.commit(t, w.withdrawalShadow) // Funding: cleared amount -> 0
+	if got := w.outcome(t, w.repaymentCash); got != transfer.OutcomeNotFound {
+		t.Fatalf("repayment cash leg outcome = %v, want not requested until its money leg commits", got)
+	}
+	w.commit(t, w.repaymentMoney) // cleared: amount -> 0, cash untouched
 
 	driveSaga(t, w.txns, w.xfers, w.store, w.withdrawalID)
-	if got := w.outcome(t, w.withdrawalReal); got != transfer.OutcomeRejected {
-		t.Errorf("withdrawal real leg outcome = %v, want rejected: `cash` was taken by the Repayment", got)
+	if got := w.outcome(t, w.withdrawalShadow); got != transfer.OutcomeRejected {
+		t.Errorf("withdrawal Funding outcome = %v, want rejected: the Repayment took the cleared cash", got)
 	}
 	if got := w.state(t, w.withdrawalID); got != stateRolledBack {
-		t.Fatalf("withdrawal = %v, want rolled_back although its Funding committed", got)
+		t.Fatalf("withdrawal = %v, want rolled_back, never funded", got)
 	}
 
 	driveSaga(t, w.txns, w.xfers, w.store, w.repaymentID)
 	if got := w.state(t, w.repaymentID); got != stateCompleted {
-		t.Fatalf("repayment = %v, want completed on the cleared cash the rollback returned", got)
+		t.Fatalf("repayment = %v, want completed", got)
 	}
 
-	// Nothing was created or lost: the Repayment holds the dollar on both
-	// sides, and the Borrower has none left on either.
 	for name, tc := range map[string]struct {
 		walletID string
 		want     int64
@@ -197,18 +195,19 @@ func TestTwoSidesRace_AFundedWithdrawalIsRefusedWhenARepaymentTakesTheCashFirst(
 	}
 }
 
-// The Repayment's legs are both accepted before the withdrawal's Funding
-// drains the cleared cash. When the money leg is prepared, its re-selection
-// finds nothing, so the leg fails and the Repayment rolls back. Its cash leg
-// was never prepared, so it's cancelled with nothing to reverse. Before
-// namelessnotion/money_flow#6 the prepare returned an error on every retry
-// instead, and the orchestrator halted on it (go ADR 0003).
+// The withdrawal takes the cleared cash first, after the Repayment's money
+// leg has been accepted. When that leg is prepared, its re-selection finds
+// nothing, so the leg fails and the Repayment rolls back. Its cash leg is
+// never requested, and the withdrawal's real leg finds the cash it was
+// funded for. Before namelessnotion/money_flow#6 the prepare returned an
+// error on every retry instead, and the orchestrator halted on it (go ADR
+// 0003).
 func TestTwoSidesRace_ALegAcceptedBeforeItsWalletIsDrainedFailsAndRollsBack(t *testing.T) {
 	t.Parallel()
 	const amount = 10000
 	w := newTwoSidesWorld(t, amount)
 
-	w.dispatch(t, w.repaymentID) // both Repayment legs Accepted, nothing moved
+	w.dispatch(t, w.repaymentID) // the Repayment's money leg Accepted, nothing moved
 
 	w.dispatch(t, w.withdrawalID)
 	w.commit(t, w.withdrawalShadow) // Funding: cleared amount -> 0
@@ -224,8 +223,13 @@ func TestTwoSidesRace_ALegAcceptedBeforeItsWalletIsDrainedFailsAndRollsBack(t *t
 	if got := w.state(t, w.repaymentID); got != stateRolledBack {
 		t.Fatalf("repayment = %v, want rolled_back", got)
 	}
-	if got := w.outcome(t, w.repaymentCash); got != transfer.OutcomeCancelled {
-		t.Errorf("repayment cash leg outcome = %v, want cancelled before it moved anything", got)
+	if got := w.outcome(t, w.repaymentCash); got != transfer.OutcomeNotFound {
+		t.Errorf("repayment cash leg outcome = %v, want never requested", got)
+	}
+
+	driveSaga(t, w.txns, w.xfers, w.store, w.withdrawalID)
+	if got := w.outcome(t, w.withdrawalReal); got != transfer.OutcomeStaged {
+		t.Errorf("withdrawal real leg outcome = %v, want staged: a funded withdrawal is paid", got)
 	}
 
 	// Only the withdrawal's Funding moved money. The Borrower's cash is still

@@ -18,17 +18,19 @@ module Services
     # somewhere else, such as a platform `gain` account, and that is a later
     # refinement.
     #
-    # The Draw's mirror: both roots and non-minting, so an underfunded Borrower
-    # is refused at accept time before anything is written. The Borrower gets
-    # the money the ordinary way — an ACH deposit that has cleared, which
-    # credits both sides.
+    # The money leg is the root, and the cash leg follows it: the Borrower's
+    # cleared cash leaves before their cash, so their cash always covers it
+    # (ruby/docs/adr/0010). Neither mints, so an underfunded Borrower is
+    # refused at accept time before anything is written. The Borrower gets
+    # the money the ordinary way: a cleared ACH deposit, which credits both
+    # sides.
     class RepaymentShape < T::Struct
       FACTORY_NAME = 'security_repayment'
       # Bumped whenever the legs or their order change, so Go's record of each
       # Transaction says which shape ran.
       # 1 moved cleared cash only, leaving the Borrower's `cash` holding money
-      # they had repaid.
-      FACTORY_VERSION = '2'
+      # they had repaid. 2 ran the cash leg beside the money leg, unordered.
+      FACTORY_VERSION = '3'
 
       AccountType = Types::Enums::AccountType
 
@@ -54,7 +56,8 @@ module Services
           factory_name: FACTORY_NAME,
           factory_version: FACTORY_VERSION,
           transfers: Leg.money(id: transfer_id, amount_minor_units: amount_minor_units,
-                               from: borrower_money, to: repayment_money)
+                               from: borrower_money, to: repayment_money),
+          transfer_dependency: Leg.chain(Leg.entity_pays(transfer_id))
         )
       end
     end
