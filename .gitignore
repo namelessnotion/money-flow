@@ -42,3 +42,6 @@ states/
 *_TTrace_*.tla
 *_TTrace_*.bin
 /go/.tla-traces/
+
+# Alloy, fetched at a pinned version by `make alloy-check` (see spec/tools/README.md).
+spec/tools/org.alloytools.alloy.dist.jar

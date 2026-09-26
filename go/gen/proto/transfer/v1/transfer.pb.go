@@ -1255,10 +1255,19 @@ func (x *CompleteCompensatingFailedTransfer) GetId() string {
 	return ""
 }
 
+// TransferFailed means the ledger couldn't cover the Transfer, and it will
+// never move money. That's reached one of two ways:
+//   - from Prepared, Staged or Pending, once TigerBeetle rejects a batch we
+//     submitted and the Transfer has been compensated (above);
+//   - from Accepted, when prepare selects the source Tokens again and the
+//     wallet no longer holds the amount, because a concurrent Transaction spent
+//     it between accept and prepare. Nothing reached TigerBeetle, so there is
+//     nothing to compensate.
 type TransferFailed struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Reason        string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"` // what TigerBeetle refused, e.g. "tigerbeetle rejected commit leg 0: ..."
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Id    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// why, e.g. "tigerbeetle rejected commit leg 0: ..." or "prepare: wallet ... has insufficient Token capacity: ..."
+	Reason        string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

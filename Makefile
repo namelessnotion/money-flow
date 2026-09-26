@@ -1,6 +1,6 @@
 .PHONY: up down restart migrate ssl proto cdc-up cdc-down orchestrator-up orchestrator-down orchestrator-logs \
 	consumer-up consumer-down consumer-logs events resume resume-open jobs-up jobs-down jobs-logs clear-ach-now submit-ach-now \
-	disburse-now simulate simulate-lending tla-check tla-trace
+	disburse-now simulate simulate-lending tla-check tla-trace alloy-check
 
 up:
 	docker compose up -d
@@ -191,3 +191,22 @@ tla-trace:
 	docker compose exec -T -e TLA_TRACE_DIR=/app/.tla-traces -e TLA_TRACE_SEED=$(TLA_TRACE_SEED) \
 		go go test ./internal/transfer -run '^TestTLATrace$$' -count=1 -v
 	TLA2TOOLS=$(TLA2TOOLS) spec/trace/validate.sh spec/trace/fixtures go/.tla-traces
+
+# Alloy, fetched from a pinned release and checked against its sha256 (see
+# spec/tools/README.md). alloy-check needs Java on the host.
+ALLOY_VERSION := 6.2.0
+ALLOY_SHA256 := 6b8c1cb5bc93bedfc7c61435c4e1ab6e688a242dc702a394628d9a9801edb78d
+ALLOY := $(CURDIR)/spec/tools/org.alloytools.alloy.dist.jar
+
+$(ALLOY):
+	curl -fsSL -o $@.tmp \
+		https://github.com/AlloyTools/org.alloytools.alloy/releases/download/v$(ALLOY_VERSION)/org.alloytools.alloy.dist.jar
+	echo "$(ALLOY_SHA256)  $@.tmp" | shasum -a 256 -c -
+	mv $@.tmp $@
+
+# Checks the ledger's money model (spec/alloy/ledger.als). Every command
+# carries an `expect`, and exec exits non-zero when a result contradicts it.
+# -n drops instances whose Int arithmetic overflows.
+alloy-check: $(ALLOY)
+	cd spec/alloy && java --enable-native-access=ALL-UNNAMED -jar $(ALLOY) \
+		exec -n -f -q -s glucose -t none -o "$$(mktemp -d)" -c '*' ledger.als
