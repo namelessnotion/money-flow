@@ -12,6 +12,8 @@ export const ALL_KINDS: readonly MovementKind[] = [
   'DISBURSEMENT_PRINCIPAL',
   'DISBURSEMENT_INTEREST',
   'WITHDRAWAL',
+  'DEPOSIT_RETURN',
+  'WITHDRAWAL_RETURN',
 ]
 
 // Which way money is going, which is what an edge is coloured by: out to the
@@ -23,6 +25,8 @@ export type Flow = 'out' | 'back' | 'interest' | 'bank'
 const FLOWS: Record<MovementKind, Flow> = {
   DEPOSIT: 'bank',
   WITHDRAWAL: 'bank',
+  DEPOSIT_RETURN: 'bank',
+  WITHDRAWAL_RETURN: 'bank',
   SUBSCRIPTION: 'out',
   DRAW: 'out',
   REPAYMENT: 'back',

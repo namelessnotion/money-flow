@@ -12,9 +12,13 @@ import {
   type InitiateAchMutationVariables,
   type InitiateAchWithdrawalMutationResult,
 } from '../graphql/ach'
-import { dollarsToCents } from '../lib/money'
+import { dollarsToCents, formatMinorUnits } from '../lib/money'
 
-const props = defineProps<{ entityId: string }>()
+// owedMinorUnits is what the entity owes for late ACH deposit returns. While
+// it owes anything the API refuses a withdrawal (ruby/docs/adr/0011); the
+// button says so up front rather than waiting for the error.
+const props = withDefaults(defineProps<{ entityId: string; owedMinorUnits?: string }>(), { owedMinorUnits: '0' })
+const owes = computed(() => BigInt(props.owedMinorUnits) > 0n)
 
 const amount = ref('')
 const cents = computed(() => dollarsToCents(amount.value))
@@ -81,13 +85,17 @@ async function initiate(direction: AchDirection): Promise<void> {
       <button
         type="button"
         data-test="withdrawal"
-        :disabled="loading || cents === null"
+        :disabled="loading || cents === null || owes"
         class="shrink-0 rounded-lg border border-blue-700 px-4 py-2 font-bold text-blue-700 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
         @click="initiate('WITHDRAWAL')"
       >
         ACH Withdrawal
       </button>
     </form>
+    <p v-if="owes" data-test="owes" class="mt-2 text-sm text-rose-700">
+      Owes {{ formatMinorUnits(props.owedMinorUnits, 'USD') }} for a late ACH return. Withdrawals wait until it is
+      recovered from cleared cash; deposits still help pay it.
+    </p>
     <p v-if="showInvalid" class="mt-2 text-sm text-slate-500">
       Enter a positive amount with at most two decimal places.
     </p>

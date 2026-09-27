@@ -87,4 +87,38 @@ describe('AchTransactionView', () => {
 
     expect(wrapper.find('[data-test=clear]').exists()).toBe(false)
   })
+
+  it('offers a late return once the entry has settled and completed', async () => {
+    const wrapper = await mountView(completedDeposit())
+
+    await vi.waitFor(() => expect(wrapper.find('h1').exists()).toBe(true))
+
+    expect(wrapper.text()).toContain('Simulate a late return')
+    expect(wrapper.find('[data-test=return]').exists()).toBe(true)
+    expect(wrapper.find('[data-test=settle]').exists()).toBe(false)
+  })
+
+  it('shows the return notice and the late-return step, and offers no second return', async () => {
+    const wrapper = await mountView(
+      completedDeposit({
+        returnReason: 'R10 customer advises not authorized',
+        returnedAt: '2026-09-27T12:00:00Z',
+        lateReturnState: 'COMPLETED',
+        steps: [
+          { name: 'INITIATION', status: 'DONE' },
+          { name: 'SUBMISSION', status: 'DONE' },
+          { name: 'SETTLEMENT', status: 'DONE' },
+          { name: 'COMPLETION', status: 'DONE' },
+          { name: 'CLEARING', status: 'SKIPPED' },
+          { name: 'LATE_RETURN', status: 'DONE' },
+        ],
+      }),
+    )
+
+    await vi.waitFor(() => expect(wrapper.find('h1').exists()).toBe(true))
+
+    expect(wrapper.get('[data-test=return-notice]').text()).toContain('R10 customer advises not authorized')
+    expect(wrapper.text()).toContain('Returned late')
+    expect(wrapper.find('[data-test=return]').exists()).toBe(false)
+  })
 })

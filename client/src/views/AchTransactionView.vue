@@ -31,6 +31,9 @@ function stepStatus(name: string) {
 
 const awaitingProvider = computed(() => stepStatus('SUBMISSION') === 'DONE' && stepStatus('SETTLEMENT') === 'WAITING')
 
+// A completed entry can still come back from the network, until a notice has.
+const awaitingLateReturn = computed(() => stepStatus('COMPLETION') === 'DONE' && !transaction.value?.returnReason)
+
 // A completed deposit waits for the sweep to clear it; until a clearing is
 // under way, it can be cleared early from here.
 const awaitingClearing = computed(
@@ -77,6 +80,15 @@ const awaitingClearing = computed(
       <dd class="truncate font-mono text-slate-900">{{ transaction.id }}</dd>
       <dt class="text-slate-500">Provider reference</dt>
       <dd class="truncate font-mono text-slate-900">{{ transaction.providerReference ?? '—' }}</dd>
+      <template v-if="transaction.returnReason">
+        <dt class="text-slate-500">Return notice</dt>
+        <dd data-test="return-notice" class="text-slate-900">
+          {{ transaction.returnReason }}
+          <span v-if="transaction.returnedAt" class="text-slate-500">
+            · {{ formatDateTime(transaction.returnedAt) }}
+          </span>
+        </dd>
+      </template>
     </dl>
 
     <p class="mt-6 text-xs text-slate-500">
@@ -84,6 +96,7 @@ const awaitingClearing = computed(
     </p>
 
     <ProviderNotices v-if="awaitingProvider" :ach-transaction-id="transaction.id" />
+    <ProviderNotices v-else-if="awaitingLateReturn" :ach-transaction-id="transaction.id" late />
     <ClearingNotice v-if="awaitingClearing" :ach-transaction-id="transaction.id" />
   </template>
 </template>

@@ -32,7 +32,7 @@ const entity = computed(() => result.value?.entity)
     </header>
 
     <AccountList :accounts="entity.accounts" />
-    <InitiateAchForm :entity-id="entity.id" />
+    <InitiateAchForm :owed-minor-units="entity.owedMinorUnits" :entity-id="entity.id" />
     <AchTransactionList :entity-id="entity.id" />
   </template>
 </template>
