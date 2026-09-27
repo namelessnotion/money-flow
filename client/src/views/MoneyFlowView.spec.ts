@@ -31,10 +31,14 @@ const moneyFlow = {
   })),
 }
 
-// jsdom cannot draw a canvas; the graph is stood in for by its props.
+// jsdom cannot draw a canvas; the graph is stood in for by its props and the
+// methods it exposes to the view.
 const GraphStub = defineComponent({
   name: 'MoneyFlowGraph',
   props: ['nodes', 'edges', 'positions', 'largestMinorUnits', 'selected'],
+  setup(_props, { expose }) {
+    expose({ fit: () => {} })
+  },
   template: '<div data-testid="graph-stub" />',
 })
 
