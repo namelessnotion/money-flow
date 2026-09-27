@@ -7,8 +7,8 @@ RSpec.describe Types::Enums::AccountType do
     # The T::Enum default would give "debitcard"/"unclearedcash", and these
     # strings are persisted in accounts.type and sent as a Wallet's name.
     expect(described_class.values.map(&:serialize)).to contain_exactly(
-      'bank', 'bank_control', 'debit_card', 'uncleared_cash', 'cleared_cash', 'cash', 'gain', 'loss',
-      'investment', 'issuer_control', 'security_supply', 'security_escrow', 'security_repayment',
+      'bank', 'bank_control', 'debit_card', 'uncleared_cash', 'cleared_cash', 'cash', 'receivable', 'gain',
+      'loss', 'investment', 'issuer_control', 'security_supply', 'security_escrow', 'security_repayment',
       'security_cash'
     )
   end
@@ -29,6 +29,14 @@ RSpec.describe Types::Enums::AccountType do
       expect(described_class::IssuerControl.allows).to eq(:ALLOWS_ONRAMP_AND_OFFRAMP)
     end
 
+    # Also not a boundary type. A debt return mints what the entity owes out of
+    # it, which needs onramp, and a Recovery credits it with fresh Tokens,
+    # which ALLOWS_ONRAMP's credits_must_not_exceed_debits would refuse
+    # (ruby/docs/adr/0011).
+    it 'lets a Receivable run negative, which is what the entity owes' do
+      expect(described_class::Receivable.allows).to eq(:ALLOWS_ONRAMP_AND_OFFRAMP)
+    end
+
     it "caps a Security's supply by permitting neither direction on it" do
       # ALLOWS_NONE gives the Token debits_must_not_exceed_credits, which is
       # what refuses an oversubscription once the minted supply is exhausted.
@@ -46,7 +54,7 @@ RSpec.describe Types::Enums::AccountType do
     it 'permits neither direction for everything else' do
       internal = described_class.values - [
         described_class::Bank, described_class::BankControl, described_class::DebitCard,
-        described_class::IssuerControl
+        described_class::IssuerControl, described_class::Receivable
       ]
       expect(internal.map(&:allows).uniq).to eq([:ALLOWS_NONE])
     end
@@ -79,6 +87,12 @@ RSpec.describe Types::Enums::AccountType do
 
       Types::Enums::EntityRole.each_value do |role|
         expect(described_class.for_role(role)).to include(*ach)
+      end
+    end
+
+    it 'gives every role a Receivable, since any entity can owe a late return' do
+      Types::Enums::EntityRole.each_value do |role|
+        expect(described_class.for_role(role)).to include(described_class::Receivable)
       end
     end
 

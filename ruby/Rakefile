@@ -31,6 +31,18 @@ namespace :graphql do
   end
 end
 
+namespace :accounts do
+  desc 'Open a receivable for every entity onboarded without one (ruby/docs/adr/0011)'
+  task :open_receivables do
+    require_relative 'lib/environment'
+
+    result = Services::OpenReceivables.new.call
+    puts "opened #{result.opened.size} receivable(s)"
+    result.failed.each { |entity_id, failure| warn "entity #{entity_id}: #{failure}" }
+    abort 'some entities still have no receivable' unless result.failed.empty?
+  end
+end
+
 namespace :db do
   desc 'Create a new migration file, e.g. rake db:new_migration[create_wallets]'
   task :new_migration, [:name] do |_t, args|
