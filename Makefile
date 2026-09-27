@@ -207,14 +207,22 @@ $(ALLOY):
 # Checks the ledger's money model (spec/alloy/ledger.als). Each command it
 # runs carries an `expect`, and exec exits non-zero when a result contradicts
 # it. -n drops instances whose Int arithmetic overflows. Expect well over an
-# hour: the proofs and the late-return counterexample each take 10 to 30
+# hour: the proofs and the late-return counterexample each take up to 30
 # minutes. SidesAgreeAtRest and EveryStartedTransactionConcludes aren't listed:
 # they haven't finished at their scopes yet, so they have no `expect`.
+#
+# Every command is cut off after ALLOY_TIMEOUT, and a cut-off command fails
+# the target (timeout exits 124). An unbounded run once pegged the host for
+# hours and starved the compose stack beside it.
+ALLOY_TIMEOUT ?= 45m
 ALLOY_COMMANDS := FundedWithdrawalCanBePaid DrawRollbackNeverFails UnclearedMoneyStaysBacked \
-	LateReturnIsRecoverable DepositSettlesThenClears WithdrawalPaidOut
+	LateReturnIsRecoverable DepositSettlesThenClears WithdrawalPaidOut \
+	LateReturnIsAlwaysFunded ReceivableNeverPositive NetworkMoneyIsRecorded \
+	FundedWithdrawalCanBePaidBesideRecovery UnclearedMoneyStaysBackedBesideClawback \
+	WithdrawalReturnRecorded DepositClawedBack DebtRecovered
 
 alloy-check: $(ALLOY)
 	cd spec/alloy && for command in $(ALLOY_COMMANDS); do \
-		java --enable-native-access=ALL-UNNAMED -jar $(ALLOY) \
+		timeout $(ALLOY_TIMEOUT) java --enable-native-access=ALL-UNNAMED -jar $(ALLOY) \
 			exec -n -f -q -s glucose -t none -o "$$(mktemp -d)" -c "$$command" ledger.als || exit 1; \
 	done

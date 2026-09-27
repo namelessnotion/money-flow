@@ -1,6 +1,6 @@
 # 11. A late return is recorded, and what the depositor can't cover is owed
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-27
 - **Scope:** `ruby/` context. Go is unchanged: it treats factory names as opaque and runs whatever DAG a shape
   sends. Addresses namelessnotion/money_flow#8, except its exposure policy, which is left to a follow-up.
@@ -119,5 +119,9 @@ ADR 0003 said any follow-on that reacts to clearings must revisit its terminatio
 - A withdrawal already in flight when a notice arrives is paid. That is exposure too, for the same follow-up.
 - A recorded Clearing that Go refuses leaves the money in uncleared cash, where Recovery can't reach it. That
   needs a person.
+- `spec/alloy/ledger.als` checks the design at one entity's cast. `LateReturnIsAlwaysFunded`,
+  `ReceivableNeverPositive`, `NetworkMoneyIsRecorded`, `FundedWithdrawalCanBePaidBesideRecovery` and
+  `UnclearedMoneyStaysBackedBesideClawback` all hold. Dropping the clawback's rule (decision 3), or the one
+  Recovery in flight per entity (decision 5), makes the first or the second fail.
 - Entities onboarded before this change have no `receivable` account until a backfill opens one. Until then,
   their late deposit returns fail with `MissingAccount`, loudly and retryably.
