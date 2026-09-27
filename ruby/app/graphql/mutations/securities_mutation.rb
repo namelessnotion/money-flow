@@ -17,7 +17,7 @@ module Mutations
        Services::Securities::InvalidAmount, Services::Securities::MissingAccount,
        Services::Securities::Oversubscribed, Services::Securities::NotDrawable,
        Services::Securities::NotRepayable, Services::Securities::WrongRole,
-       Services::Securities::AllocationError].freeze,
+       Services::Securities::AllocationError, Services::Ach::Owes].freeze,
       T::Array[T.class_of(StandardError)]
     )
 

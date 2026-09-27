@@ -3,6 +3,8 @@
 
 require 'securerandom'
 require_relative '../base_service'
+require_relative '../ach/errors'
+require_relative '../ach/owed'
 require_relative 'errors'
 require_relative 'go_gateway'
 require_relative 'positions'
@@ -47,6 +49,7 @@ module Services
       def call(security_id:, investor_entity_id:, amount_minor_units:)
         security = find!(security_id)
         investor = investor!(investor_entity_id)
+        refuse_while_owing!(investor)
         check_offering!(security, amount_minor_units)
 
         shape = plan(security, investor)
@@ -70,6 +73,15 @@ module Services
         return entity if entity.role == role.serialize
 
         raise WrongRole, "entity #{investor_entity_id} is a #{entity.role}, not an investor"
+      end
+
+      # An Investor who owes for a late ACH deposit return can't move cleared
+      # cash into escrow, where Recovery can't reach it (ruby/docs/adr/0011,
+      # decision 6).
+      sig { params(investor: Models::Entity).void }
+      def refuse_while_owing!(investor)
+        owed = Ach::Owed.for(investor.id).for_gate
+        raise Ach::Owes.refusing(investor.id, owed, 'Subscription') if owed.positive?
       end
 
       # Advisory, all of it. The read model lags the ledger, so a purchase this

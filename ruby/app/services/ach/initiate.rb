@@ -4,6 +4,7 @@
 require 'securerandom'
 require_relative '../base_service'
 require_relative 'go_gateway'
+require_relative 'owed'
 require_relative 'transaction_shape'
 
 module Services
@@ -75,9 +76,22 @@ module Services
       def plan(request)
         raise NotFound, "no entity #{request.entity_id}" if Models::Entity[request.entity_id].nil?
 
+        refuse_while_owing!(request)
+
         accounts = Models::Account.where(entity_id: request.entity_id).all
         TransactionShape.for(direction: request.direction, accounts: accounts,
                              real_transfer_id: SecureRandom.uuid_v7, shadow_transfer_id: SecureRandom.uuid_v7)
+      end
+
+      # An entity that owes for a late deposit return can't withdraw until
+      # Recovery has collected it (ruby/docs/adr/0011, decision 6). A deposit
+      # is still welcome: it is how the debt gets paid.
+      sig { params(request: InitiateAchRequest).void }
+      def refuse_while_owing!(request)
+        return unless request.direction == Types::Enums::AchDirection::Withdrawal
+
+        owed = Owed.for(request.entity_id).for_gate
+        raise Owes.refusing(request.entity_id, owed, 'withdrawal') if owed.positive?
       end
 
       sig { params(request: InitiateAchRequest, shape: TransactionShape).returns(Models::AchTransaction) }

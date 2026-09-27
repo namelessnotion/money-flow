@@ -43,6 +43,18 @@ finish_ach_returns:
   queue: ach
   description: Cancel or record a late return for every ACH return notice not yet seen through
 
+# Collects what entities owe from their cleared cash, one Recovery per entity
+# at a time (Services::Ach::RecoverDue, ruby/docs/adr/0011). Every five minutes
+# and every day: a deposit that clears, or a Draw or Disbursement that pays the
+# entity, is collected before the entity can do much else with it, and while
+# it owes it can't withdraw or subscribe anyway. Idempotent, so a missed or
+# failed run is picked up by the next.
+recover_receivables:
+  cron: "*/5 * * * * America/New_York"
+  class: Jobs::RecoverReceivables
+  queue: ach
+  description: Originate Recovery Transactions collecting what entities owe from their cleared cash
+
 # Pays every completed Repayment out to the holders of its Security, one
 # Transaction per holder (ruby/docs/adr/0007). Every five minutes rather than
 # hourly: unlike ACH clearing, nothing here waits on a calendar, so the only

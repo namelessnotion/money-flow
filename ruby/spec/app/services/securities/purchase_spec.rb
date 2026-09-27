@@ -23,6 +23,17 @@ RSpec.describe Services::Securities::Purchase do
     request
   end
 
+  # Escrowed money is out of Recovery's reach (ruby/docs/adr/0011).
+  it 'refuses an Investor who owes the platform, before recording or sending anything' do
+    stub_go_securities_happy_path
+    create(:ach_transaction, entity: world.investor, amount_minor_units: 5_000, returned_at: Time.now,
+                             return_reason: 'R10', clearing_transaction_id: SecureRandom.uuid_v7)
+
+    expect { buy }.to raise_error(Services::Ach::Owes)
+    expect(Models::Subscription.where(investor_entity_id: world.investor.id).count).to eq(0)
+    expect(transaction_client).not_to have_received(:start_initializing_transaction)
+  end
+
   context 'when Go accepts it' do
     before { stub_go_securities_happy_path }
 
