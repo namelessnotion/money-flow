@@ -44,7 +44,11 @@ const FILTERS: { flow: Flow; label: string; kinds: MovementKind[] }[] = [
   { flow: 'out', label: 'Investing', kinds: ['SUBSCRIPTION', 'DRAW'] },
   { flow: 'back', label: 'Repaying', kinds: ['REPAYMENT', 'DISBURSEMENT_PRINCIPAL'] },
   { flow: 'interest', label: 'Interest', kinds: ['DISBURSEMENT_INTEREST'] },
-  { flow: 'bank', label: 'Bank deposits & withdrawals', kinds: ['DEPOSIT', 'WITHDRAWAL'] },
+  {
+    flow: 'bank',
+    label: 'Bank deposits & withdrawals',
+    kinds: ['DEPOSIT', 'WITHDRAWAL', 'DEPOSIT_RETURN', 'WITHDRAWAL_RETURN'],
+  },
 ]
 const shownFlows = ref<Set<Flow>>(new Set(['out', 'back', 'interest']))
 const kinds = computed(() => new Set(FILTERS.filter((f) => shownFlows.value.has(f.flow)).flatMap((f) => f.kinds)))
@@ -130,6 +134,8 @@ const hovered = ref<GraphEdge | null>(null)
 const KIND_NAMES: Record<MovementKind, string> = {
   DEPOSIT: 'Deposit',
   WITHDRAWAL: 'Withdrawal',
+  DEPOSIT_RETURN: 'Deposit returned',
+  WITHDRAWAL_RETURN: 'Withdrawal returned',
   SUBSCRIPTION: 'Subscription',
   DRAW: 'Draw',
   REPAYMENT: 'Repayment',

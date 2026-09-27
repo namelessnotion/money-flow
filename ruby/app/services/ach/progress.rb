@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 # typed: strict
 
+require_relative 'progress/snapshot'
+
 module Services
   module Ach
     # How far an ACH Transaction has got through its lifecycle, told as the
@@ -12,7 +14,9 @@ module Services
     # The first step that failed ends the walk: every step after it is skipped,
     # because a returned or rolled-back Transaction never reaches them. A
     # Transaction being rolled back gets one more step, the rollback itself,
-    # which can wait days on a reversal (go/docs/adr/0002).
+    # which can wait days on a reversal (go/docs/adr/0002). One returned after
+    # it completed gets a late-return step instead, and a deposit clawed back
+    # that way never clears (ruby/docs/adr/0011).
     module Progress
       # A lifecycle step, in the order a Transaction reaches them.
       class Name < T::Enum
@@ -24,6 +28,7 @@ module Services
           Completion = new('completion') # the shadow leg ran; the Transaction completed
           Clearing = new('clearing')     # the deposit's money moved to cleared cash
           Rollback = new('rollback')     # what had moved was put back
+          LateReturn = new('late_return') # a return after completion was recorded in the ledger
         end
       end
 
@@ -46,27 +51,11 @@ module Services
       TransactionState = Types::Enums::TransactionState
       TransferState = Types::Enums::TransferState
 
-      # What Ruby last saw of an ACH Transaction: its record and the
-      # projections of the Transaction, its two legs and its clearing. Each
-      # state is nil until the projection has seen that aggregate.
-      class Snapshot < T::Struct
-        const :direction, Types::Enums::AchDirection
-        # Whether the provider gave a reference for the entry.
-        const :submitted, T::Boolean
-        const :state, T.nilable(TransactionState)
-        const :real_leg_state, T.nilable(TransferState)
-        const :shadow_leg_state, T.nilable(TransferState)
-        const :clearing_state, T.nilable(TransactionState)
-
-        sig { returns(T::Boolean) }
-        def withdrawal? = direction == Types::Enums::AchDirection::Withdrawal
-      end
-
       ROLLING_BACK = T.let(
         [TransactionState::RollbackStarted, TransactionState::RolledBack, TransactionState::RollbackFailed].freeze,
         T::Array[TransactionState]
       )
-      CLEARING_FAILED = T.let([TransactionState::Rejected, *ROLLING_BACK].freeze, T::Array[TransactionState])
+      FOLLOW_ON_FAILED = T.let([TransactionState::Rejected, *ROLLING_BACK].freeze, T::Array[TransactionState])
 
       # The steps each direction goes through on its way to completing, in order.
       DEPOSIT_STEPS = T.let(
@@ -83,7 +72,11 @@ module Services
         def of(seen)
           steps = skip_after_failure(forward(seen))
           rollback = rollback(seen.state)
-          rollback ? [*steps, Step.new(name: Name::Rollback, status: rollback)] : steps
+          return [*steps, Step.new(name: Name::Rollback, status: rollback)] if rollback
+          return [*steps, Step.new(name: Name::LateReturn, status: follow_on(seen.late_return_state))] if
+            seen.late_return?
+
+          steps
         end
 
         private
@@ -101,9 +94,13 @@ module Services
           when Name::Submission then submission(seen.state, seen.real_leg_state, seen.submitted)
           when Name::Settlement then leg(seen.real_leg_state)
           when Name::Completion then completion(seen.state)
-          else clearing(seen.clearing_state)
+          else clearing(seen)
           end
         end
+
+        # A deposit clawed back before its Clearing was recorded never clears.
+        sig { params(seen: Snapshot).returns(Status) }
+        def clearing(seen) = seen.clawed_back? ? Status::Skipped : follow_on(seen.clearing_state)
 
         sig { params(state: T.nilable(TransactionState), submitted: T::Boolean).returns(Status) }
         def initiation(state, submitted)
@@ -145,10 +142,13 @@ module Services
           Status::Waiting
         end
 
-        sig { params(clearing_state: T.nilable(TransactionState)).returns(Status) }
-        def clearing(clearing_state)
-          return Status::Done if clearing_state == TransactionState::Completed
-          return Status::Failed if CLEARING_FAILED.include?(clearing_state)
+        # A Transaction Ruby originates after the ACH Transaction completed, a
+        # Clearing or a late return: done once it completes, failed once it
+        # is refused or rolled back.
+        sig { params(state: T.nilable(TransactionState)).returns(Status) }
+        def follow_on(state)
+          return Status::Done if state == TransactionState::Completed
+          return Status::Failed if FOLLOW_ON_FAILED.include?(state)
 
           Status::Waiting
         end

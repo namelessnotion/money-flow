@@ -34,37 +34,41 @@ abstract sig AccountType {
   side: lone Side  -- which side it counts towards; none for claims and
                    -- for the accounts on the bank boundary
 }
-one sig Bank, BankControl, IssuerControl,
+one sig Bank, BankControl, IssuerControl, Receivable,
         Cash, UnclearedCash, ClearedCash, Investment,
         SecuritySupply, SecurityEscrow, SecurityRepayment, SecurityCash
   extends AccountType {}
 
 -- AccountType#allows (ruby/app/types/enums/account_types.rb:65) maps to
 -- AllowsToAccountFlags (go/internal/token/allows.go):
---   Bank, BankControl, IssuerControl -> ALLOWS_ONRAMP_AND_OFFRAMP -> no flag
---   everything else                  -> ALLOWS_NONE -> debits capped
+--   Bank, BankControl, IssuerControl, Receivable -> ALLOWS_ONRAMP_AND_OFFRAMP -> no flag
+--   everything else                              -> ALLOWS_NONE -> debits capped
 -- Uncapped accounts may run negative. Bank's negative is money owed to the
--- outside world, and IssuerControl's is the total claims outstanding.
+-- outside world, IssuerControl's is the total claims outstanding, and
+-- Receivable's is what the entity owes the platform (ruby ADR 0011).
 -- Stated per type: `(A + B).cap = X` only says the union of their caps is
 -- {X}, which a `lone` field satisfies with one of them left empty.
 fact AllowsBecomeFlags {
-  all t: Bank + BankControl + IssuerControl | t.cap = Uncapped
+  all t: Bank + BankControl + IssuerControl + Receivable | t.cap = Uncapped
   all t: Cash + UnclearedCash + ClearedCash + Investment
        + SecuritySupply + SecurityEscrow + SecurityRepayment + SecurityCash | t.cap = DebitsCapped
 }
 
 -- Entity: `cash` is the cash side; uncleared + cleared cash is the cleared
 -- side. Security: `security_cash` is the cash side; escrow + repayment is
--- the cleared side (ruby ADR 0009, decision 2).
+-- the cleared side (ruby ADR 0009, decision 2). A Receivable is on neither
+-- side (ruby ADR 0011, decision 4).
 fact TwoSides {
   all t: Cash + SecurityCash | t.side = CashSide
   all t: UnclearedCash + ClearedCash + SecurityEscrow + SecurityRepayment | t.side = ClearedSide
-  all t: Bank + BankControl + IssuerControl + Investment + SecuritySupply | no t.side
+  all t: Bank + BankControl + IssuerControl + Receivable + Investment + SecuritySupply | no t.side
 }
 
 -- Parties are what money moves between (ruby/CONTEXT.md "Party", "Role").
 abstract sig Party {}
-abstract sig Entity extends Party {}
+abstract sig Entity extends Party {
+  owedAtStart: one Int  -- what its Receivable owes when the search starts
+}
 sig Investor, Borrower, Issuer extends Entity {}
 sig Security extends Party {
   issuer:   one Issuer,    -- each Security names its own Issuer
@@ -83,7 +87,7 @@ sig Account {
 
 -- Onboarding opens accounts per role, and IssueOffering opens a Security's
 -- four (ruby/app/types/enums/account_types.rb, BANKING and the role lists).
-fun BANKING: set AccountType { Bank + BankControl + UnclearedCash + ClearedCash + Cash }
+fun BANKING: set AccountType { Bank + BankControl + UnclearedCash + ClearedCash + Cash + Receivable }
 
 fact Onboarding {
   all a: Account | a.owner in Investor implies a.type in BANKING + Investment
@@ -188,6 +192,13 @@ abstract sig SecuritiesMoney extends Txn { sec: one Security, money: one Transfe
 sig Purchase extends SecuritiesMoney { buyer: one Investor, claim: one Transfer }
 sig Draw, Repayment extends SecuritiesMoney {}
 sig Disbursement extends SecuritiesMoney { payee: one Investor, principal: one Int, retire: lone Transfer }
+-- ruby ADR 0011: a late return is its own Transaction, in one of three forms,
+-- and Recovery collects what a debt return left owed.
+abstract sig LateReturn extends Txn { returnOf: one Ach }
+sig WithdrawalReturn extends LateReturn { toCash: one Transfer, toCleared: one Transfer }
+sig Clawback extends LateReturn { fromUncleared: one Transfer, fromCash: one Transfer }
+sig DebtReturn extends LateReturn { owedLeg: one Transfer }
+sig Recovery extends Txn { debtor: one Entity, fromCleared: one Transfer, toReceivable: one Transfer }
 
 -- ruby/app/services/ach/transaction_shape.rb and clearing_shape.rb.
 fact AchShapes {
@@ -295,12 +306,83 @@ fact SecuritiesShapes {
   }
 }
 
+-- ruby/app/services/ach/late_return_shape.rb and recovery_shape.rb, all
+-- version 1, ordered as ruby ADR 0010 orders every shape: an entity's
+-- cleared cash leaves before its cash, and its cash arrives before its
+-- cleared cash.
+fact LateReturnShapes {
+  -- One late return per ACH Transaction, for its whole amount: its id is
+  -- derived from the ACH Transaction's. It starts only once that one has
+  -- completed; a notice for one still running cancels its staged real leg
+  -- instead (the `returned` step).
+  all x: LateReturn {
+    x.amount = x.returnOf.amount
+    x.waitsFor = x.returnOf
+  }
+  all a: Ach | lone returnOf.a
+  -- Withdrawal return: the money comes back, cash first.
+  all x: WithdrawalReturn {
+    x.returnOf in Withdrawal
+    leg[x.toCash,    x, acct[x.returnOf.holder, Bank],        acct[x.returnOf.holder, Cash],        x.amount]
+    leg[x.toCleared, x, acct[x.returnOf.holder, BankControl], acct[x.returnOf.holder, ClearedCash], x.amount]
+    no x.toCash.parents
+    x.toCleared.parents = x.toCash
+    legs[x] = x.toCash + x.toCleared
+  }
+  -- Clawback: a deposit whose Clearing was never recorded is taken back
+  -- whole, uncleared cash first.
+  all x: Clawback {
+    x.returnOf in Deposit
+    leg[x.fromUncleared, x, acct[x.returnOf.holder, UnclearedCash], acct[x.returnOf.holder, BankControl], x.amount]
+    leg[x.fromCash,      x, acct[x.returnOf.holder, Cash],          acct[x.returnOf.holder, Bank],        x.amount]
+    no x.fromUncleared.parents
+    x.fromCash.parents = x.fromUncleared
+    legs[x] = x.fromUncleared + x.fromCash
+  }
+  -- Debt return: a deposit whose Clearing was recorded is owed, whatever the
+  -- depositor still holds. It mints out of the Receivable.
+  all x: DebtReturn {
+    x.returnOf in Deposit
+    leg[x.owedLeg, x, acct[x.returnOf.holder, Receivable], acct[x.returnOf.holder, Bank], x.amount]
+    no x.owedLeg.parents
+    legs[x] = x.owedLeg
+  }
+  -- Recovery: the debtor pays what it owes from cleared cash, cleared cash
+  -- first, like a Repayment.
+  all x: Recovery {
+    leg[x.fromCleared,  x, acct[x.debtor, ClearedCash], acct[x.debtor, BankControl], x.amount]
+    leg[x.toReceivable, x, acct[x.debtor, Cash],        acct[x.debtor, Receivable],  x.amount]
+    no x.fromCleared.parents
+    x.toReceivable.parents = x.fromCleared
+    legs[x] = x.fromCleared + x.toReceivable
+    no x.waitsFor
+  }
+}
+
 ---------------------------------------------------------------------------
 -- 4. INITIAL STATE
 ---------------------------------------------------------------------------
 
 fun sideTotal[p: Party, s: Side]: Int {
   sum a: { a: Account | a.owner = p and a.type.side = s } | a.posted
+}
+
+fun bal[p: Party, t: AccountType]: Int { sum a: acct[p, t] | a.posted }
+
+-- What the network has moved for an entity that the cleared side doesn't
+-- mirror and the Receivable doesn't owe (ruby ADR 0011, decision 4). Every
+-- shape that moves `bank` moves `bank_control` or the Receivable by the same
+-- amount, so at rest this is 0: every late return was recorded.
+fun unrecorded[e: Entity]: Int {
+  plus[minus[bal[e, Bank], bal[e, BankControl]], bal[e, Receivable]]
+}
+
+-- What an entity owes, as Services::Receivable reads it: debt returns the
+-- projection has seen complete, less the Recoveries it has seen complete.
+-- One still in flight doesn't count yet.
+fun owed[e: Entity]: Int {
+  minus[plus[e.owedAtStart, (sum d: { d: DebtReturn | d.returnOf.holder = e and d.xs = Completed } | d.amount)],
+        (sum r: { r: Recovery | r.debtor = e and r.xs = Completed } | r.amount)]
 }
 
 -- The search starts from any balances the ledger could plausibly hold,
@@ -316,6 +398,15 @@ pred OpeningBalances {
   }
   (sum a: Account | a.posted) = 0                   -- double entry: every debit has its credit
   all p: Party | sideTotal[p, CashSide] = sideTotal[p, ClearedSide]
+  all e: Entity {
+    unrecorded[e] = 0
+    bal[e, Receivable] <= 0
+    e.owedAtStart = minus[0, bal[e, Receivable]]
+  }
+  -- A deposit that completed before the search may already have had its
+  -- Clearing recorded, though not started. No notice has arrived yet.
+  ClearingRecorded in AlreadyCompleted
+  no Noticed
   all t: Transfer | t.st = (t.txn in AlreadyCompleted => Posted else Idle)
   all x: Txn | x.xs = (x in AlreadyCompleted => Completed else NotStarted)
 }
@@ -350,11 +441,30 @@ pred ready[t: Transfer] {
   t.parents.st in Posted
 }
 
+-- What Ruby checks, on its own record, before it asks Go for a Transaction
+-- (ruby ADR 0011, decisions 3 and 5):
+-- - a Clearing, only once Clear has recorded it;
+-- - a late return, only for an entry with a notice. A deposit is clawed back
+--   only if its Clearing was never recorded, and owed otherwise;
+-- - a Recovery, only while no other of the debtor's is in flight, and for no
+--   more than it owes.
+pred mayBegin[x: Txn] {
+  x in Clearing implies x.deposit in ClearingRecorded
+  x in LateReturn implies x.returnOf in Noticed
+  x in Clawback implies x.returnOf not in ClearingRecorded
+  x in DebtReturn implies x.returnOf in ClearingRecorded
+  x in Recovery implies {
+    no r: Recovery - x | r.debtor = x.debtor and r.xs in Started + RollingBack
+    x.amount <= owed[x.debtor]
+  }
+}
+
 -- Ruby originates a Transaction. Sweeps start one only after the
 -- Transaction it waits for has completed.
 pred begin[x: Txn] {
   x.xs = NotStarted
   x.waitsFor.xs in Completed
+  mayBegin[x]
   xs' = xs ++ (x -> Started)
   st' = st
   posted' = posted
@@ -494,27 +604,43 @@ fact Behaviour {
   )
 }
 
--- A late ACH return: after a deposit has settled, the network takes its
--- money back out of the platform's bank. An unauthorized-debit return (R05,
--- R07, R10) may arrive up to 60 days after settlement, long after
--- ClearingPolicy's 3 business days.
+-- Ruby's own record, which decides what it asks Go for. Both are written
+-- under a lock on the ACH Transaction's row, so they never change in the
+-- same step (ruby ADR 0011, decision 3). Neither moves money, so each is a
+-- `stutter` step for the ledger.
 --
--- The ledger can't record it: Services::Ach::Return only cancels a *staged*
--- real leg, and after settlement Go refuses that. So the ledger doesn't
--- change, which makes this a `stutter` step. What the step does change is
--- ReturnedLate, which records that the platform's real money has gone.
-var sig ReturnedLate in Deposit {}
+-- A notice for a completed ACH Transaction is a late return: the network
+-- takes the money back after the entry settled. An unauthorized-debit return
+-- (R05, R07, R10) may arrive up to 60 days after settlement, long after
+-- ClearingPolicy's 3 business days. The first notice wins.
+var sig Noticed in Ach {}
+-- Clear records a deposit's Clearing ids before it asks Go, and refuses a
+-- deposit with a notice.
+var sig ClearingRecorded in Deposit {}
 
-pred lateReturn[d: Deposit] {
-  d.xs = Completed
-  d not in ReturnedLate
+pred notice[a: Ach] {
+  a.xs = Completed
+  a not in Noticed
   stutter
-  ReturnedLate' = ReturnedLate + d
+  Noticed' = Noticed + a
+  ClearingRecorded' = ClearingRecorded
 }
 
-fact TheNetworkReturnsLate {
-  no ReturnedLate
-  always (ReturnedLate' = ReturnedLate or some d: Deposit | lateReturn[d])
+pred recordClearing[d: Deposit] {
+  d.xs = Completed
+  d not in ClearingRecorded
+  d not in Noticed
+  stutter
+  ClearingRecorded' = ClearingRecorded + d
+  Noticed' = Noticed
+}
+
+fact RubyRecords {
+  always (
+    (Noticed' = Noticed and ClearingRecorded' = ClearingRecorded)
+    or (some a: Ach | notice[a])
+    or (some d: Deposit | recordClearing[d])
+  )
 }
 
 ---------------------------------------------------------------------------
@@ -575,9 +701,35 @@ assert UnclearedMoneyStaysBacked {
 -- carries the loss. It needn't be a second party: the account owner can
 -- withdraw the cleared money back to the same account, then dispute the
 -- original debit as unauthorized, and receive the money twice.
+-- Since ruby ADR 0011 the loss is recorded, as owed, but nothing prevents
+-- it. That is the exposure policy's job.
 assert LateReturnIsRecoverable {
   always all d: Deposit |
-    lateReturn[d] implies canDebit[acct[d.holder, Cash], d.amount]
+    notice[d] implies canDebit[acct[d.holder, Cash], d.amount]
+}
+
+-- SAFETY 3: the ledger can always record a late return (ruby ADR 0011,
+-- decision 2). A withdrawal return and a debt return mint out of uncapped
+-- accounts. A clawback's legs are covered because its deposit's Clearing was
+-- never recorded, so nothing took the deposit's money out of uncleared cash,
+-- and UnclearedMoneyStaysBacked keeps `cash` covering it. Worded over ready
+-- legs, because the adversarial `fail` step can refuse any leg for reasons
+-- that aren't money.
+assert LateReturnIsAlwaysFunded {
+  always all t: legs[LateReturn] | ready[t] implies canDebit[t.src, t.amt]
+}
+
+-- SAFETY 4: Recovery never takes more than is owed, so no Receivable ever
+-- holds money (ruby ADR 0011, decision 5).
+assert ReceivableNeverPositive {
+  always all a: Account | a.type = Receivable implies a.posted <= 0
+}
+
+-- SAFETY 5: every dollar the network moved is either mirrored on the cleared
+-- side or owed, once nothing of the entity's is in flight (ruby ADR 0011,
+-- decision 4).
+assert NetworkMoneyIsRecorded {
+  always all e: Entity | atRest[e] implies unrecorded[e] = 0
 }
 
 -- Weak fairness. The orchestrator keeps reacting to events and resuming,
@@ -659,10 +811,70 @@ check UnclearedMoneyStaysBacked
 
 -- The first-party fraud: a deposit clears and is withdrawn, and then the
 -- network returns it. `expect 1` pins the known gap
--- (namelessnotion/money_flow#8). Flip it to `expect 0` once a late return can
--- be recorded and recovered. On 2026-09-27 the counterexample took about 24
+-- (namelessnotion/money_flow#8). Ruby ADR 0011 records the loss as owed but
+-- doesn't prevent it, so this stays `expect 1` until an exposure policy for
+-- unauthorized returns lands. On 2026-09-27 the counterexample took about 24
 -- minutes, and UnclearedMoneyStaysBacked's proof about 16.5, while the
--- withdrawal-v1 mutation fails it in 14 seconds.
+-- withdrawal-v1 mutation fails it in 14 seconds. With ADR 0011's model, and a
+-- Clearing that may already be recorded at the start, they took about 14 and 6.
 check LateReturnIsRecoverable
   for 3 but 6 Int, exactly 5 Account, exactly 5 Transfer,
     exactly 1 Deposit, exactly 1 Clearing, exactly 1 Withdrawal, 1..8 steps expect 1
+
+-- One entity's deposit, its Clearing and a late return of either deposit
+-- form. To show the check has teeth, drop `x.returnOf not in
+-- ClearingRecorded` from mayBegin: a clawback after the Clearing then finds
+-- uncleared cash empty. On 2026-09-27 that mutation failed in 28 seconds, and
+-- the proof took about a minute.
+check LateReturnIsAlwaysFunded
+  for 3 but 6 Int, exactly 6 Account, 5 Transfer,
+    exactly 1 Deposit, exactly 1 Clearing, exactly 1 LateReturn, 0 Withdrawal, 0 Recovery,
+    1..7 steps expect 0
+
+-- Two Recoveries from one debtor. To show the check has teeth, drop the
+-- one-in-flight rule from mayBegin: both start while the debtor owes 1, and
+-- both are paid (a counterexample in about 2.5 minutes on 2026-09-27; the
+-- proof took about 4.5). The fifth Account is `bank`: with only four, the
+-- opening balances leave the debtor too little cleared cash to pay twice, and
+-- the mutation passes too.
+check ReceivableNeverPositive
+  for 3 but 6 Int, exactly 5 Account, exactly 4 Transfer, exactly 2 Recovery, 1..8 steps expect 0
+
+-- A deposit owed by a debt return, and a Recovery of it. About 3 minutes.
+check NetworkMoneyIsRecorded
+  for 3 but 6 Int, exactly 6 Account, exactly 5 Transfer,
+    exactly 1 Deposit, exactly 1 DebtReturn, exactly 1 Recovery, 1..7 steps expect 0
+
+-- ruby ADR 0010's guarantee with a Recovery beside a withdrawal: Recovery
+-- pays cleared cash first, like a Repayment. Under a minute.
+check FundedWithdrawalCanBePaidBesideRecovery {
+  always all w: Withdrawal |
+    (w.xs = Started and w.shadow.st = Posted and w.real.st = Idle)
+      implies canDebit[w.real.src, w.amount]
+} for 3 but 6 Int, exactly 5 Account, exactly 4 Transfer,
+    exactly 1 Recovery, exactly 1 Withdrawal, 1..6 steps expect 0
+
+-- A clawback beside a withdrawal doesn't let uncleared money leave either.
+-- About 5.5 minutes.
+check UnclearedMoneyStaysBackedBesideClawback {
+  always all a: Account |
+    a.type = Cash implies available[a] >= sideTotal[a.owner, ClearedSide]
+} for 3 but 6 Int, exactly 5 Account, exactly 6 Transfer,
+    exactly 1 Deposit, exactly 1 Clawback, exactly 1 Withdrawal, 1..7 steps expect 0
+
+run WithdrawalReturnRecorded {
+  some x: WithdrawalReturn | eventually x.xs = Completed
+} for 3 but 6 Int, exactly 5 Account, exactly 4 Transfer,
+    exactly 1 Withdrawal, exactly 1 WithdrawalReturn, 1..12 steps expect 1
+
+run DepositClawedBack {
+  some x: Clawback | eventually x.xs = Completed
+} for 3 but 6 Int, exactly 5 Account, exactly 4 Transfer,
+    exactly 1 Deposit, exactly 1 Clawback, 1..6 steps expect 1
+
+-- The slowest witness: about 18 minutes on 2026-09-27.
+run DebtRecovered {
+  some x: DebtReturn, r: Recovery |
+    eventually (x.xs = Completed and r.xs = Completed and bal[r.debtor, Receivable] = 0)
+} for 3 but 6 Int, exactly 6 Account, exactly 5 Transfer,
+    exactly 1 Deposit, exactly 1 DebtReturn, exactly 1 Recovery, 1..10 steps expect 1

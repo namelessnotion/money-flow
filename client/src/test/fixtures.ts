@@ -21,6 +21,9 @@ export function achDetail(overrides: Partial<AchTransactionDetail> = {}) {
     realLegState: 'PENDING',
     clearingState: null,
     clearingDueOn: null,
+    returnReason: null,
+    returnedAt: null,
+    lateReturnState: null,
     steps: [
       { __typename: 'AchStep', name: 'INITIATION', status: 'DONE' },
       { __typename: 'AchStep', name: 'SUBMISSION', status: 'DONE' },

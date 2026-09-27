@@ -14,6 +14,11 @@ export const STEP_LABELS: Record<AchStepName, { title: string; detail: string }>
     title: 'Rolled back',
     detail: 'Whatever had moved was put back. Reversing a settled ACH entry can take days.',
   },
+  LATE_RETURN: {
+    title: 'Returned late',
+    detail:
+      'The network took the money back after it settled. A withdrawal is put back; a deposit is taken back, or owed if it had cleared.',
+  },
 }
 
 export const STATUS_LABELS: Record<AchStepStatus, string> = {

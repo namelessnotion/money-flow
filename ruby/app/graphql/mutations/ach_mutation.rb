@@ -14,7 +14,7 @@ module Mutations
 
     EXPECTED = T.let(
       [Services::Ach::Refused, Services::Ach::NotFound, Services::Ach::InvalidAmount,
-       Services::Ach::MissingAccount, Services::Ach::NotClearable].freeze,
+       Services::Ach::MissingAccount, Services::Ach::NotClearable, Services::Ach::Owes].freeze,
       T::Array[T.class_of(StandardError)]
     )
 

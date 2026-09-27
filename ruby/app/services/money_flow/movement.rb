@@ -13,6 +13,8 @@ module Services
         enums do
           Deposit = new('deposit')                                # Bank → entity
           Withdrawal = new('withdrawal')                          # entity → Bank
+          DepositReturn = new('deposit_return')                   # entity → Bank, a late return
+          WithdrawalReturn = new('withdrawal_return')             # Bank → entity, a late return
           Subscription = new('subscription')                      # Investor → Security
           Draw = new('draw')                                      # Security → Borrower
           Repayment = new('repayment')                            # Borrower → Security
@@ -23,13 +25,13 @@ module Services
         # Whether the money ran towards the entity, rather than away from it.
         sig { returns(T::Boolean) }
         def into_entity?
-          [Deposit, Draw, DisbursementPrincipal, DisbursementInterest].include?(self)
+          [Deposit, WithdrawalReturn, Draw, DisbursementPrincipal, DisbursementInterest].include?(self)
         end
 
         # Whether the other end is the Bank, rather than a Security.
         sig { returns(T::Boolean) }
         def across_bank_boundary?
-          [Deposit, Withdrawal].include?(self)
+          [Deposit, Withdrawal, DepositReturn, WithdrawalReturn].include?(self)
         end
       end
 

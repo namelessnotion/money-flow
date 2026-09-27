@@ -31,6 +31,7 @@ export type AchStepName =
   | 'COMPLETION'
   | 'CLEARING'
   | 'ROLLBACK'
+  | 'LATE_RETURN'
 
 export type AchStepStatus = 'DONE' | 'WAITING' | 'FAILED' | 'SKIPPED'
 
@@ -56,6 +57,11 @@ export interface AchTransactionDetail extends AchTransactionSummary {
   realLegState: TransferState | null
   clearingState: TransactionState | null
   clearingDueOn: string | null
+  // The provider's return notice, and the late return recorded for one that
+  // arrived after the entry settled (ruby/docs/adr/0011).
+  returnReason: string | null
+  returnedAt: string | null
+  lateReturnState: TransactionState | null
   steps: AchStep[]
 }
 
@@ -78,6 +84,9 @@ const DETAIL_FIELDS = gql`
     realLegState
     clearingState
     clearingDueOn
+    returnReason
+    returnedAt
+    lateReturnState
     steps {
       name
       status

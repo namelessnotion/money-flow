@@ -16,7 +16,9 @@ module Services
 
       sig { returns(Sequel::Dataset) }
       def self.union
-        legs = [ach(Kind::Deposit), ach(Kind::Withdrawal), subscriptions, draws, repayments,
+        legs = [ach(Kind::Deposit), ach(Kind::Withdrawal),
+                late_return(Kind::DepositReturn, Kind::Deposit), late_return(Kind::WithdrawalReturn, Kind::Withdrawal),
+                subscriptions, draws, repayments,
                 disbursements(Kind::DisbursementPrincipal, :principal_minor_units),
                 disbursements(Kind::DisbursementInterest, :interest_minor_units)]
         legs.drop(1).reduce(legs.fetch(0)) { |all, leg| all.union(leg, all: true, from_self: false) }
@@ -30,6 +32,20 @@ module Services
                   Sequel[:id].as(:transaction_id))
       end
       private_class_method :ach
+
+      # A late return is its own Transaction, whose id the ACH row records
+      # (ruby/docs/adr/0011). Whichever form it took, the money went back
+      # across the bank boundary: a clawback and a debt return both send it
+      # out, and what the entity still owes isn't a Movement.
+      sig { params(kind: Kind, of: Kind).returns(Sequel::Dataset) }
+      def self.late_return(kind, of)
+        DB[:ach_transactions]
+          .where(direction: of.serialize)
+          .exclude(return_transaction_id: nil)
+          .select(tag(kind), :entity_id, Sequel.cast(nil, :uuid).as(:security_id), :amount_minor_units,
+                  Sequel[:return_transaction_id].as(:transaction_id))
+      end
+      private_class_method :late_return
 
       sig { returns(Sequel::Dataset) }
       def self.subscriptions

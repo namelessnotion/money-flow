@@ -47,6 +47,20 @@ RSpec.describe Services::Ach::ClearDue do
     expect(sweep.call(now: now).cleared).to be_empty
   end
 
+  it 'leaves a returned deposit whose clearing was never recorded' do
+    deposit.update(returned_at: monday, return_reason: 'R01')
+
+    expect(sweep.call(now: now).cleared).to be_empty
+  end
+
+  it 'still sends a returned deposit\'s clearing when it was recorded but not yet seen' do
+    ach = deposit
+    ach.update(clearing_transaction_id: Services::DetId.for("#{ach.id}:clearing"), returned_at: now,
+               return_reason: 'R10')
+
+    expect(sweep.call(now: now).cleared).to eq([ach.id])
+  end
+
   it 'leaves a deposit whose clearing the read model has already seen' do
     ach = deposit
     clearing_id = Services::DetId.for("#{ach.id}:clearing")

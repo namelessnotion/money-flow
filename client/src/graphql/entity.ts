@@ -7,6 +7,7 @@ export const ENTITY_QUERY = gql`
       name
       holderUuid
       createdAt
+      owedMinorUnits
       accounts {
         id
         name
@@ -46,6 +47,9 @@ export interface EntityDetail {
   name: string
   holderUuid: string
   createdAt: string
+  // What it owes for late ACH deposit returns, as a BigInt string of minor
+  // units. While it is above zero the entity can't withdraw.
+  owedMinorUnits: string
   accounts: AccountNode[]
 }
 

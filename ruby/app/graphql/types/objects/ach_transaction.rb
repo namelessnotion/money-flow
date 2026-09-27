@@ -34,10 +34,18 @@ module Types
     field :clearing_due_on, GraphQL::Types::ISO8601Date,
           null: true,
           description: 'For a completed deposit, the Federal Reserve business day its clearing becomes due.'
+    field :return_reason, String, null: true,
+                                  description: "The provider's return notice (an R-code), once one has arrived."
+    field :returned_at, GraphQL::Types::ISO8601DateTime, null: true,
+                                                         description: 'When the return notice was recorded.'
+    field :late_return_state, TransactionStateEnum,
+          null: true,
+          description: 'Projected state of the late return: the Transaction recording a return that arrived after ' \
+                       'the entry settled. Null until one has been originated and projected.'
     field :steps, [AchStep], null: false,
                              description: 'The lifecycle steps — initiation, funding (a withdrawal), submission, ' \
                                           'settlement, completion, clearing (a deposit) and, while one is under ' \
-                                          'way, rollback — and where each stands.'
+                                          'way, rollback or a late return — and where each stands.'
     field :created_at, GraphQL::Types::ISO8601DateTime, null: false
 
     UUID = T.let(/\A\h{8}-\h{4}-\h{4}-\h{4}-\h{12}\z/, Regexp)
@@ -50,6 +58,7 @@ module Types
         Sequel[:real_leg][:state].as(:real_leg_state),
         Sequel[:shadow_leg][:state].as(:shadow_leg_state),
         Sequel[:clearing][:state].as(:clearing_state),
+        Sequel[:late_return][:state].as(:late_return_state),
         Sequel.function(:coalesce, Sequel[:transaction_projections][:state_changed_at],
                         Sequel[:transaction_projections][:updated_at]).as(:state_changed_at)
       ].freeze,
@@ -63,7 +72,8 @@ module Types
         transaction_projections: %i[transaction_projections id],
         real_leg: %i[transfer_projections real_transfer_id],
         shadow_leg: %i[transfer_projections shadow_transfer_id],
-        clearing: %i[transaction_projections clearing_transaction_id]
+        clearing: %i[transaction_projections clearing_transaction_id],
+        late_return: %i[transaction_projections return_transaction_id]
       }.freeze,
       T::Hash[Symbol, T::Array[Symbol]]
     )
@@ -98,29 +108,21 @@ module Types
     sig { returns(T.nilable(String)) }
     def clearing_state = object[:clearing_state]
 
+    sig { returns(T.nilable(String)) }
+    def late_return_state = object[:late_return_state]
+
     sig { returns(T::Array[Services::Ach::Progress::Step]) }
-    def steps
-      Services::Ach::Progress.of(
-        Services::Ach::Progress::Snapshot.new(
-          direction: Types::Enums::AchDirection.deserialize(object.direction),
-          submitted: !object.provider_reference.nil?,
-          state: projected_transaction(:state), clearing_state: projected_transaction(:clearing_state),
-          real_leg_state: projected_transfer(:real_leg_state), shadow_leg_state: projected_transfer(:shadow_leg_state)
-        )
-      )
-    end
+    def steps = Services::Ach::Progress.of(snapshot)
 
-    sig { params(column: Symbol).returns(T.nilable(Types::Enums::TransactionState)) }
-    def projected_transaction(column) = Types::Enums::TransactionState.try_deserialize(object[column])
-
-    sig { params(column: Symbol).returns(T.nilable(Types::Enums::TransferState)) }
-    def projected_transfer(column) = Types::Enums::TransferState.try_deserialize(object[column])
+    sig { returns(Services::Ach::Progress::Snapshot) }
+    def snapshot = Services::Ach::Progress::Snapshot.of(object)
 
     sig { returns(T.nilable(Date)) }
     def clearing_due_on
       completed = object[:state] == Types::Enums::TransactionState::Completed.serialize
       deposit = object.direction == Types::Enums::AchDirection::Deposit.serialize
       return nil unless completed && deposit
+      return nil if snapshot.clawed_back?
 
       Services::Ach::ClearingPolicy.due_on(object[:state_changed_at])
     end

@@ -21,6 +21,7 @@ module Types
         UnclearedCash = new('uncleared_cash')  # Cash waiting to be cleared
         ClearedCash = new('cleared_cash')      # Cash that has cleared
         Cash = new('cash')                     # Cash that can be used for purchases
+        Receivable = new('receivable')         # What the entity owes the platform, as a negative balance
         Gain = new('gain')                     # Gain account for tracking profits
         Loss = new('loss')                     # Loss account for tracking losses
 
@@ -47,6 +48,11 @@ module Types
       # total claims outstanding, and it returns to zero as claims are retired
       # back into it. The same shape as BankControl.
       #
+      # Receivable is the same shape again (ruby/docs/adr/0011): a debt return
+      # mints what the entity owes out of it, and Recovery credits it back
+      # towards zero. It can't be ALLOWS_ONRAMP, whose credits_must_not_exceed_debits
+      # would refuse the fresh Token each Recovery credits.
+      #
       # ALLOWS_NONE gives a Token debits_must_not_exceed_credits, and that is
       # what makes SecuritySupply an oversubscription control, Investment a
       # guarantee that no holder has more principal retired than they hold,
@@ -62,18 +68,20 @@ module Types
       sig { returns(Symbol) }
       def allows
         case self
-        when Bank, BankControl, IssuerControl then :ALLOWS_ONRAMP_AND_OFFRAMP
+        when Bank, BankControl, IssuerControl, Receivable then :ALLOWS_ONRAMP_AND_OFFRAMP
         when DebitCard then :ALLOWS_ONRAMP
         else :ALLOWS_NONE
         end
       end
 
       # Every role banks, so every role gets the accounts an ACH shape moves
-      # money through (Services::Ach::TransactionShape, ClearingShape). Beyond
-      # that a role gets only what its own part in the market uses: an account
-      # an entity can never move money through is a Wallet nobody will be able
-      # to explain later.
-      BANKING = T.let([Bank, BankControl, UnclearedCash, ClearedCash, Cash].freeze, T::Array[AccountType])
+      # money through (Services::Ach::TransactionShape, ClearingShape,
+      # LateReturnShape), the Receivable a late deposit return can leave owed
+      # among them. Beyond that a role gets only what its own part in the
+      # market uses: an account an entity can never move money through is a
+      # Wallet nobody will be able to explain later.
+      BANKING = T.let([Bank, BankControl, UnclearedCash, ClearedCash, Cash, Receivable].freeze,
+                      T::Array[AccountType])
 
       # A Security's own four types appear in no role's list. They are opened
       # per offering by Services::Securities::IssueOffering, and the

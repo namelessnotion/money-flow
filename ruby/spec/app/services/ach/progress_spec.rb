@@ -5,13 +5,15 @@ require 'spec_helper'
 RSpec.describe Services::Ach::Progress do
   # Takes the direction and each state as they are persisted; a leg's state
   # is a Transfer's, the others a Transaction's.
-  def steps(direction: 'deposit', submitted: true, **states)
+  # `notice` holds the return notice's flags: returned, clearing_recorded and
+  # late_return_sent.
+  def steps(direction: 'deposit', submitted: true, notice: {}, **states)
     projected = states.to_h do |key, value|
       [key, (key.end_with?('leg_state') ? Types::Enums::TransferState : Types::Enums::TransactionState)
         .try_deserialize(value)]
     end
     seen = Services::Ach::Progress::Snapshot.new(direction: Types::Enums::AchDirection.deserialize(direction),
-                                                 submitted: submitted, **projected)
+                                                 submitted: submitted, **notice, **projected)
     described_class.of(seen).to_h { |step| [step.name.serialize, step.status.serialize] }
   end
 
@@ -125,5 +127,51 @@ RSpec.describe Services::Ach::Progress do
       .to be_a(Services::Ach::Progress::Step)
       .and have_attributes(name: Services::Ach::Progress::Name::Initiation,
                            status: Services::Ach::Progress::Status::Waiting)
+  end
+
+  describe 'a late return (ruby/docs/adr/0011)' do
+    let(:completed_deposit) do
+      { state: 'completed', real_leg_state: 'committed', shadow_leg_state: 'committed' }
+    end
+
+    it 'adds a late-return step once a notice arrives for a completed Transaction, waiting until it is sent' do
+      expect(steps(notice: { returned: true }, **completed_deposit))
+        .to include('completion' => 'done', 'late_return' => 'waiting')
+    end
+
+    it 'is done once the late return has completed' do
+      expect(steps(notice: { returned: true, late_return_sent: true }, late_return_state: 'completed',
+                   **completed_deposit)).to include('late_return' => 'done')
+    end
+
+    it 'fails when the late return is refused or rolled back, which needs a person' do
+      %w[rejected rolled_back rollback_failed].each do |state|
+        expect(steps(notice: { returned: true, late_return_sent: true }, late_return_state: state,
+                     **completed_deposit)).to include('late_return' => 'failed')
+      end
+    end
+
+    # The clawback took the money back out of uncleared cash; it will never
+    # clear.
+    it 'skips clearing for a deposit clawed back before its Clearing was recorded' do
+      expect(steps(notice: { returned: true }, **completed_deposit)).to include('clearing' => 'skipped')
+    end
+
+    it 'keeps clearing for a deposit whose Clearing was recorded before the notice' do
+      expect(steps(notice: { returned: true, clearing_recorded: true }, clearing_state: 'completed',
+                   **completed_deposit)).to include('clearing' => 'done', 'late_return' => 'waiting')
+    end
+
+    it 'puts a late-return step on a withdrawal too' do
+      expect(steps(direction: 'withdrawal', notice: { returned: true }, **completed_deposit).keys.last)
+        .to eq('late_return')
+    end
+
+    # A return before settlement cancels the real leg and rolls back: that is
+    # the rollback step, not a late return.
+    it 'adds no late-return step for a return before settlement' do
+      expect(steps(notice: { returned: true }, state: 'rollback_started', real_leg_state: 'cancelled').keys)
+        .not_to include('late_return')
+    end
   end
 end

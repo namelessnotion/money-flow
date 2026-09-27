@@ -27,5 +27,17 @@ module Services
 
     # The entity lacks an account an ACH shape moves money through.
     class MissingAccount < StandardError; end
+
+    # The entity owes the platform for a late deposit return, so it may not
+    # send money where Recovery can't reach it: out by ACH, or into a
+    # Security's escrow (ruby/docs/adr/0011, decision 6).
+    class Owes < StandardError
+      extend T::Sig
+
+      sig { params(entity_id: Integer, owed: Integer, what: String).returns(Owes) }
+      def self.refusing(entity_id, owed, what)
+        new("entity #{entity_id} owes #{owed} for a late ACH return; no #{what} until it is recovered")
+      end
+    end
   end
 end

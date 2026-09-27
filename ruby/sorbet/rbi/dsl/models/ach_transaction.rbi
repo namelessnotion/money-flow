@@ -73,6 +73,24 @@ class Models::AchTransaction
     sig { params(value: T.nilable(String)).returns(T.nilable(String)) }
     def real_transfer_id=(value); end
 
+    sig { returns(T.nilable(String)) }
+    def return_reason; end
+
+    sig { params(value: T.nilable(String)).returns(T.nilable(String)) }
+    def return_reason=(value); end
+
+    sig { returns(T.nilable(String)) }
+    def return_transaction_id; end
+
+    sig { params(value: T.nilable(String)).returns(T.nilable(String)) }
+    def return_transaction_id=(value); end
+
+    sig { returns(T.nilable(Time)) }
+    def returned_at; end
+
+    sig { params(value: T.nilable(Time)).returns(T.nilable(Time)) }
+    def returned_at=(value); end
+
     sig { returns(String) }
     def shadow_transfer_id; end
 

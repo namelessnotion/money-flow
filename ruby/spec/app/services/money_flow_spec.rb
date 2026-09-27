@@ -35,6 +35,35 @@ RSpec.describe Services::MoneyFlow do
       )
     end
 
+    # A late return is its own Transaction (ruby/docs/adr/0011): the deposit
+    # still came in, and then its money went back out.
+    it 'moves a late deposit return back out to the bank, and a late withdrawal return back in' do
+      deposit = create(:ach_transaction, entity: investor, direction: 'deposit', amount_minor_units: 5_000,
+                                         returned_at: Time.now, return_reason: 'R10',
+                                         return_transaction_id: SecureRandom.uuid_v7)
+      withdrawal = create(:ach_transaction, entity: investor, direction: 'withdrawal', amount_minor_units: 2_000,
+                                            returned_at: Time.now, return_reason: 'R02',
+                                            return_transaction_id: SecureRandom.uuid_v7)
+      [deposit.id, deposit.return_transaction_id, withdrawal.id, withdrawal.return_transaction_id]
+        .each { |id| completed(id) }
+
+      expect(movements.map { |m| [m.kind, m.source, m.target, m.amount_minor_units, m.transaction_id] })
+        .to contain_exactly(
+          [kind::Deposit, 'bank', party(investor.id), 5_000, deposit.id],
+          [kind::DepositReturn, party(investor.id), 'bank', 5_000, deposit.return_transaction_id],
+          [kind::Withdrawal, party(investor.id), 'bank', 2_000, withdrawal.id],
+          [kind::WithdrawalReturn, 'bank', party(investor.id), 2_000, withdrawal.return_transaction_id]
+        )
+    end
+
+    it 'leaves out a late return the read model has not seen complete' do
+      deposit = create(:ach_transaction, entity: investor, returned_at: Time.now, return_reason: 'R10',
+                                         return_transaction_id: SecureRandom.uuid_v7)
+      completed(deposit.id)
+
+      expect(movements.map(&:kind)).to eq([kind::Deposit])
+    end
+
     it 'moves a Subscription from the Investor into the Security' do
       subscription = create(:subscription, security: security, investor: investor, amount_minor_units: 30_000)
       completed(subscription.id)

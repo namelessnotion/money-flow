@@ -11,6 +11,7 @@ const entity = {
   name: 'Shining Knight Industries',
   holderUuid: '018f4d2e-0000-7000-8000-000000000000',
   createdAt: '2026-08-27T00:00:00Z',
+  owedMinorUnits: '0',
   accounts: [
     {
       __typename: 'Account',

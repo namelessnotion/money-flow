@@ -25,6 +25,8 @@ export type PartyKind = 'INVESTOR' | 'BORROWER' | 'ISSUER' | 'SECURITY' | 'BANK'
 export type MovementKind =
   | 'DEPOSIT'
   | 'WITHDRAWAL'
+  | 'DEPOSIT_RETURN'
+  | 'WITHDRAWAL_RETURN'
   | 'SUBSCRIPTION'
   | 'DRAW'
   | 'REPAYMENT'

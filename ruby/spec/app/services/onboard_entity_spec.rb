@@ -106,10 +106,10 @@ RSpec.describe Services::OnboardEntity do
         service.call(request: request)
 
         allows_by_name = sent.wallets.to_h { |spec| [spec.name, spec.allows] }
-        expect(allows_by_name['bank']).to eq(:ALLOWS_ONRAMP_AND_OFFRAMP)
-        expect(allows_by_name['bank_control']).to eq(:ALLOWS_ONRAMP_AND_OFFRAMP)
-        expect(allows_by_name['debit_card']).to eq(:ALLOWS_ONRAMP)
-        expect(allows_by_name['cash']).to eq(:ALLOWS_NONE)
+        expect(allows_by_name).to include(
+          'bank' => :ALLOWS_ONRAMP_AND_OFFRAMP, 'bank_control' => :ALLOWS_ONRAMP_AND_OFFRAMP,
+          'debit_card' => :ALLOWS_ONRAMP, 'cash' => :ALLOWS_NONE, 'receivable' => :ALLOWS_ONRAMP_AND_OFFRAMP
+        )
         # Never unspecified — the wallet service rejects an unset policy.
         expect(allows_by_name.values).not_to include(:ALLOWS_UNSPECIFIED)
       end

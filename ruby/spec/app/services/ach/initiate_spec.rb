@@ -11,6 +11,34 @@ RSpec.describe Services::Ach::Initiate do
                            amount_minor_units: 10_000)
   end
 
+  # A deposit that cleared and then came back, recorded as owed
+  # (ruby/docs/adr/0011).
+  def owe(amount)
+    create(:ach_transaction, entity: entity, amount_minor_units: amount, returned_at: Time.now, return_reason: 'R10',
+                             clearing_transaction_id: SecureRandom.uuid_v7)
+  end
+
+  context 'when the entity owes the platform' do
+    before do
+      stub_go_happy_path
+      owe(5_000)
+    end
+
+    it 'refuses a withdrawal before recording or sending anything' do
+      withdrawal = InitiateAchRequest.new(entity_id: entity.id, direction: Types::Enums::AchDirection::Withdrawal,
+                                          amount_minor_units: 1_000)
+
+      expect { service.call(request: withdrawal) }.to raise_error(Services::Ach::Owes, /owes 5000/)
+      expect(Models::AchTransaction.where(entity_id: entity.id, direction: 'withdrawal').count).to eq(0)
+      expect(transaction_client).not_to have_received(:start_initializing_transaction)
+    end
+
+    # A deposit is how an entity pays back what it owes.
+    it 'still takes a deposit' do
+      expect { service.call(request: request) }.not_to raise_error
+    end
+  end
+
   context 'when Go accepts the Transaction' do
     before { stub_go_happy_path }
 

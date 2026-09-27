@@ -78,4 +78,17 @@ describe('InitiateAchForm', () => {
     await vi.waitFor(() => expect(wrapper.text()).toContain('entity 7 has no bank account'))
     expect((wrapper.get('input').element as HTMLInputElement).value).toBe('40')
   })
+
+  it('refuses a withdrawal up front while the entity owes for a late return', async () => {
+    const wrapper = await mountWithApollo(InitiateAchForm, {
+      mocks: [],
+      props: { entityId: '7', owedMinorUnits: '5000' },
+    })
+
+    await wrapper.get('input').setValue('10')
+
+    expect(wrapper.get('[data-test=withdrawal]').attributes('disabled')).toBe('')
+    expect(wrapper.get('[data-test=deposit]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.get('[data-test=owes]').text()).toContain('$50.00')
+  })
 })

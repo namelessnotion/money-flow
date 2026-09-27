@@ -69,6 +69,45 @@ RSpec.describe Types::AchTransaction do
     expect(node).to eq('clearingDueOn' => nil)
   end
 
+  describe 'a late return (ruby/docs/adr/0011)' do
+    def node(fields)
+      MoneyFlowSchema.execute("query($e: ID!) { achTransactions(entityId: $e) { nodes { #{fields} } } }",
+                              variables: { e: entity.id.to_s }).to_h.dig('data', 'achTransactions', 'nodes', 0)
+    end
+
+    def returned_deposit(**attributes)
+      ach = create(:ach_transaction, entity: entity, returned_at: Time.utc(2026, 9, 20, 12), return_reason: 'R10',
+                                     **attributes)
+      create(:transaction_projection, aggregate_id: ach.id, state: 'completed',
+                                      state_changed_at: Time.utc(2026, 9, 14, 15, 0))
+      ach
+    end
+
+    it "shows the notice and the late return's projected state" do
+      ach = returned_deposit
+      ach.update(return_transaction_id: Services::DetId.for("#{ach.id}:return"))
+      create(:transaction_projection, aggregate_id: ach.return_transaction_id, state: 'completed')
+
+      expect(node('returnReason returnedAt lateReturnState steps { name status }')).to include(
+        'returnReason' => 'R10', 'returnedAt' => '2026-09-20T12:00:00+00:00', 'lateReturnState' => 'COMPLETED',
+        'steps' => include({ 'name' => 'CLEARING', 'status' => 'SKIPPED' },
+                           { 'name' => 'LATE_RETURN', 'status' => 'DONE' })
+      )
+    end
+
+    it 'has no clearing due date for a deposit clawed back before it cleared' do
+      returned_deposit
+
+      expect(node('clearingDueOn')).to eq('clearingDueOn' => nil)
+    end
+
+    it 'keeps the clearing due date for a deposit whose Clearing was recorded' do
+      returned_deposit(clearing_transaction_id: SecureRandom.uuid_v7)
+
+      expect(node('clearingDueOn')).to eq('clearingDueOn' => '2026-09-17')
+    end
+  end
+
   it 'reads every row and its projections in a single query' do
     3.times do
       ach = create(:ach_transaction, entity: entity)

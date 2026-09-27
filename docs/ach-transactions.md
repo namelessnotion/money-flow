@@ -12,7 +12,8 @@ GraphQL ──► Services::Ach::Initiate ──► Go: StartInitializingTransac
             ach_transactions (intent, ids)
 
 settleAch ──► Go: PostPendingTransfer, ResumeTransaction   (shadow leg runs; completed)
-returnAch ──► Go: CancelStagedTransfer, ResumeTransaction  (rolled back)
+returnAch ──► before settlement: Go CancelStagedTransfer            (rolled back)
+          ──► after it: Go StartInitializingTransaction (late return, below)
 
 Go events ──► money_flow_dev.events ──► Debezium ──► transfer-events / transaction-events
           ──► ruby/bin/consumer ──► transaction_projections / transfer_projections ──► GraphQL state
@@ -110,3 +111,51 @@ A withdrawal funds itself first: its shadow leg moves cleared cash to bank contr
 leg staged and the entry submitted ([`ruby/docs/adr/0004`](../ruby/docs/adr/0004-ach-withdrawal-funds-before-it-leaves.md)).
 On an entity whose deposits have not cleared yet, `initiateAchWithdrawal` is refused before any money moves,
 and the record shows funding failed and the rollback done.
+
+## Late returns
+
+A return can arrive after the entry settled: ordinary ones within 2 banking days, an unauthorized debit (R05,
+R07, R10) up to 60 days later, and a withdrawal credit once its receiving account has closed (R02).
+`returnAch` records the notice on the row first, then asks Go where the ACH Transaction stands
+([`ruby/docs/adr/0011`](../ruby/docs/adr/0011-a-late-return-is-recorded-and-a-shortfall-is-owed.md)):
+
+```
+returnAch -> Services::Ach::Return: record returned_at / return_reason (first notice wins)
+   STARTED   -> CancelStagedTransfer on the real leg, as before
+   COMPLETED -> a late return, its own Transaction, id detid("<ach id>:return"):
+                withdrawal                         -> ach_withdrawal_return: bank -> cash, bank_control -> cleared_cash
+                deposit, no Clearing recorded      -> ach_deposit_clawback:  uncleared_cash -> bank_control, cash -> bank
+                deposit, Clearing recorded         -> ach_deposit_return:    receivable -> bank (the entity now owes)
+
+resque-scheduler (every minute)   -> Jobs::FinishAchReturns   -> Services::Ach::ReturnDue
+resque-scheduler (every 5 minutes) -> Jobs::RecoverReceivables -> Services::Ach::RecoverDue
+   one Recovery per entity at a time: cleared_cash -> bank_control, cash -> receivable
+```
+
+`ReturnDue` sees through a notice that arrived just as its entry settled, or a late return that never reached
+Go. What an entity owes shows as `Entity.owedMinorUnits` and as the negative balance of its `receivable`
+account. While it owes anything, `initiateAchWithdrawal` and `purchaseSecurity` are refused. Deposits,
+Repayments, Draws and Disbursements still go through, and `RecoverDue` collects what reaches cleared cash.
+
+Per entity, `bank - bank_control + receivable` is 0 whenever nothing of its is in flight. That is how to
+check that every late return was recorded.
+
+Entities onboarded before receivables existed need one opened before a late deposit return of theirs can be
+recorded:
+
+```bash
+docker compose exec ruby bundle exec rake accounts:open_receivables
+```
+
+To collect what is owed without waiting for the sweep:
+
+```bash
+docker compose exec resque-worker bundle exec ruby -e \
+  'require "./lib/environment"; require "logger"
+   p Services::Ach::RecoverDue.new(logger: Logger.new($stdout)).call'
+```
+
+Nothing here stops the first-party fraud in #8. An owner can still deposit, wait for the Clearing, withdraw
+the money, and then dispute the deposit. The loss is now recorded as owed, but preventing it needs an exposure
+policy for unauthorized returns, which is still to come.
+
