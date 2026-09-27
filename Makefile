@@ -206,11 +206,12 @@ $(ALLOY):
 
 # Checks the ledger's money model (spec/alloy/ledger.als). Each command it
 # runs carries an `expect`, and exec exits non-zero when a result contradicts
-# it. -n drops instances whose Int arithmetic overflows. Expect about 40
-# minutes: proving FundedWithdrawalCanBePaid alone takes about 26.
-# SidesAgreeAtRest and EveryStartedTransactionConcludes aren't listed: they
-# haven't finished at their scopes yet, so they have no `expect`.
-ALLOY_COMMANDS := FundedWithdrawalCanBePaid DrawRollbackNeverFails DepositSettlesThenClears WithdrawalPaidOut
+# it. -n drops instances whose Int arithmetic overflows. Expect well over an
+# hour: the proofs and the late-return counterexample each take 10 to 30
+# minutes. SidesAgreeAtRest and EveryStartedTransactionConcludes aren't listed:
+# they haven't finished at their scopes yet, so they have no `expect`.
+ALLOY_COMMANDS := FundedWithdrawalCanBePaid DrawRollbackNeverFails UnclearedMoneyStaysBacked \
+	LateReturnIsRecoverable DepositSettlesThenClears WithdrawalPaidOut
 
 alloy-check: $(ALLOY)
 	cd spec/alloy && for command in $(ALLOY_COMMANDS); do \

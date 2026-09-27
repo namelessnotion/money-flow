@@ -316,8 +316,23 @@ pred OpeningBalances {
   }
   (sum a: Account | a.posted) = 0                   -- double entry: every debit has its credit
   all p: Party | sideTotal[p, CashSide] = sideTotal[p, ClearedSide]
-  all t: Transfer | t.st = Idle
-  all x: Txn | x.xs = NotStarted
+  all t: Transfer | t.st = (t.txn in AlreadyCompleted => Posted else Idle)
+  all x: Txn | x.xs = (x in AlreadyCompleted => Completed else NotStarted)
+}
+
+-- Deposits that completed before the search starts. The opening balances
+-- already stand in for the ledger's history. These give part of that history
+-- names, so a later action (a late ACH return) can refer to a deposit without
+-- the trace first replaying all of its steps. They're still uncleared: any
+-- Clearing runs inside the trace. So their holder's uncleared cash must still
+-- hold them, because uncleared money can't have been spent. Without that, the
+-- opening balances could contradict the history they stand in for.
+sig AlreadyCompleted in Deposit {}
+
+fact HistoryIsConsistent {
+  all e: Entity |
+    (sum d: AlreadyCompleted & holder.e | d.amount)
+      <= (sum a: { a: Account | a.owner = e and a.type = UnclearedCash } | a.posted)
 }
 
 ---------------------------------------------------------------------------
@@ -479,6 +494,29 @@ fact Behaviour {
   )
 }
 
+-- A late ACH return: after a deposit has settled, the network takes its
+-- money back out of the platform's bank. An unauthorized-debit return (R05,
+-- R07, R10) may arrive up to 60 days after settlement, long after
+-- ClearingPolicy's 3 business days.
+--
+-- The ledger can't record it: Services::Ach::Return only cancels a *staged*
+-- real leg, and after settlement Go refuses that. So the ledger doesn't
+-- change, which makes this a `stutter` step. What the step does change is
+-- ReturnedLate, which records that the platform's real money has gone.
+var sig ReturnedLate in Deposit {}
+
+pred lateReturn[d: Deposit] {
+  d.xs = Completed
+  d not in ReturnedLate
+  stutter
+  ReturnedLate' = ReturnedLate + d
+}
+
+fact TheNetworkReturnsLate {
+  no ReturnedLate
+  always (ReturnedLate' = ReturnedLate or some d: Deposit | lateReturn[d])
+}
+
 ---------------------------------------------------------------------------
 -- 6. PROPERTIES
 ---------------------------------------------------------------------------
@@ -515,6 +553,31 @@ assert FundedWithdrawalCanBePaid {
   always all w: Withdrawal |
     (w.xs = Started and w.shadow.st = Posted and w.real.st = Idle)
       implies canDebit[w.real.src, w.amount]
+}
+
+-- ADVERSARIAL 1: uncleared money never leaves an entity. Its available cash
+-- (posted, less what staged withdrawals have reserved) always covers its
+-- uncleared and cleared cash together. Every way money leaves `cash`, whether
+-- a withdrawal's real leg or a cash leg paying a Security, first takes the
+-- same amount out of *cleared* cash. So while this holds, the part of `cash`
+-- that backs uncleared money can't be spent or sent to a bank. It's also the
+-- in-flight invariant ruby ADR 0010 relies on: FundedWithdrawalCanBePaid
+-- follows from it.
+assert UnclearedMoneyStaysBacked {
+  always all a: Account |
+    a.type = Cash implies available[a] >= sideTotal[a.owner, ClearedSide]
+}
+
+-- ADVERSARIAL 2: a late return can be recovered from the depositor. When the
+-- network takes a deposit back, the depositor's available cash still covers
+-- it, so the platform could debit it from them. A counterexample means the
+-- money was spent or withdrawn before the return arrived, and the platform
+-- carries the loss. It needn't be a second party: the account owner can
+-- withdraw the cleared money back to the same account, then dispute the
+-- original debit as unauthorized, and receive the money twice.
+assert LateReturnIsRecoverable {
+  always all d: Deposit |
+    lateReturn[d] implies canDebit[acct[d.holder, Cash], d.amount]
 }
 
 -- Weak fairness. The orchestrator keeps reacting to events and resuming,
@@ -560,7 +623,8 @@ check SidesAgreeAtRest
 -- exactly that cast (6 Accounts, 4 Transfers, 1 Repayment, 1 Withdrawal)
 -- gave the counterexample in about 11 minutes: the Repayment's cash leg
 -- posted before its money leg, then Funding. Version 3 is UNSAT at this
--- scope, which contains that cast, in about 26 minutes.
+-- scope, which contains that cast: 26 minutes on one run, 6 on another. Solve
+-- times vary that much between runs.
 check FundedWithdrawalCanBePaid
   for 3 but 6 Int, 6 Account, 4 Transfer, 2 Txn, 1..6 steps expect 0
 
@@ -586,3 +650,19 @@ assert DrawRollbackNeverFails {
 
 check DrawRollbackNeverFails
   for 3 but 6 Int, 6 Account, 4 Transfer, 2 Txn, 1..8 steps expect 0
+
+-- One entity's deposit, its clearing and a withdrawal: every ACH way into
+-- and out of `cash`.
+check UnclearedMoneyStaysBacked
+  for 3 but 6 Int, exactly 5 Account, exactly 5 Transfer,
+    exactly 1 Deposit, exactly 1 Clearing, exactly 1 Withdrawal, 1..7 steps expect 0
+
+-- The first-party fraud: a deposit clears and is withdrawn, and then the
+-- network returns it. `expect 1` pins the known gap
+-- (namelessnotion/money_flow#8). Flip it to `expect 0` once a late return can
+-- be recorded and recovered. On 2026-09-27 the counterexample took about 24
+-- minutes, and UnclearedMoneyStaysBacked's proof about 16.5, while the
+-- withdrawal-v1 mutation fails it in 14 seconds.
+check LateReturnIsRecoverable
+  for 3 but 6 Int, exactly 5 Account, exactly 5 Transfer,
+    exactly 1 Deposit, exactly 1 Clearing, exactly 1 Withdrawal, 1..8 steps expect 1
