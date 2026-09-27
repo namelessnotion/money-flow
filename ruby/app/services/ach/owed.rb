@@ -30,17 +30,24 @@ module Services
       const :recovered, Integer
 
       sig { params(entity_id: Integer).returns(Owed) }
-      def self.for(entity_id)
-        new(debt_recorded: total(debts.where(ACH[:entity_id] => entity_id)),
-            debt_completed: total(completed(debts, ACH[:return_transaction_id]).where(ACH[:entity_id] => entity_id)),
-            recovered: total(completed(Models::ReceivableRecovery.dataset, RECOVERY[:id])
-                               .where(RECOVERY[:entity_id] => entity_id)))
+      def self.for(entity_id) = for_each([entity_id]).fetch(entity_id)
+
+      # What each of `entity_ids` owes, in three queries however many there are.
+      sig { params(entity_ids: T::Array[Integer]).returns(T::Hash[Integer, Owed]) }
+      def self.for_each(entity_ids)
+        recorded = totals(debts, ACH[:entity_id], entity_ids)
+        returned = totals(completed_debts, ACH[:entity_id], entity_ids)
+        recovered = totals(recoveries, RECOVERY[:entity_id], entity_ids)
+        entity_ids.to_h do |id|
+          [id, new(debt_recorded: recorded.fetch(id, 0), debt_completed: returned.fetch(id, 0),
+                   recovered: recovered.fetch(id, 0))]
+        end
       end
 
       # Every entity that owes something Recovery may collect now.
       sig { returns(T::Array[Integer]) }
       def self.recoverable_entity_ids
-        ids = completed(debts, ACH[:return_transaction_id]).distinct.select_map(ACH[:entity_id])
+        ids = completed_debts.distinct.select_map(ACH[:entity_id])
         ids.map { |id| Integer(id) }.select { |id| self.for(id).for_recovery.positive? }.sort
       end
 
@@ -54,6 +61,16 @@ module Services
       end
       private_class_method :debts
 
+      # Debts whose late return the projection has seen complete.
+      T::Sig::WithoutRuntime.sig { returns(Sequel::Dataset) }
+      def self.completed_debts = completed(debts, ACH[:return_transaction_id])
+      private_class_method :completed_debts
+
+      # Recoveries the projection has seen complete.
+      T::Sig::WithoutRuntime.sig { returns(Sequel::Dataset) }
+      def self.recoveries = completed(Models::ReceivableRecovery.dataset, RECOVERY[:id])
+      private_class_method :recoveries
+
       # `dataset`'s rows whose Transaction, by the id in `column`, the
       # projection has seen complete.
       T::Sig::WithoutRuntime.sig do
@@ -65,13 +82,18 @@ module Services
       end
       private_class_method :completed
 
-      # Postgres sums bigints as numeric, which Sequel hands back as BigDecimal,
-      # and as NULL over no rows.
-      T::Sig::WithoutRuntime.sig { params(dataset: Sequel::Dataset).returns(Integer) }
-      def self.total(dataset)
-        Integer(dataset.sum(:amount_minor_units) || 0)
+      # Each of `entity_ids`' summed amount, by the entity column `by`.
+      # Postgres sums bigints as numeric, which Sequel hands back as BigDecimal.
+      T::Sig::WithoutRuntime.sig do
+        params(dataset: Sequel::Dataset, by: Sequel::SQL::QualifiedIdentifier, entity_ids: T::Array[Integer])
+          .returns(T::Hash[Integer, Integer])
       end
-      private_class_method :total
+      def self.totals(dataset, by, entity_ids)
+        dataset.where(by => entity_ids).select_group(by.as(:entity_id))
+               .select_append(Sequel.function(:sum, :amount_minor_units).as(:total))
+               .naked.all.to_h { |row| [Integer(row.fetch(:entity_id)), Integer(row.fetch(:total))] }
+      end
+      private_class_method :totals
 
       sig { returns(Integer) }
       def for_gate = [debt_recorded - recovered, 0].max

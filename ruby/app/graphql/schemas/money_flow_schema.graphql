@@ -57,6 +57,7 @@ enum AchStepName {
   COMPLETION
   FUNDING
   INITIATION
+  LATE_RETURN
   ROLLBACK
   SETTLEMENT
   SUBMISSION
@@ -93,6 +94,12 @@ type AchTransaction {
   currency: String!
   direction: AchDirection!
   id: ID!
+
+  """
+  Projected state of the late return: the Transaction recording a return that
+  arrived after the entry settled. Null until one has been originated and projected.
+  """
+  lateReturnState: TransactionState
   providerReference: String
 
   """
@@ -106,6 +113,16 @@ type AchTransaction {
   reason: String
 
   """
+  The provider's return notice (an R-code), once one has arrived.
+  """
+  returnReason: String
+
+  """
+  When the return notice was recorded.
+  """
+  returnedAt: ISO8601DateTime
+
+  """
   The Transaction's projected state.
   """
   state: TransactionState
@@ -113,7 +130,7 @@ type AchTransaction {
   """
   The lifecycle steps — initiation, funding (a withdrawal), submission,
   settlement, completion, clearing (a deposit) and, while one is under way,
-  rollback — and where each stands.
+  rollback or a late return — and where each stands.
   """
   steps: [AchStep!]!
 }
@@ -216,6 +233,13 @@ type Entity {
   holderUuid: ID!
   id: ID!
   name: String!
+
+  """
+  What this entity owes the platform for late ACH deposit returns, not yet
+  recovered from its cleared cash. While it owes anything, it can neither
+  withdraw nor subscribe.
+  """
+  owedMinorUnits: BigInt!
 
   """
   What part it plays in this market.
@@ -377,12 +401,14 @@ What moved the money in a Movement, which decides where it ran from and to.
 """
 enum MovementKind {
   DEPOSIT
+  DEPOSIT_RETURN
   DISBURSEMENT_INTEREST
   DISBURSEMENT_PRINCIPAL
   DRAW
   REPAYMENT
   SUBSCRIPTION
   WITHDRAWAL
+  WITHDRAWAL_RETURN
 }
 
 type Mutation {

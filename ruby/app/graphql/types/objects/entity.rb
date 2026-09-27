@@ -17,6 +17,10 @@ module Types
     field :updated_at, GraphQL::Types::ISO8601DateTime, null: false
     field :accounts, [Types::Account], null: false,
                                        description: 'Financial accounts held by this entity.'
+    field :owed_minor_units, GraphQL::Types::BigInt,
+          null: false,
+          description: 'What this entity owes the platform for late ACH deposit returns, not yet recovered from ' \
+                       'its cleared cash. While it owes anything, it can neither withdraw nor subscribe.'
 
     # DB column backing each scalar field, keyed by the field's Ruby name.
     COLUMNS_BY_FIELD = T.let({
@@ -87,6 +91,11 @@ module Types
       def node_selections(lookahead)
         [lookahead.selection(:nodes), lookahead.selection(:edges).selection(:node)].select(&:selected?)
       end
+    end
+
+    sig { returns(Integer) }
+    def owed_minor_units
+      dataloader.with(Sources::EntityOwed).load(object.id)
     end
   end
 end
