@@ -20,6 +20,22 @@ RSpec.describe Services::Ach::Return do
     expect(transaction_client).not_to have_received(:get_transaction_state)
   end
 
+  it 'records the notice before acting on it' do
+    service.call(ach_transaction_id: ach.id, reason: 'R01 insufficient funds')
+
+    expect(ach.reload.return_reason).to eq('R01 insufficient funds')
+    expect(ach.returned_at).not_to be_nil
+  end
+
+  it 'keeps the first notice when a second arrives' do
+    service.call(ach_transaction_id: ach.id, reason: 'R01 insufficient funds')
+    first_at = ach.reload.returned_at
+
+    service.call(ach_transaction_id: ach.id, reason: 'R10 unauthorized')
+
+    expect([ach.reload.return_reason, ach.returned_at]).to eq(['R01 insufficient funds', first_at])
+  end
+
   it 'raises when Go refuses to cancel' do
     allow(transfer_client).to receive(:cancel_staged_transfer) do |req|
       twirp_ok(Transfer::V1::CancelStagedTransferResponse.new(

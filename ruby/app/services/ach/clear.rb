@@ -14,6 +14,13 @@ module Services
     # ids are derived from the deposit's, so asking again is a no-op in Go, and
     # Ruby keeps no "already cleared" guard of its own. It does not decide
     # whether the deposit is due — ClearDue and ClearingPolicy do.
+    #
+    # The ids are recorded under the row's lock, the one Return takes to record
+    # a notice. A deposit with a notice and no Clearing recorded is refused:
+    # its late return is a clawback, which takes the money back out of
+    # uncleared cash, and a Clearing now would take another deposit's money
+    # there instead (ruby/docs/adr/0011, decision 3). One recorded before the
+    # notice is sent as usual.
     class Clear < BaseService
       sig { params(gateway: GoGateway).void }
       def initialize(gateway: GoGateway.new)
@@ -26,7 +33,7 @@ module Services
         ach = find_deposit!(ach_transaction_id)
         transaction_id = DetId.for("#{ach.id}:clearing")
         shape = shape_for(ach)
-        perform { ach.update(clearing_transaction_id: transaction_id, clearing_transfer_id: shape.transfer_id) }
+        perform { record!(ach, transaction_id, shape.transfer_id) }
 
         @go.start_transaction(shape.start_request(transaction_id: transaction_id,
                                                   amount_minor_units: ach.amount_minor_units))
@@ -41,6 +48,16 @@ module Services
         return ach if ach.direction == Types::Enums::AchDirection::Deposit.serialize
 
         raise NotClearable, "#{ach.id} is a #{ach.direction}; only deposits are cleared"
+      end
+
+      sig { params(ach: Models::AchTransaction, transaction_id: String, transfer_id: String).void }
+      def record!(ach, transaction_id, transfer_id)
+        ach.lock!
+        if ach.returned_at && ach.clearing_transaction_id.nil?
+          raise NotClearable, "#{ach.id} has a return notice (#{ach.return_reason}) and was never cleared"
+        end
+
+        ach.update(clearing_transaction_id: transaction_id, clearing_transfer_id: transfer_id)
       end
 
       sig { params(ach: Models::AchTransaction).returns(ClearingShape) }

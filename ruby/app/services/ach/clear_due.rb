@@ -15,6 +15,9 @@ module Services
     # nothing, and a rejected or rolled-back one needs a person, not a retry.
     # One sent but not yet seen is sent again, which Go dedupes by id.
     #
+    # A deposit with a return notice is left alone unless its Clearing was
+    # already recorded: Clear would refuse it (ruby/docs/adr/0011).
+    #
     # Being a sweep, it catches up on its own after any outage: nothing is
     # scheduled per deposit that could be lost.
     class ClearDue
@@ -69,6 +72,8 @@ module Services
                               .join(Sequel[:transaction_projections].as(:completion), aggregate_id: ACH[:id])
                               .where(ACH[:direction] => Types::Enums::AchDirection::Deposit.serialize,
                                      COMPLETION[:state] => Types::Enums::TransactionState::Completed.serialize)
+                              .where(Sequel.|({ ACH[:returned_at] => nil },
+                                              Sequel.~(ACH[:clearing_transaction_id] => nil)))
       end
 
       T::Sig::WithoutRuntime.sig do

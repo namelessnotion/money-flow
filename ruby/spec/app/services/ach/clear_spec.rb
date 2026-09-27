@@ -63,6 +63,28 @@ RSpec.describe Services::Ach::Clear do
     expect(recorded).to eq(Services::DetId.for("#{ach.id}:clearing"))
   end
 
+  # A late return of a deposit with no Clearing recorded is a clawback, which
+  # takes its money back out of uncleared cash. Clearing it now would move
+  # another deposit's money instead (ruby/docs/adr/0011, decision 3).
+  it 'refuses a deposit with a return notice whose clearing was never recorded' do
+    ach.update(returned_at: Time.now, return_reason: 'R01')
+
+    expect { service.call(ach_transaction_id: ach.id) }.to raise_error(Services::Ach::NotClearable, /return/)
+    expect(ach.reload.clearing_transaction_id).to be_nil
+    expect(transaction_client).not_to have_received(:start_initializing_transaction)
+  end
+
+  # Its late return is a debt, and the money has to land in cleared cash for
+  # Recovery to collect it.
+  it 'still sends a clearing that was recorded before the notice' do
+    service.call(ach_transaction_id: ach.id)
+    ach.reload.update(returned_at: Time.now, return_reason: 'R10')
+
+    service.call(ach_transaction_id: ach.id)
+
+    expect(transaction_client).to have_received(:start_initializing_transaction).twice
+  end
+
   it 'refuses a withdrawal, which has nothing to clear' do
     withdrawal = create(:ach_transaction, entity: entity, direction: 'withdrawal')
 
