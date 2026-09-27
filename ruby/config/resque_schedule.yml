@@ -31,6 +31,18 @@ submit_ach_entries:
   queue: ach
   description: Submit ACH entries whose real leg is staged to the provider
 
+# Sees every ACH return notice through (Services::Ach::ReturnDue): a notice
+# that arrived as its entry settled, or a late return Ruby recorded but the read
+# model hasn't seen, is acted on again (ruby/docs/adr/0011). Every minute and
+# every day, like submission: a late return is money the ledger doesn't know
+# has gone, and while it waits the entity may still spend it. Idempotent, so a
+# missed or failed run is picked up by the next.
+finish_ach_returns:
+  cron: "* * * * * America/New_York"
+  class: Jobs::FinishAchReturns
+  queue: ach
+  description: Cancel or record a late return for every ACH return notice not yet seen through
+
 # Pays every completed Repayment out to the holders of its Security, one
 # Transaction per holder (ruby/docs/adr/0007). Every five minutes rather than
 # hourly: unlike ACH clearing, nothing here waits on a calendar, so the only
