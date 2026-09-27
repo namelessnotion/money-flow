@@ -3,7 +3,7 @@ package saga
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -21,6 +21,16 @@ type Message struct {
 
 func (m Message) String() string {
 	return fmt.Sprintf("%s[%d]@%d", m.Topic, m.Partition, m.Offset)
+}
+
+// LogValue is where the message sits, never its key or body: the body is the
+// published event, which this package deliberately never reads.
+func (m Message) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("topic", m.Topic),
+		slog.Int("partition", m.Partition),
+		slog.Int64("offset", m.Offset),
+	)
 }
 
 // Reader is the delivery side of the transport, narrow enough that the
@@ -108,7 +118,7 @@ type Consumer struct {
 	handler  Handler
 	attempts int
 	backoff  time.Duration
-	logger   *log.Logger
+	logger   *slog.Logger
 }
 
 // ConsumerOption adjusts a Consumer at construction.
@@ -131,7 +141,7 @@ func WithBackoff(d time.Duration) ConsumerOption {
 }
 
 // WithLogger redirects the consumer's own reporting.
-func WithLogger(l *log.Logger) ConsumerOption {
+func WithLogger(l *slog.Logger) ConsumerOption {
 	return func(c *Consumer) { c.logger = l }
 }
 
@@ -141,7 +151,7 @@ func NewConsumer(reader Reader, handler Handler, opts ...ConsumerOption) *Consum
 		handler:  handler,
 		attempts: defaultAttempts,
 		backoff:  defaultBackoff,
-		logger:   log.Default(),
+		logger:   slog.Default(),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -271,7 +281,8 @@ func (c *Consumer) consumePartition(
 			// Stop the other partitions first, then say so: once the halt is
 			// visible, nothing else should still be starting.
 			fail(err)
-			c.logger.Printf("saga: HALTED on %s; nothing further will be consumed from this reader: %v", msg, err)
+			c.logger.ErrorContext(ctx, "saga: HALTED; nothing further will be consumed from this reader",
+				slog.Any("message", msg), slog.Any("err", err))
 			return
 		}
 
@@ -357,7 +368,7 @@ func (c *Consumer) commitHandled(ctx context.Context, handled <-chan Message, fa
 		take(m)
 	}
 	if err := commit(flushCtx); err != nil {
-		c.logger.Printf("saga: final commit failed; these offsets will be redelivered: %v", err)
+		c.logger.ErrorContext(ctx, "saga: final commit failed; these offsets will be redelivered", slog.Any("err", err))
 	}
 }
 
@@ -377,7 +388,9 @@ func (c *Consumer) process(ctx context.Context, msg Message) error {
 	var lastErr error
 	for attempt := 1; attempt <= c.attempts; attempt++ {
 		if attempt > 1 {
-			c.logger.Printf("saga: retrying %s (%s), attempt %d of %d, after: %v", msg, trigger, attempt, c.attempts, lastErr)
+			c.logger.WarnContext(ctx, "saga: retrying",
+				slog.Any("message", msg), slog.Any("trigger", trigger),
+				slog.Int("attempt", attempt), slog.Int("attempts", c.attempts), slog.Any("err", lastErr))
 			if err := sleep(ctx, backoff); err != nil {
 				return err
 			}
@@ -391,7 +404,7 @@ func (c *Consumer) process(ctx context.Context, msg Message) error {
 			// partly for central logging — a consumer whose only output is
 			// silence gives an operator no way to tell "nothing to do" from
 			// "receiving nothing".
-			c.logger.Printf("saga: handled %s: %s", msg, trigger)
+			c.logger.InfoContext(ctx, "saga: handled", slog.Any("message", msg), slog.Any("trigger", trigger))
 			return nil
 		}
 		if isShutdown(ctx) {

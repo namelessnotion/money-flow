@@ -6,8 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io"
-	"log"
+	"log/slog"
 	"net"
 	"path/filepath"
 	"strings"
@@ -60,7 +59,7 @@ func waiter(brokers []string, script *scriptedCheck) topicWait {
 		now:            script.now,
 		pollInterval:   pollInterval,
 		unreachableFor: 20 * pollInterval,
-		logger:         log.New(io.Discard, "", 0),
+		logger:         slog.New(slog.DiscardHandler),
 	}
 }
 
@@ -183,7 +182,7 @@ func TestWaitForTopic_RejectsAnEmptyBrokerList(t *testing.T) {
 	t.Parallel()
 	// Without this an empty list reads as "every broker answered, no topic",
 	// which is an indefinite wait for a topic nothing is being asked about.
-	if err := WaitForTopic(context.Background(), nil, "transfer-events"); err == nil {
+	if err := WaitForTopic(context.Background(), nil, "transfer-events", slog.New(slog.DiscardHandler)); err == nil {
 		t.Fatal("WaitForTopic() error = nil, want a configuration failure")
 	}
 }

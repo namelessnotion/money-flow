@@ -11,7 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/segmentio/kafka-go"
@@ -62,7 +62,7 @@ const maxUnreachable = time.Minute
 // Waiting here also gives an operator the right signal: an orchestrator that
 // logs "waiting for transfer-events" is telling them the connector is not
 // registered, which silence never would.
-func WaitForTopic(ctx context.Context, brokers []string, topic string) error {
+func WaitForTopic(ctx context.Context, brokers []string, topic string, logger *slog.Logger) error {
 	if len(brokers) == 0 {
 		return fmt.Errorf("kafkareader: %s: no brokers configured", topic)
 	}
@@ -73,7 +73,7 @@ func WaitForTopic(ctx context.Context, brokers []string, topic string) error {
 		now:            time.Now,
 		pollInterval:   topicPollInterval,
 		unreachableFor: maxUnreachable,
-		logger:         log.Default(),
+		logger:         logger,
 	}.run(ctx)
 }
 
@@ -91,7 +91,7 @@ type topicWait struct {
 	now            func() time.Time
 	pollInterval   time.Duration
 	unreachableFor time.Duration
-	logger         *log.Logger
+	logger         *slog.Logger
 }
 
 func (w topicWait) run(ctx context.Context) error {
@@ -107,7 +107,7 @@ func (w topicWait) run(ctx context.Context) error {
 			if w.now().Sub(unreachableSince) >= w.unreachableFor {
 				return fmt.Errorf("kafkareader: %s: no broker reachable in the last %s: %w", w.topic, w.unreachableFor, err)
 			}
-			w.logger.Printf("kafkareader: %s: checking for topic: %v", w.topic, err)
+			w.logger.WarnContext(ctx, "kafkareader: checking for topic", slog.String("topic", w.topic), slog.Any("err", err))
 		case exists:
 			return nil
 		default:
@@ -115,7 +115,7 @@ func (w topicWait) run(ctx context.Context) error {
 			// does not exist yet. Whatever outage came before it is over.
 			unreachableSince = time.Time{}
 			if !announced {
-				w.logger.Printf("kafkareader: waiting for topic %s; nothing has been published to it yet", w.topic)
+				w.logger.InfoContext(ctx, "kafkareader: waiting for topic; nothing has been published to it yet", slog.String("topic", w.topic))
 				announced = true
 			}
 		}
@@ -214,7 +214,7 @@ type Reader struct {
 // New opens a group reader for topic. Nothing connects until the first Fetch,
 // so call WaitForTopic first: a group that forms before its topic exists never
 // recovers on its own.
-func New(brokers []string, groupID, topic string) *Reader {
+func New(brokers []string, groupID, topic string, logger *slog.Logger) *Reader {
 	return &Reader{reader: kafka.NewReader(kafka.ReaderConfig{
 		Brokers: brokers,
 		GroupID: groupID,
@@ -238,7 +238,7 @@ func New(brokers []string, groupID, topic string) *Reader {
 		// indistinguishable from an idle topic — and an idle topic is the
 		// normal state here, so there is nothing else to notice it by.
 		ErrorLogger: kafka.LoggerFunc(func(format string, args ...any) {
-			log.Printf("kafkareader: %s: %s", topic, fmt.Sprintf(format, args...))
+			logger.Error("kafkareader: "+fmt.Sprintf(format, args...), slog.String("topic", topic))
 		}),
 	})}
 }

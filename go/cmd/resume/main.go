@@ -43,18 +43,23 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/namelessnotion/money_flow/go/internal/eventstore"
 	"github.com/namelessnotion/money_flow/go/internal/ledger"
 	"github.com/namelessnotion/money_flow/go/internal/saga"
+	"github.com/namelessnotion/money_flow/go/internal/telemetry"
 )
 
 const (
 	defaultDatabaseURL          = "postgres://money_flow:money_flow@localhost:5432/money_flow_dev?sslmode=disable"
 	defaultTigerBeetleAddress   = "127.0.0.1:3000"
 	defaultTigerBeetleClusterID = "0"
+
+	// telemetryFlushTimeout bounds exporting what is still buffered on exit.
+	telemetryFlushTimeout = 10 * time.Second
 )
 
 func env(key, fallback string) string {
@@ -72,41 +77,72 @@ func main() {
 		log.Fatal("resume: pass either -open or one or more aggregate ids, not both and not neither")
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	pool, err := pgxpool.New(ctx, env("DATABASE_URL", defaultDatabaseURL))
+	// Telemetry is exported only when an OTLP endpoint is configured, the same
+	// as the long-running binaries, so a hand-driven saga leaves the same
+	// traces a delivered trigger would. What this tool prints stays plain
+	// text: it is read by the operator at the terminal that ran it.
+	cfg, err := telemetry.ConfigFromEnv("money-flow-resume", os.Getenv)
 	if err != nil {
-		log.Fatalf("resume: pool: %v", err)
+		log.Fatalf("resume: %v", err)
+	}
+	tel, err := telemetry.Setup(context.Background(), cfg)
+	if err != nil {
+		log.Fatalf("resume: %v", err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	err = resume(ctx, tel, *open, flag.Args())
+	stop()
+
+	flushCtx, cancel := context.WithTimeout(context.Background(), telemetryFlushTimeout)
+	defer cancel()
+	if err := tel.Shutdown(flushCtx); err != nil {
+		log.Printf("resume: flushing telemetry: %v", err)
+	}
+	if err != nil {
+		log.Fatalf("resume: %v", err)
+	}
+}
+
+func resume(ctx context.Context, tel *telemetry.Telemetry, open bool, ids []string) error {
+	cfg, err := pgxpool.ParseConfig(env("DATABASE_URL", defaultDatabaseURL))
+	if err != nil {
+		return fmt.Errorf("pool: %w", err)
+	}
+	telemetry.InstrumentPool(cfg, tel.Providers)
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("pool: %w", err)
 	}
 	defer pool.Close()
 	if err := pool.Ping(ctx); err != nil {
-		log.Fatalf("resume: ping: %v", err)
+		return fmt.Errorf("ping: %w", err)
 	}
 
 	clusterID, err := strconv.ParseUint(env("TIGERBEETLE_CLUSTER_ID", defaultTigerBeetleClusterID), 10, 64)
 	if err != nil {
-		log.Fatalf("resume: TIGERBEETLE_CLUSTER_ID: %v", err)
+		return fmt.Errorf("TIGERBEETLE_CLUSTER_ID: %w", err)
 	}
 	// Driving a saga stages, posts and voids in TigerBeetle. This is not a
 	// read-only tool and cannot run without the ledger.
 	tb, err := ledger.NewRealClient(clusterID, strings.Split(env("TIGERBEETLE_ADDRESS", defaultTigerBeetleAddress), ","))
 	if err != nil {
-		log.Fatalf("resume: tigerbeetle: %v", err)
+		return fmt.Errorf("tigerbeetle: %w", err)
 	}
 	defer tb.Close()
 
-	store := eventstore.NewPostgresStore(pool)
-	driver := driver{orchestrator: saga.Wire(store, tb).Orchestrator(), store: store}
+	store := telemetry.NewStore(eventstore.NewPostgresStore(pool), tel.Providers)
+	orchestrator := saga.Wire(store, telemetry.NewLedger(tb, tel.Providers)).Orchestrator()
+	driver := driver{orchestrator: telemetry.SagaHandler(tel.Providers, orchestrator), store: store}
 	catalogue := catalogue{pool: pool}
 
-	targets, err := resolveTargets(ctx, catalogue, driver, *open, flag.Args())
+	targets, err := resolveTargets(ctx, catalogue, driver, open, ids)
 	if err != nil {
-		log.Fatalf("resume: %v", err)
+		return err
 	}
 	if len(targets) == 0 {
 		log.Print("resume: nothing in flight")
-		return
+		return nil
 	}
 
 	// Only aggregates that moved, or could not be, are worth a line each. Most
@@ -130,8 +166,9 @@ func main() {
 	log.Printf("resume: %d advanced, %d already where they should be, %d failed, of %d in flight",
 		advanced, inert, failed, len(targets))
 	if failed > 0 {
-		log.Fatalf("resume: %d of %d aggregates could not be driven", failed, len(targets))
+		return fmt.Errorf("%d of %d aggregates could not be driven", failed, len(targets))
 	}
+	return nil
 }
 
 // resolveTargets turns the command line into the aggregates to drive.

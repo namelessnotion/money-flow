@@ -20,7 +20,7 @@ const maxWakeUps = 100
 // driver drives aggregates through the real orchestrator, so a Transfer wakes
 // the Transaction that owns it exactly as a delivered trigger would.
 type driver struct {
-	orchestrator *saga.Orchestrator
+	orchestrator saga.Handler
 	store        eventstore.Store
 }
 

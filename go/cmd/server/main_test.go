@@ -2,9 +2,15 @@ package main
 
 import (
 	"context"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
+
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	holderpb "github.com/namelessnotion/money_flow/go/gen/proto/holder/v1"
 	sharedpb "github.com/namelessnotion/money_flow/go/gen/proto/shared/v1"
@@ -15,6 +21,7 @@ import (
 	"github.com/namelessnotion/money_flow/go/internal/eventstore"
 	"github.com/namelessnotion/money_flow/go/internal/ledger"
 	"github.com/namelessnotion/money_flow/go/internal/saga"
+	"github.com/namelessnotion/money_flow/go/internal/telemetry"
 	"github.com/namelessnotion/money_flow/go/internal/testutil"
 	"github.com/namelessnotion/money_flow/go/internal/transfer"
 )
@@ -29,7 +36,7 @@ func (okPinger) Ping(context.Context) error { return nil }
 // exercised.
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(newMux(eventstore.NewMemoryStore(), okPinger{}, ledger.NewFakeClient()))
+	srv := httptest.NewServer(newMux(eventstore.NewMemoryStore(), okPinger{}, ledger.NewFakeClient(), telemetry.Noop()))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -79,7 +86,7 @@ func newTestServerWithStore(t *testing.T) (*httptest.Server, *ledger.FakeClient,
 	t.Helper()
 	lc := ledger.NewFakeClient()
 	store := eventstore.NewMemoryStore()
-	srv := httptest.NewServer(newMux(store, okPinger{}, lc))
+	srv := httptest.NewServer(newMux(store, okPinger{}, lc, telemetry.Noop()))
 	t.Cleanup(srv.Close)
 	return srv, lc, store
 }
@@ -296,5 +303,51 @@ func TestPoolConfigRejectsAnUnparsableURL(t *testing.T) {
 
 	if _, err := poolConfig("not-a-postgres-url", 10); err == nil {
 		t.Error("poolConfig() error = nil, want a parse error for a malformed DATABASE_URL")
+	}
+}
+
+// An RPC is one trace from the HTTP request down to the event store: the
+// command's span sits under the HTTP span, and every append it made sits
+// under the command. This is the wiring, not the decorators, being tested:
+// each piece is installed where the request actually passes.
+func TestAnRPCIsOneTraceThroughToTheEventStore(t *testing.T) {
+	t.Parallel()
+	spans := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans))
+	p := telemetry.Noop()
+	p.Tracer = tp
+	srv := httptest.NewServer(newMux(eventstore.NewMemoryStore(), okPinger{}, ledger.NewFakeClient(), p))
+	t.Cleanup(srv.Close)
+
+	client := holderpb.NewHolderServiceProtobufClient(srv.URL, srv.Client())
+	if _, err := client.Provision(context.Background(), &holderpb.ProvisionRequest{
+		Id:      testutil.ID("traced"),
+		Wallets: []*holderpb.WalletSpec{{WalletId: testutil.ID("traced-w"), Name: "bank", Allows: sharedpb.Allows_ALLOWS_NONE}},
+	}); err != nil {
+		t.Fatalf("Provision() over HTTP error = %v", err)
+	}
+
+	byName := map[string]sdktrace.ReadOnlySpan{}
+	for _, s := range spans.Ended() {
+		byName[s.Name()] = s
+	}
+	httpSpan, rpc := byName["POST /twirp/holder.v1.HolderService/"], byName["holder.v1.HolderService/Provision"]
+	if httpSpan == nil || rpc == nil {
+		t.Fatalf("spans = %v, want the HTTP span and the Provision span", slices.Collect(maps.Keys(byName)))
+	}
+	if rpc.Parent().SpanID() != httpSpan.SpanContext().SpanID() {
+		t.Error("the Provision span is not under the HTTP span")
+	}
+	var appends int
+	for _, s := range spans.Ended() {
+		if strings.HasPrefix(s.Name(), "eventstore.append") {
+			appends++
+			if s.Parent().SpanID() != rpc.SpanContext().SpanID() {
+				t.Errorf("%s is not under the Provision span", s.Name())
+			}
+		}
+	}
+	if appends == 0 {
+		t.Error("no eventstore append span was recorded for Provision")
 	}
 }

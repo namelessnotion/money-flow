@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -142,6 +143,9 @@ func trigger(aggregateType, id string) saga.Message {
 	}
 }
 
+// quiet discards what run logs; these tests assert on what it does.
+var quiet = slog.New(slog.DiscardHandler)
+
 // start runs run in the background, returning the func that stops it and the
 // func that reports what it returned.
 func start(t *testing.T, tr transport, handler saga.Handler) (stop context.CancelFunc, returned func() error) {
@@ -150,7 +154,7 @@ func start(t *testing.T, tr transport, handler saga.Handler) (stop context.Cance
 	t.Cleanup(cancel)
 
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, tr, handler) }()
+	go func() { done <- run(ctx, tr, handler, quiet) }()
 
 	return cancel, func() error {
 		t.Helper()

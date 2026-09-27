@@ -93,11 +93,18 @@ until something drops it.
 - **Consumer groups.** `money-flow-saga-transfer` and `money-flow-saga-transaction`, one per topic, per root
   ADR 0001 decision 6. Separate offsets, separate lag, separate blast radius.
 - **Lag, not silence.** An event log is legitimately idle for long stretches, so "nothing is happening" is not
-  a signal. Watch group lag and watch for the process exiting.
+  a signal. Watch group lag and watch for the process exiting. The orchestrator reports lag itself as
+  `money_flow.saga.consumer.lag`, per group and partition, measured from the brokers
+  ([go ADR 0017](../go/docs/adr/0017-opentelemetry-at-the-ports.md)).
 - **A halt is loud and terminal.** The orchestrator logs the exact topic, partition and offset it stopped on
   and exits non-zero, having committed nothing past that message. Restarting resumes on the same message, which
   is deliberate: ADR 0003 chooses stopping over skipping, because a skipped trigger is the only wake-up its
   aggregate was going to get.
+- **Where to look.** `docker compose up` starts `lgtm`. Grafana on <http://localhost:3001> shows the
+  `money-flow-server` and `money-flow-orchestrator` traces (Tempo), metrics (Prometheus) and logs (Loki). Each
+  delivered trigger is a `saga.handle <aggregate type>` trace, with its store, SQL and ledger calls inside it.
+  A trace starts afresh at the CDC hop. To get from an RPC to the saga work it caused, search by
+  `money_flow.aggregate_id`.
 
 ## Recovering from a halt
 
@@ -107,7 +114,9 @@ find the cause and fix it, then let the message redeliver. **Do not reset or ski
 trigger strands its aggregate for good (ADR 0003), and the fix never needs it, because redelivery re-folds
 authoritative state.
 
-1. **Read the halt.** The last log line names the message and the error:
+1. **Read the halt.** The last log line is JSON. It names the message (`message.topic`, `.partition`,
+   `.offset`), the error, and the `trace_id` of the attempt that failed, which opens that attempt's trace in
+   Grafana:
 
    ```bash
    docker logs money_flow-orchestrator-1 2>&1 | grep -i halt | tail -3
