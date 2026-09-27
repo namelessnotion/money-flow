@@ -62,13 +62,53 @@ Go has heard about it — which it does on its own, from the event posting the l
 
 **Return**
 The provider reports that the entry will never post (an R-code), or refuses it at submission. The real leg is
-cancelled, and the Transaction rolls back once Go has heard about it.
+cancelled, and the Transaction rolls back once Go has heard about it. A return can also arrive after the entry
+has settled: see *Late return*.
+
+**Return notice**
+The provider's R-code for an entry, recorded on the ACH Transaction's row (`returned_at`, `return_reason`) before
+anything acts on it. It is a fact the provider reported, like the provider reference, not lifecycle state. The
+first notice wins.
+
+**Late return**
+A return notice for an ACH Transaction that has already completed: the network took the money back after the
+entry settled. Ordinary returns can arrive up to 2 banking days after settlement, and unauthorized-debit returns
+(R05, R07, R10) up to 60 days. It is recorded as its own Go Transaction, never as a reversal, in one of three
+forms ([ADR 0011](docs/adr/0011-a-late-return-is-recorded-and-a-shortfall-is-owed.md)):
+- a **withdrawal return** puts the money back in the entity's cash and cleared cash;
+- a **clawback** takes back a deposit that never cleared;
+- a **debt return** records a deposit that did clear as owed, in the entity's **Receivable**.
+
+**Clawback**
+The late return of a deposit whose Clearing was never recorded. Its money is still in uncleared cash, so it is
+taken back whole: uncleared cash to bank control, then cash to bank. Which form a late deposit return takes is
+decided from Ruby's own record, under a lock on the row that `Clear` takes too, because uncleared cash is one pool
+shared by every deposit that hasn't cleared.
+
+**Receivable**
+The account holding what an entity owes the platform, as a negative balance. A debt return mints the returned
+amount out of it, so the return is recorded in full whatever the entity still holds. Every entity has one. It is
+uncapped, and on neither the cash side nor the cleared side.
+
+_Avoid_: "negative balance" or "overdraft" for what an entity owes. Its `cash` can never go negative.
+
+**Owed**
+Debt recorded in an entity's Receivable and not yet recovered. While an entity owes, it can't start an ACH
+withdrawal or a Subscription, the two ways money leaves where Recovery can't reach it.
+
+**Recovery**
+Collecting what an entity owes from its cleared cash: cleared cash to bank control, then cash to the Receivable,
+for as much as it owes or as much cleared cash as isn't reserved, whichever is less. Its own Go Transaction
+(`receivable_recovery`), originated by a scheduled sweep, one per entity at a time. A deposit that clears later
+is collected the same way.
 
 **Clearing**
-Moving a settled deposit's money from uncleared cash to cleared cash once the ACH return window has passed:
-from the start of the third Federal Reserve business day after the deposit's Transaction completed. It is its
-own Go Transaction (`ach_clearing`), originated by a scheduled sweep, with an id derived from the deposit's
-([ADR 0003](docs/adr/0003-ach-clearing-as-a-scheduled-sweep.md)). Only deposits clear.
+Moving a settled deposit's money from uncleared cash to cleared cash once the ordinary ACH return window has
+passed: from the start of the third Federal Reserve business day after the deposit's Transaction completed. It
+is its own Go Transaction (`ach_clearing`), originated by a scheduled sweep, with an id derived from the deposit's
+([ADR 0003](docs/adr/0003-ach-clearing-as-a-scheduled-sweep.md)). Only deposits clear, and a deposit with a
+return notice clears only if its Clearing was already recorded. Unauthorized-debit returns can still arrive after
+it: see *Late return*.
 
 **Progress**
 Where an ACH Transaction stands, told as its steps in order: initiation, funding (a withdrawal), submission,
