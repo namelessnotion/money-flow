@@ -188,7 +188,9 @@ The Transaction parks after `StartInitializingTransaction`, with its staged chil
 ```
 
 `ConfirmStagedTransfer` and `PostPendingTransfer` then settle the child. Neither touches the Transaction — and
-this is what the orchestrator did with that, unprompted:
+this is what the orchestrator did with that, unprompted. The lines are as captured then, in the plain-text format
+that predates [go ADR 0017](../go/docs/adr/0017-opentelemetry-at-the-ports.md). Each is now one JSON record with the
+constant message `saga: handled` and the message and trigger as groups (see the next section for the halt's):
 
 ```
 saga: handled transfer-events[0]@4: transfer bbbb…bbbb (transfer.v1.TransferCommitted seq 5, global_seq 22)
@@ -243,6 +245,17 @@ saga: retrying transfer-events[1]@3 …, attempt 3 of 3, after: …
 saga: HALTED on transfer-events[1]@3; nothing further will be consumed from this reader: saga: halted on transfer-events[1]@3 after 3 attempt(s): …
 orchestrator: saga: halted on transfer-events[1]@3 after 3 attempt(s): …
 exit status 1
+```
+
+That is the pre-ADR 0017 plain-text output, as captured. The same halt is now JSON on stdout. Each line has a
+constant message, with the message's position as a `message` group and, for a line about an attempt, the trigger
+as a `trigger` group and the attempt's `trace_id`. So `grep HALTED` still finds the halt, but `grep "HALTED on"`
+does not:
+
+```
+{"time":"…","level":"WARN","msg":"saga: retrying","service":"money-flow-orchestrator","message":{"topic":"transfer-events","partition":1,"offset":3},"trigger":{"aggregate_type":"transfer","aggregate_id":"01a080f5-…","event_type":"transfer.v1.TransferRequestAccepted","sequence":1,"global_seq":38},"attempt":2,"attempts":3,"err":"…","trace_id":"…","span_id":"…"}
+{"time":"…","level":"ERROR","msg":"saga: HALTED; nothing further will be consumed from this reader","service":"money-flow-orchestrator","message":{"topic":"transfer-events","partition":1,"offset":3},"err":"saga: halted on transfer-events[1]@3 after 3 attempt(s): …","trace_id":"…","span_id":"…"}
+{"time":"…","level":"ERROR","msg":"stopped","service":"money-flow-orchestrator","err":"saga: halted on transfer-events[1]@3 after 3 attempt(s): …"}
 ```
 
 Bounded retries, then a stop that names the exact message, commits nothing past it, and exits non-zero. Never
