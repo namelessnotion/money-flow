@@ -289,11 +289,16 @@ services:
   # OpenTelemetry collector receiving OTLP on :4318, with Tempo for traces,
   # Prometheus for metrics and Loki for logs, all behind Grafana. Grafana is
   # on host :3001 because :3000 is TigerBeetle's. It is a development
-  # convenience: nothing is persisted, and a restart starts empty.
+  # convenience: nothing is persisted, and a restart starts empty. The
+  # dashboards in docker/grafana/dashboards are provisioned from the repo, so
+  # they survive a restart even though the data doesn't.
   lgtm:
     image: grafana/otel-lgtm:0.34.0
     ports:
       - "3001:3000"
+    volumes:
+      - ./docker/grafana/dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/money-flow.yaml:ro
+      - ./docker/grafana/dashboards:/otel-lgtm/money-flow-dashboards:ro
 
   # VueJS client, served by Vite's dev server. Reachable directly on :5173
   # or via the proxy at https://app.local.namelessnotion.com.

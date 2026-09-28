@@ -1,0 +1,15 @@
+# Grafana dashboard provider for the lgtm service, mounted beside the image's
+# own providers. The JSON files in docker/grafana/dashboards are the only copy
+# of these dashboards: edit and commit the file, and Grafana reloads it within
+# updateIntervalSeconds. Saving from the UI is refused, because the next
+# container restart would lose it.
+apiVersion: 1
+
+providers:
+  - name: "Money Flow"
+    type: file
+    allowUiUpdates: false
+    updateIntervalSeconds: 10
+    options:
+      path: /otel-lgtm/money-flow-dashboards
+      foldersFromFilesStructure: false

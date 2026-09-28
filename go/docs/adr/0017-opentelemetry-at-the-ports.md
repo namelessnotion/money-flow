@@ -109,7 +109,8 @@ logged and reported as missing, never as zero, which would read as "caught up".
 ## Consequences
 
 - Locally, `docker compose up` starts `lgtm` (`grafana/otel-lgtm`), and Grafana on `localhost:3001` shows traces,
-  metrics and logs for `money-flow-server` and `money-flow-orchestrator`.
+  metrics and logs for `money-flow-server` and `money-flow-orchestrator`. The Money Flow dashboard of the measures
+  below is provisioned from `docker/grafana/dashboards/money-flow.json`, so edit that file, not the UI.
 - To alert per ADR 0003, alert on `money_flow.saga.consumer.lag` growing, and on the orchestrator process being
   absent, which shows as its metrics going stale. An idle topic doesn't show as zero throughput; it shows as
   zero lag.
