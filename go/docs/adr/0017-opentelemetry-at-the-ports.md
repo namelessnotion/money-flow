@@ -51,7 +51,9 @@ pool was saturated, short of attaching a debugger.
 
 5. **An answer is not a fault.** Only a failure of the system sets span status `Error`. When the system answers
    correctly, the answer is recorded as an outcome attribute:
-   - A lost append race is `money_flow.outcome=conflict`.
+   - A lost append race is `money_flow.outcome=conflict`, on the store span and on the Postgres statement span
+     beneath it. otelpgx would mark that statement's unique violation `Error` and count it as a database error,
+     so the pool's tracer hands it the statement as succeeded (`eventstore.IsSequenceCollision` decides).
    - A Twirp 4xx code, such as `aborted`, `not_found` or `failed_precondition`, is recorded in
      `twirp.error_code`.
    - A TigerBeetle result other than `ok` is counted by its code, such as `exceeds_credits`. `exists` is not

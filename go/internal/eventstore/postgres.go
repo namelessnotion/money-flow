@@ -14,6 +14,16 @@ import (
 
 const uniqueViolation = "23505"
 
+// IsSequenceCollision reports whether err is Postgres refusing an event whose
+// sequence another writer already took: the raw form of ErrConcurrencyConflict,
+// before PostgresStore translates it. It is exported for code that sees the
+// driver's errors rather than the store's, such as a tracer on the pool, so
+// that what counts as a lost race is decided here alone.
+func IsSequenceCollision(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == uniqueViolation
+}
+
 // PostgresStore is a Store backed by the events table (see
 // go/db/migrations/00001_create_events.up.sql). Optimistic concurrency is
 // enforced entirely by that table's UNIQUE(aggregate_type, aggregate_id,
@@ -80,8 +90,7 @@ func (s *PostgresStore) AppendAtomic(ctx context.Context, writes ...StreamWrite)
 	for range rows {
 		if _, err := br.Exec(); err != nil {
 			_ = br.Close()
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
+			if IsSequenceCollision(err) {
 				return ErrConcurrencyConflict
 			}
 			return fmt.Errorf("eventstore: insert: %w", err)

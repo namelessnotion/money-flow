@@ -2,10 +2,17 @@ package telemetry_test
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"uuid"
 
+	"github.com/exaring/otelpgx"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 
+	pb "github.com/namelessnotion/money_flow/go/gen/proto/holder/v1"
+	"github.com/namelessnotion/money_flow/go/internal/eventstore"
 	"github.com/namelessnotion/money_flow/go/internal/telemetry"
 	"github.com/namelessnotion/money_flow/go/internal/testutil"
 )
@@ -61,4 +68,85 @@ func TestInstrumentPool_InstallsATracerAndNothingElse(t *testing.T) {
 	if cfg.MaxConns != 7 {
 		t.Errorf("MaxConns = %d, want 7 left alone", cfg.MaxConns)
 	}
+}
+
+// A lost append race reaches the pool as Postgres refusing a sequence that is
+// already taken. That is the store answering correctly (ADR 0017's "an answer
+// is not a fault"), so no statement span turns red and no database error is
+// counted; the collision is still on the span as its SQLSTATE and outcome.
+func TestInstrumentPool_ALostAppendRaceIsNotAFault(t *testing.T) {
+	t.Parallel()
+	rec := newRecording(t)
+	pool := testutil.PoolWith(t, func(cfg *pgxpool.Config) { telemetry.InstrumentPool(cfg, rec.Providers) })
+	store := eventstore.NewPostgresStore(pool)
+	ctx, parent := rec.Tracer.Tracer("t").Start(context.Background(), "eventstore.append")
+	id := uuid.NewV7().String()
+
+	if err := store.Append(ctx, "holder", id, 0, &pb.HolderEstablished{Id: id}); err != nil {
+		t.Fatalf("first Append() error = %v", err)
+	}
+	err := store.Append(ctx, "holder", id, 0, &pb.HolderEstablished{Id: id})
+	parent.End()
+	if !errors.Is(err, eventstore.ErrConcurrencyConflict) {
+		t.Fatalf("second Append() error = %v, want ErrConcurrencyConflict", err)
+	}
+
+	var collided int
+	for _, s := range rec.spans.Ended() {
+		if s.Parent().TraceID() != parent.SpanContext().TraceID() {
+			continue
+		}
+		if s.Status().Code == codes.Error {
+			t.Errorf("span %q status = Error (%s), want Unset", s.Name(), s.Status().Description)
+		}
+		if hasAttr(s.Attributes(), otelpgx.SQLStateKey.String("23505")) {
+			collided++
+			if !hasAttr(s.Attributes(), attribute.String("money_flow.outcome", "conflict")) {
+				t.Errorf("span %q carries the collision without money_flow.outcome=conflict", s.Name())
+			}
+		}
+	}
+	if collided == 0 {
+		t.Error("no statement span records the collision's SQLSTATE")
+	}
+	if n := rec.sum(t, "db.client.operation.errors"); n != 0 {
+		t.Errorf("db.client.operation.errors = %d, want 0", n)
+	}
+}
+
+// Every other database error is still a fault, recorded the way otelpgx
+// records it.
+func TestInstrumentPool_OtherDatabaseErrorsAreStillFaults(t *testing.T) {
+	t.Parallel()
+	rec := newRecording(t)
+	pool := testutil.PoolWith(t, func(cfg *pgxpool.Config) { telemetry.InstrumentPool(cfg, rec.Providers) })
+
+	ctx, parent := rec.Tracer.Tracer("t").Start(context.Background(), "caller")
+	_, err := pool.Exec(ctx, "SELECT * FROM no_such_table")
+	parent.End()
+	if err == nil {
+		t.Fatal("Exec() error = nil, want an undefined-table error")
+	}
+
+	var faulted int
+	for _, s := range rec.spans.Ended() {
+		if s.Parent().SpanID() == parent.SpanContext().SpanID() && s.Status().Code == codes.Error {
+			faulted++
+		}
+	}
+	if faulted != 1 {
+		t.Errorf("got %d statement spans with status Error, want 1", faulted)
+	}
+	if n := rec.sum(t, "db.client.operation.errors"); n != 1 {
+		t.Errorf("db.client.operation.errors = %d, want 1", n)
+	}
+}
+
+func hasAttr(attrs []attribute.KeyValue, want attribute.KeyValue) bool {
+	for _, kv := range attrs {
+		if kv.Key == want.Key && kv.Value.String() == want.Value.String() {
+			return true
+		}
+	}
+	return false
 }
