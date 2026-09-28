@@ -93,11 +93,19 @@ until something drops it.
 - **Consumer groups.** `money-flow-saga-transfer` and `money-flow-saga-transaction`, one per topic, per root
   ADR 0001 decision 6. Separate offsets, separate lag, separate blast radius.
 - **Lag, not silence.** An event log is legitimately idle for long stretches, so "nothing is happening" is not
-  a signal. Watch group lag and watch for the process exiting.
+  a signal. Watch group lag and watch for the process exiting. The orchestrator reports lag itself as
+  `money_flow.saga.consumer.lag`, per group and partition, measured from the brokers
+  ([go ADR 0017](../go/docs/adr/0017-opentelemetry-at-the-ports.md)).
 - **A halt is loud and terminal.** The orchestrator logs the exact topic, partition and offset it stopped on
   and exits non-zero, having committed nothing past that message. Restarting resumes on the same message, which
   is deliberate: ADR 0003 chooses stopping over skipping, because a skipped trigger is the only wake-up its
   aggregate was going to get.
+- **Where to look.** `docker compose up` starts `lgtm`. Grafana on <http://localhost:3001> shows the
+  `money-flow-server` and `money-flow-orchestrator` traces (Tempo), metrics (Prometheus) and logs (Loki). Each
+  attempt at a delivered trigger is a `saga.handle <aggregate type>` trace, with its store, SQL and ledger calls
+  inside it.
+  A trace starts afresh at the CDC hop. To get from an RPC to the saga work it caused, search by
+  `money_flow.aggregate_id`.
 
 ## Recovering from a halt
 
@@ -107,7 +115,9 @@ find the cause and fix it, then let the message redeliver. **Do not reset or ski
 trigger strands its aggregate for good (ADR 0003), and the fix never needs it, because redelivery re-folds
 authoritative state.
 
-1. **Read the halt.** The last log line names the message and the error:
+1. **Read the halt.** The last log line is JSON. It names the message (`message.topic`, `.partition`,
+   `.offset`), the error, and the `trace_id` of the attempt that failed, which opens that attempt's trace in
+   Grafana:
 
    ```bash
    docker logs money_flow-orchestrator-1 2>&1 | grep -i halt | tail -3
@@ -178,7 +188,9 @@ The Transaction parks after `StartInitializingTransaction`, with its staged chil
 ```
 
 `ConfirmStagedTransfer` and `PostPendingTransfer` then settle the child. Neither touches the Transaction — and
-this is what the orchestrator did with that, unprompted:
+this is what the orchestrator did with that, unprompted. The lines are as captured then, in the plain-text format
+that predates [go ADR 0017](../go/docs/adr/0017-opentelemetry-at-the-ports.md). Each is now one JSON record with the
+constant message `saga: handled` and the message and trigger as groups (see the next section for the halt's):
 
 ```
 saga: handled transfer-events[0]@4: transfer bbbb…bbbb (transfer.v1.TransferCommitted seq 5, global_seq 22)
@@ -233,6 +245,17 @@ saga: retrying transfer-events[1]@3 …, attempt 3 of 3, after: …
 saga: HALTED on transfer-events[1]@3; nothing further will be consumed from this reader: saga: halted on transfer-events[1]@3 after 3 attempt(s): …
 orchestrator: saga: halted on transfer-events[1]@3 after 3 attempt(s): …
 exit status 1
+```
+
+That is the pre-ADR 0017 plain-text output, as captured. The same halt is now JSON on stdout. Each line has a
+constant message, with the message's position as a `message` group and, for a line about an attempt, the trigger
+as a `trigger` group and the attempt's `trace_id`. So `grep HALTED` still finds the halt, but `grep "HALTED on"`
+does not:
+
+```
+{"time":"…","level":"WARN","msg":"saga: retrying","service":"money-flow-orchestrator","message":{"topic":"transfer-events","partition":1,"offset":3},"trigger":{"aggregate_type":"transfer","aggregate_id":"01a080f5-…","event_type":"transfer.v1.TransferRequestAccepted","sequence":1,"global_seq":38},"attempt":2,"attempts":3,"err":"…","trace_id":"…","span_id":"…"}
+{"time":"…","level":"ERROR","msg":"saga: HALTED; nothing further will be consumed from this reader","service":"money-flow-orchestrator","message":{"topic":"transfer-events","partition":1,"offset":3},"err":"saga: halted on transfer-events[1]@3 after 3 attempt(s): …","trace_id":"…","span_id":"…"}
+{"time":"…","level":"ERROR","msg":"stopped","service":"money-flow-orchestrator","err":"saga: halted on transfer-events[1]@3 after 3 attempt(s): …"}
 ```
 
 Bounded retries, then a stop that names the exact message, commits nothing past it, and exits non-zero. Never

@@ -97,6 +97,10 @@ services:
       LISTEN_ADDR: ":8080"
       TIGERBEETLE_ADDRESS: tigerbeetle:3000
       TIGERBEETLE_CLUSTER_ID: "0"
+      # Traces, metrics and logs go to the lgtm service (go/docs/adr/0017).
+      # Unset this and the service exports nothing and only logs to stdout.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://lgtm:4318
+      OTEL_METRIC_EXPORT_INTERVAL: "15000"
     # tb_client talks to TigerBeetle over io_uring, so the *client* needs the
     # same seccomp exemption the server does — Docker's default profile blocks
     # io_uring_setup/enter/register, and tb_client_init aborts the process
@@ -107,6 +111,8 @@ services:
       postgres:
         condition: service_healthy
       tigerbeetle:
+        condition: service_started
+      lgtm:
         condition: service_started
     ports:
       - "8080:8080"
@@ -259,6 +265,8 @@ services:
       KAFKA_BROKERS: kafka:9092
       TIGERBEETLE_ADDRESS: tigerbeetle:3000
       TIGERBEETLE_CLUSTER_ID: "0"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://lgtm:4318
+      OTEL_METRIC_EXPORT_INTERVAL: "15000"
     command: ["go", "run", "./cmd/orchestrator"]
     # The orchestrator drives the same sagas the RPC server does, so it stages,
     # posts and voids in TigerBeetle and needs tb_client's io_uring exemption
@@ -272,8 +280,20 @@ services:
         condition: service_healthy
       tigerbeetle:
         condition: service_started
+      lgtm:
+        condition: service_started
     volumes:
       - ./go:/app
+
+  # Local observability backend for the Go services (go/docs/adr/0017): an
+  # OpenTelemetry collector receiving OTLP on :4318, with Tempo for traces,
+  # Prometheus for metrics and Loki for logs, all behind Grafana. Grafana is
+  # on host :3001 because :3000 is TigerBeetle's. It is a development
+  # convenience: nothing is persisted, and a restart starts empty.
+  lgtm:
+    image: grafana/otel-lgtm:0.34.0
+    ports:
+      - "3001:3000"
 
   # VueJS client, served by Vite's dev server. Reachable directly on :5173
   # or via the proxy at https://app.local.namelessnotion.com.

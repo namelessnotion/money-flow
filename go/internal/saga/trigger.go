@@ -41,6 +41,7 @@ package saga
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 )
 
 // Trigger is one delivered message, reduced to the only thing the orchestrator
@@ -62,6 +63,16 @@ type Trigger struct {
 
 func (t Trigger) String() string {
 	return fmt.Sprintf("%s %s (%s seq %d, global_seq %d)", t.AggregateType, t.AggregateID, t.EventType, t.Sequence, t.GlobalSeq)
+}
+
+func (t Trigger) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("aggregate_type", t.AggregateType),
+		slog.String("aggregate_id", t.AggregateID),
+		slog.String("event_type", t.EventType),
+		slog.Int64("sequence", t.Sequence),
+		slog.Int64("global_seq", t.GlobalSeq),
+	)
 }
 
 // envelope is the published message body, as much of it as this package reads.

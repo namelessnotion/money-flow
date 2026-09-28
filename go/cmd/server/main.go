@@ -8,16 +8,16 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/twitchtv/twirp"
 
 	holderpb "github.com/namelessnotion/money_flow/go/gen/proto/holder/v1"
 	tokenpb "github.com/namelessnotion/money_flow/go/gen/proto/token/v1"
@@ -28,6 +28,7 @@ import (
 	"github.com/namelessnotion/money_flow/go/internal/holder"
 	"github.com/namelessnotion/money_flow/go/internal/ledger"
 	"github.com/namelessnotion/money_flow/go/internal/saga"
+	"github.com/namelessnotion/money_flow/go/internal/telemetry"
 	"github.com/namelessnotion/money_flow/go/internal/token"
 	"github.com/namelessnotion/money_flow/go/internal/wallet"
 )
@@ -69,59 +70,73 @@ func poolConfig(databaseURL string, maxConns int32) (*pgxpool.Config, error) {
 }
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	if err := telemetry.Run("money-flow-server", serve); err != nil {
+		os.Exit(1)
+	}
+}
 
+// serve runs the API until ctx is cancelled, returning an error only if it
+// could not start or stopped for any other reason.
+func serve(ctx context.Context, tel *telemetry.Telemetry) error {
 	maxConns, err := strconv.ParseInt(env("DATABASE_MAX_CONNS", defaultDatabaseMaxConns), 10, 32)
 	if err != nil {
-		log.Fatalf("server: DATABASE_MAX_CONNS: %v", err)
+		return fmt.Errorf("DATABASE_MAX_CONNS: %w", err)
 	}
 	cfg, err := poolConfig(env("DATABASE_URL", defaultDatabaseURL), int32(maxConns))
 	if err != nil {
-		log.Fatalf("server: database url: %v", err)
+		return fmt.Errorf("database url: %w", err)
 	}
+	telemetry.InstrumentPool(cfg, tel.Providers)
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
-		log.Fatalf("server: pool: %v", err)
+		return fmt.Errorf("pool: %w", err)
 	}
 	defer pool.Close()
 	if err := pool.Ping(ctx); err != nil {
-		log.Fatalf("server: ping: %v", err)
+		return fmt.Errorf("ping: %w", err)
+	}
+	if err := telemetry.RecordPoolStats(pool, tel.Providers); err != nil {
+		return fmt.Errorf("pool stats: %w", err)
 	}
 
 	clusterID, err := strconv.ParseUint(env("TIGERBEETLE_CLUSTER_ID", defaultTigerBeetleClusterID), 10, 64)
 	if err != nil {
-		log.Fatalf("server: TIGERBEETLE_CLUSTER_ID: %v", err)
+		return fmt.Errorf("TIGERBEETLE_CLUSTER_ID: %w", err)
 	}
 	addresses := strings.Split(env("TIGERBEETLE_ADDRESS", defaultTigerBeetleAddress), ",")
 	tb, err := ledger.NewRealClient(clusterID, addresses)
 	if err != nil {
-		log.Fatalf("server: tigerbeetle: %v", err)
+		return fmt.Errorf("tigerbeetle: %w", err)
 	}
 	defer tb.Close()
 
 	addr := env("LISTEN_ADDR", defaultListenAddr)
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           newMux(eventstore.NewPostgresStore(pool), pool, tb),
+		Handler:           newMux(eventstore.NewPostgresStore(pool), pool, tb, tel.Providers),
 		ReadHeaderTimeout: 5 * time.Second,
+		ErrorLog:          slog.NewLogLogger(tel.Logger.Handler(), slog.LevelWarn),
 	}
 
+	listening := make(chan error, 1)
 	go func() {
-		log.Printf("server: listening on %s", addr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("server: listen: %v", err)
-		}
+		tel.Logger.Info("server: listening", slog.String("addr", addr))
+		listening <- srv.ListenAndServe()
 	}()
 
-	<-ctx.Done()
-	log.Print("server: shutting down")
+	select {
+	case err := <-listening:
+		return fmt.Errorf("listen: %w", err)
+	case <-ctx.Done():
+	}
+	tel.Logger.Info("server: shutting down")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("server: shutdown: %v", err)
+	if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("shutdown: %w", err)
 	}
+	return nil
 }
 
 // pinger is the part of the pool the health check needs, so tests can supply
@@ -133,12 +148,20 @@ type pinger interface {
 // newMux wires the services onto their generated Twirp paths. Each service
 // mounts at its own PathPrefix() — "/twirp/<package>.<Service>/" — which is
 // what clients must post to; a client pointed at the bare host will 404.
-func newMux(store eventstore.Store, health pinger, tb ledger.Client) *http.ServeMux {
+//
+// Telemetry goes on at the ports only: the store and ledger are wrapped
+// before any service sees them, every Twirp server gets the same interceptor,
+// and the whole mux sits behind the HTTP handler that continues a caller's
+// trace (go/docs/adr/0017).
+func newMux(store eventstore.Store, health pinger, tb ledger.Client, p telemetry.Providers) http.Handler {
 	mux := http.NewServeMux()
+	store = telemetry.NewStore(store, p)
+	tb = telemetry.NewLedger(tb, p)
+	traced := twirp.WithServerInterceptors(telemetry.Interceptor(p))
 
-	holderServer := holderpb.NewHolderServiceServer(holder.NewServer(store))
-	walletServer := walletpb.NewWalletServiceServer(wallet.NewServer(store))
-	tokenServer := tokenpb.NewTokenServiceServer(token.NewServer(store, tb))
+	holderServer := holderpb.NewHolderServiceServer(holder.NewServer(store), traced)
+	walletServer := walletpb.NewWalletServiceServer(wallet.NewServer(store), traced)
+	tokenServer := tokenpb.NewTokenServiceServer(token.NewServer(store, tb), traced)
 
 	// saga.Wire ties transfer and transaction to each other — transfer needs
 	// transaction's IsOpen/Exists checkers, transaction needs the transfer
@@ -146,8 +169,8 @@ func newMux(store eventstore.Store, health pinger, tb ledger.Client) *http.Serve
 	// process and the orchestrator cannot drift into wiring the same two
 	// services differently.
 	sagaServers := saga.Wire(store, tb)
-	transferServer := transferpb.NewTransferServiceServer(sagaServers.Transfer)
-	transactionServer := transactionpb.NewTransactionServiceServer(sagaServers.Transaction)
+	transferServer := transferpb.NewTransferServiceServer(sagaServers.Transfer, traced)
+	transactionServer := transactionpb.NewTransactionServiceServer(sagaServers.Transaction, traced)
 
 	mux.Handle(holderServer.PathPrefix(), holderServer)
 	mux.Handle(walletServer.PathPrefix(), walletServer)
@@ -164,7 +187,7 @@ func newMux(store eventstore.Store, health pinger, tb ledger.Client) *http.Serve
 		_, _ = w.Write([]byte("ok\n"))
 	})
 
-	return mux
+	return telemetry.Handler(p, mux)
 }
 
 func env(key, fallback string) string {

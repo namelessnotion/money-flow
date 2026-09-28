@@ -4,8 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -113,7 +112,7 @@ func message(offset int64, key, value string) Message {
 
 func quietConsumer(reader Reader, handler Handler, opts ...ConsumerOption) *Consumer {
 	opts = append([]ConsumerOption{
-		WithLogger(log.New(io.Discard, "", 0)),
+		WithLogger(slog.New(slog.DiscardHandler)),
 		WithBackoff(time.Millisecond),
 	}, opts...)
 	return NewConsumer(reader, handler, opts...)
@@ -575,7 +574,7 @@ func TestConsumer_HaltStopsOtherPartitionsTakingNewWork(t *testing.T) {
 			afterHalt.Add(1)
 			return nil
 		}
-	}), WithAttempts(1), WithLogger(log.New(haltSignal{failed: failed, once: &sync.Once{}}, "", 0)))
+	}), WithAttempts(1), WithLogger(slog.New(slog.NewTextHandler(haltSignal{failed: failed, once: &sync.Once{}}, nil))))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

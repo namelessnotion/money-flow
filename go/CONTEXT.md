@@ -8,6 +8,9 @@ Event store is stored in a single Postgres table, as an append-only log. Other d
 
 Domain commands and events are defined in the `proto/` directory using twirp RPC to implement the services.
 
+Observability is OpenTelemetry, added at the ports (event store, ledger, Twirp, saga handler) by
+`internal/telemetry` and never inside the domain packages. See [ADR 0017](docs/adr/0017-opentelemetry-at-the-ports.md).
+
 ## Glossary
 
 **Transfer**

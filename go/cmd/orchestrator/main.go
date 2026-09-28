@@ -25,13 +25,12 @@ package main
 
 import (
 	"context"
-	"log"
+	"fmt"
+	"log/slog"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -39,6 +38,7 @@ import (
 	"github.com/namelessnotion/money_flow/go/internal/ledger"
 	"github.com/namelessnotion/money_flow/go/internal/saga"
 	"github.com/namelessnotion/money_flow/go/internal/saga/kafkareader"
+	"github.com/namelessnotion/money_flow/go/internal/telemetry"
 	"github.com/namelessnotion/money_flow/go/internal/transaction"
 	"github.com/namelessnotion/money_flow/go/internal/transfer"
 )
@@ -68,6 +68,11 @@ const (
 	groupPrefix = "money-flow-saga-"
 )
 
+// consumerGroup names the group that consumes aggregateType's topic. It is the
+// one derivation of it: the lag gauge has to watch the same group consume
+// joins, or an alert on lag would silently watch a group nobody consumes as.
+func consumerGroup(aggregateType string) string { return groupPrefix + aggregateType }
+
 // poolConfig parses databaseURL into a pgxpool.Config with MaxConns
 // overridden to maxConns — see cmd/server's own poolConfig for why this is
 // a separate override rather than a "?pool_max_conns=" query parameter on
@@ -88,46 +93,69 @@ func poolConfig(databaseURL string, maxConns int32) (*pgxpool.Config, error) {
 var consumedAggregateTypes = []string{transfer.AggregateType, transaction.AggregateType}
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	// A halt ends up here as an error, after the consumer has already logged
+	// the exact message it stopped on (go/docs/adr/0003). telemetry.Run
+	// exports that line, and the spans of the attempts that led to it, before
+	// the process exits non-zero.
+	if err := telemetry.Run("money-flow-orchestrator", orchestrate); err != nil {
+		os.Exit(1)
+	}
+}
 
+// orchestrate consumes until ctx is cancelled, returning an error if it could
+// not start or a consumer gave up.
+func orchestrate(ctx context.Context, tel *telemetry.Telemetry) error {
 	maxConns, err := strconv.ParseInt(env("DATABASE_MAX_CONNS", defaultDatabaseMaxConns), 10, 32)
 	if err != nil {
-		log.Fatalf("orchestrator: DATABASE_MAX_CONNS: %v", err)
+		return fmt.Errorf("DATABASE_MAX_CONNS: %w", err)
 	}
 	cfg, err := poolConfig(env("DATABASE_URL", defaultDatabaseURL), int32(maxConns))
 	if err != nil {
-		log.Fatalf("orchestrator: database url: %v", err)
+		return fmt.Errorf("database url: %w", err)
 	}
+	telemetry.InstrumentPool(cfg, tel.Providers)
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
-		log.Fatalf("orchestrator: pool: %v", err)
+		return fmt.Errorf("pool: %w", err)
 	}
 	defer pool.Close()
 	if err := pool.Ping(ctx); err != nil {
-		log.Fatalf("orchestrator: ping: %v", err)
+		return fmt.Errorf("ping: %w", err)
+	}
+	if err := telemetry.RecordPoolStats(pool, tel.Providers); err != nil {
+		return fmt.Errorf("pool stats: %w", err)
 	}
 
 	clusterID, err := strconv.ParseUint(env("TIGERBEETLE_CLUSTER_ID", defaultTigerBeetleClusterID), 10, 64)
 	if err != nil {
-		log.Fatalf("orchestrator: TIGERBEETLE_CLUSTER_ID: %v", err)
+		return fmt.Errorf("TIGERBEETLE_CLUSTER_ID: %w", err)
 	}
 	// The orchestrator drives the same sagas the RPC server does, and those
 	// sagas stage, post and void in TigerBeetle. It is not a read-only
 	// consumer and cannot run without the ledger.
 	tb, err := ledger.NewRealClient(clusterID, strings.Split(env("TIGERBEETLE_ADDRESS", defaultTigerBeetleAddress), ","))
 	if err != nil {
-		log.Fatalf("orchestrator: tigerbeetle: %v", err)
+		return fmt.Errorf("tigerbeetle: %w", err)
 	}
 	defer tb.Close()
 
 	brokers := strings.Split(env("KAFKA_BROKERS", defaultKafkaBrokers), ",")
-	orchestrator := saga.Wire(eventstore.NewPostgresStore(pool), tb).Orchestrator()
+	orchestrator := telemetry.Orchestrator(tel.Providers, eventstore.NewPostgresStore(pool), tb)
 
-	if err := run(ctx, kafkaTransport(brokers), orchestrator); err != nil {
-		log.Fatalf("orchestrator: %v", err)
+	// Lag is watched per group from the start, including while a topic is
+	// still being waited for: it is the one signal that tells a stopped
+	// consumer from an idle log (go/docs/adr/0003).
+	for _, aggregateType := range consumedAggregateTypes {
+		topic, group := saga.Topic(aggregateType), consumerGroup(aggregateType)
+		unregister := telemetry.RegisterConsumerLag(tel.Providers, tel.Logger, group, topic,
+			func(ctx context.Context) (map[int]int64, error) {
+				return kafkareader.GroupLag(ctx, brokers, group, topic)
+			})
+		defer func() { _ = unregister() }()
 	}
-	log.Print("orchestrator: stopped")
+
+	return run(ctx, kafkaTransport(brokers, tel.Logger), orchestrator, tel.Logger,
+		saga.WithAttemptObserver(telemetry.SagaAttempts(tel.Providers)))
 }
 
 // topicReader is the transport a consumer holds: a saga.Reader whose group
@@ -145,13 +173,13 @@ type transport struct {
 	newReader    func(groupID, topic string) topicReader
 }
 
-func kafkaTransport(brokers []string) transport {
+func kafkaTransport(brokers []string, logger *slog.Logger) transport {
 	return transport{
 		waitForTopic: func(ctx context.Context, topic string) error {
-			return kafkareader.WaitForTopic(ctx, brokers, topic)
+			return kafkareader.WaitForTopic(ctx, brokers, topic, logger)
 		},
 		newReader: func(groupID, topic string) topicReader {
-			return kafkareader.New(brokers, groupID, topic)
+			return kafkareader.New(brokers, groupID, topic, logger)
 		},
 	}
 }
@@ -163,7 +191,7 @@ func kafkaTransport(brokers []string) transport {
 // practice — a Transaction stuck because transfer triggers stopped arriving is
 // not usefully "still working" — and stopping together makes the failure
 // visible as one incident rather than as a partial system that looks healthy.
-func run(ctx context.Context, tr transport, handler saga.Handler) error {
+func run(ctx context.Context, tr transport, handler saga.Handler, logger *slog.Logger, opts ...saga.ConsumerOption) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -176,7 +204,7 @@ func run(ctx context.Context, tr transport, handler saga.Handler) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := consume(ctx, tr, aggregateType, handler); err != nil {
+			if err := consume(ctx, tr, aggregateType, handler, logger, opts...); err != nil {
 				mu.Lock()
 				if first == nil {
 					first = err
@@ -202,8 +230,8 @@ func run(ctx context.Context, tr transport, handler saga.Handler) error {
 // is a bootstrap deadlock, because the only thing that can dispatch the first
 // Transfer is a transaction trigger this orchestrator would be blocked from
 // consuming.
-func consume(ctx context.Context, tr transport, aggregateType string, handler saga.Handler) error {
-	topic, group := saga.Topic(aggregateType), groupPrefix+aggregateType
+func consume(ctx context.Context, tr transport, aggregateType string, handler saga.Handler, logger *slog.Logger, opts ...saga.ConsumerOption) error {
+	topic, group := saga.Topic(aggregateType), consumerGroup(aggregateType)
 
 	// Before the reader, not after: a consumer group that forms while its
 	// topic does not exist is assigned nothing and never recovers. See
@@ -218,12 +246,12 @@ func consume(ctx context.Context, tr transport, aggregateType string, handler sa
 	reader := tr.newReader(group, topic)
 	defer func() {
 		if err := reader.Close(); err != nil {
-			log.Printf("orchestrator: %v", err)
+			logger.WarnContext(ctx, "orchestrator: closing reader", slog.String("topic", topic), slog.Any("err", err))
 		}
 	}()
 
-	log.Printf("orchestrator: consuming %s as %s", topic, group)
-	return saga.NewConsumer(reader, handler).Run(ctx)
+	logger.InfoContext(ctx, "orchestrator: consuming", slog.String("topic", topic), slog.String("group", group))
+	return saga.NewConsumer(reader, handler, append([]saga.ConsumerOption{saga.WithLogger(logger)}, opts...)...).Run(ctx)
 }
 
 func env(key, fallback string) string {

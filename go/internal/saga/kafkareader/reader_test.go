@@ -1,13 +1,14 @@
 package kafkareader
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io"
-	"log"
+	"log/slog"
 	"net"
 	"path/filepath"
 	"strings"
@@ -60,7 +61,7 @@ func waiter(brokers []string, script *scriptedCheck) topicWait {
 		now:            script.now,
 		pollInterval:   pollInterval,
 		unreachableFor: 20 * pollInterval,
-		logger:         log.New(io.Discard, "", 0),
+		logger:         slog.New(slog.DiscardHandler),
 	}
 }
 
@@ -183,7 +184,7 @@ func TestWaitForTopic_RejectsAnEmptyBrokerList(t *testing.T) {
 	t.Parallel()
 	// Without this an empty list reads as "every broker answered, no topic",
 	// which is an indefinite wait for a topic nothing is being asked about.
-	if err := WaitForTopic(context.Background(), nil, "transfer-events"); err == nil {
+	if err := WaitForTopic(context.Background(), nil, "transfer-events", slog.New(slog.DiscardHandler)); err == nil {
 		t.Fatal("WaitForTopic() error = nil, want a configuration failure")
 	}
 }
@@ -304,5 +305,24 @@ func TestPackageNeverAsksForPartitionsWithAutoCreation(t *testing.T) {
 	}
 	if scanned == 0 {
 		t.Fatal("scanned no source files; the check would pass vacuously")
+	}
+}
+
+// kafka-go's errors are logged under one constant message with the detail as
+// an attribute, so every reader error groups and alerts as one, however
+// kafka-go words it.
+func TestReaderErrorLogger_LogsUnderOneMessage(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	readerErrorLogger(slog.New(slog.NewJSONHandler(&out, nil)), "transfer-events").
+		Printf("dial %s: %s", "localhost:9092", "connection refused")
+
+	var line map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &line); err != nil {
+		t.Fatalf("log output %q is not one JSON line: %v", out.String(), err)
+	}
+	if line["msg"] != "kafkareader: reader error" || line["topic"] != "transfer-events" ||
+		line["err"] != "dial localhost:9092: connection refused" {
+		t.Errorf("log line = %v, want the constant message with topic and err attributes", line)
 	}
 }

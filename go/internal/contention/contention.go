@@ -14,6 +14,9 @@ import (
 	"context"
 	"math/rand/v2"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // The wait is a random slice of a window that doubles from minWindow up to
@@ -28,11 +31,19 @@ const (
 // Wait pauses before a contended loop's next attempt, attempt counting from
 // 0 for the first retry. It returns ctx's error if ctx ends first, which is
 // what ends a loop that has no count bound.
+//
+// Each wait is marked as an event on the span ctx carries, if any, so a
+// stream's contention shows up in the trace of the work that paid for it.
 func Wait(ctx context.Context, attempt int) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	timer := time.NewTimer(backoff(attempt))
+	wait := backoff(attempt)
+	trace.SpanFromContext(ctx).AddEvent("contention.wait", trace.WithAttributes(
+		attribute.Int("money_flow.contention.attempt", attempt),
+		attribute.Float64("money_flow.contention.wait_ms", float64(wait)/float64(time.Millisecond)),
+	))
+	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():

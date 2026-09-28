@@ -3,7 +3,7 @@ package saga
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -21,6 +21,16 @@ type Message struct {
 
 func (m Message) String() string {
 	return fmt.Sprintf("%s[%d]@%d", m.Topic, m.Partition, m.Offset)
+}
+
+// LogValue is where the message sits, never its key or body: the body is the
+// published event, which this package deliberately never reads.
+func (m Message) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("topic", m.Topic),
+		slog.Int("partition", m.Partition),
+		slog.Int64("offset", m.Offset),
+	)
 }
 
 // Reader is the delivery side of the transport, narrow enough that the
@@ -108,7 +118,22 @@ type Consumer struct {
 	handler  Handler
 	attempts int
 	backoff  time.Duration
-	logger   *log.Logger
+	logger   *slog.Logger
+	observe  AttemptObserver
+}
+
+// AttemptObserver is told about each attempt to handle a trigger. It returns
+// the context the attempt runs in, which is also the context every log line
+// about that attempt is written with, and the function the consumer calls
+// with the attempt's outcome once the handler returns.
+//
+// It is how a tracer sees each attempt without this package knowing about
+// tracing: an observer that opens a span puts it in the returned context, so
+// the handler's work nests inside it and the consumer's log lines carry it.
+type AttemptObserver func(ctx context.Context, t Trigger, attempt int) (context.Context, func(error))
+
+func unobserved(ctx context.Context, _ Trigger, _ int) (context.Context, func(error)) {
+	return ctx, func(error) {}
 }
 
 // ConsumerOption adjusts a Consumer at construction.
@@ -130,8 +155,13 @@ func WithBackoff(d time.Duration) ConsumerOption {
 	return func(c *Consumer) { c.backoff = d }
 }
 
+// WithAttemptObserver has observe told about every attempt to handle a trigger.
+func WithAttemptObserver(observe AttemptObserver) ConsumerOption {
+	return func(c *Consumer) { c.observe = observe }
+}
+
 // WithLogger redirects the consumer's own reporting.
-func WithLogger(l *log.Logger) ConsumerOption {
+func WithLogger(l *slog.Logger) ConsumerOption {
 	return func(c *Consumer) { c.logger = l }
 }
 
@@ -141,7 +171,8 @@ func NewConsumer(reader Reader, handler Handler, opts ...ConsumerOption) *Consum
 		handler:  handler,
 		attempts: defaultAttempts,
 		backoff:  defaultBackoff,
-		logger:   log.Default(),
+		logger:   slog.Default(),
+		observe:  unobserved,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -264,14 +295,16 @@ func (c *Consumer) consumePartition(
 			return
 		}
 
-		if err := c.process(ctx, msg); err != nil {
+		if attemptCtx, err := c.process(ctx, msg); err != nil {
 			if isShutdown(ctx) {
 				return
 			}
 			// Stop the other partitions first, then say so: once the halt is
-			// visible, nothing else should still be starting.
+			// visible, nothing else should still be starting. It is said in
+			// the last attempt's context, so it leads to that attempt's trace.
 			fail(err)
-			c.logger.Printf("saga: HALTED on %s; nothing further will be consumed from this reader: %v", msg, err)
+			c.logger.ErrorContext(attemptCtx, "saga: HALTED; nothing further will be consumed from this reader",
+				slog.Any("message", msg), slog.Any("err", err))
 			return
 		}
 
@@ -357,7 +390,7 @@ func (c *Consumer) commitHandled(ctx context.Context, handled <-chan Message, fa
 		take(m)
 	}
 	if err := commit(flushCtx); err != nil {
-		c.logger.Printf("saga: final commit failed; these offsets will be redelivered: %v", err)
+		c.logger.ErrorContext(ctx, "saga: final commit failed; these offsets will be redelivered", slog.Any("err", err))
 	}
 }
 
@@ -367,38 +400,49 @@ func (c *Consumer) commitHandled(ctx context.Context, handled <-chan Message, fa
 // A message that will not parse is not retried at all. Retrying exists to ride
 // out a transient fault in something the handler depends on; a malformed
 // envelope is not transient, and no number of attempts will change it.
-func (c *Consumer) process(ctx context.Context, msg Message) error {
+//
+// It returns the context of the last attempt it made, which a halt is logged
+// in, or ctx itself if it made none.
+func (c *Consumer) process(ctx context.Context, msg Message) (lastAttempt context.Context, err error) {
 	trigger, err := ParseTrigger(msg.Key, msg.Value)
 	if err != nil {
-		return &HaltError{Message: msg, Attempts: 0, Err: err}
+		return ctx, &HaltError{Message: msg, Attempts: 0, Err: err}
 	}
 
 	backoff := c.backoff
+	lastAttempt = ctx
 	var lastErr error
 	for attempt := 1; attempt <= c.attempts; attempt++ {
 		if attempt > 1 {
-			c.logger.Printf("saga: retrying %s (%s), attempt %d of %d, after: %v", msg, trigger, attempt, c.attempts, lastErr)
+			// Said in the context of the attempt that failed, which is the
+			// one this line is about.
+			c.logger.WarnContext(lastAttempt, "saga: retrying",
+				slog.Any("message", msg), slog.Any("trigger", trigger),
+				slog.Int("attempt", attempt), slog.Int("attempts", c.attempts), slog.Any("err", lastErr))
 			if err := sleep(ctx, backoff); err != nil {
-				return err
+				return lastAttempt, err
 			}
 			backoff *= 2
 		}
 
-		lastErr = c.handler.Handle(ctx, trigger)
+		attemptCtx, done := c.observe(ctx, trigger, attempt)
+		lastErr = c.handler.Handle(attemptCtx, trigger)
+		done(lastErr)
+		lastAttempt = attemptCtx
 		if lastErr == nil {
 			// One line per trigger. An event log is low-volume, and root
 			// docs/adr/0001 decision 6 chose process-manager orchestration
 			// partly for central logging — a consumer whose only output is
 			// silence gives an operator no way to tell "nothing to do" from
 			// "receiving nothing".
-			c.logger.Printf("saga: handled %s: %s", msg, trigger)
-			return nil
+			c.logger.InfoContext(attemptCtx, "saga: handled", slog.Any("message", msg), slog.Any("trigger", trigger))
+			return attemptCtx, nil
 		}
 		if isShutdown(ctx) {
-			return lastErr
+			return attemptCtx, lastErr
 		}
 	}
-	return &HaltError{Message: msg, Attempts: c.attempts, Err: lastErr}
+	return lastAttempt, &HaltError{Message: msg, Attempts: c.attempts, Err: lastErr}
 }
 
 // isShutdown reports whether this consumer's own ctx is why the caller's

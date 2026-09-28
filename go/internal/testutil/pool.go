@@ -42,6 +42,13 @@ func requireTestDatabase(raw string) error {
 // only about the rows it wrote.
 func Pool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
+	return PoolWith(t, func(*pgxpool.Config) {})
+}
+
+// PoolWith is Pool with configure applied to the pool's configuration before
+// it connects, for a test about how a pool is configured.
+func PoolWith(t *testing.T, configure func(*pgxpool.Config)) *pgxpool.Pool {
+	t.Helper()
 
 	// TEST_DATABASE_URL first: DATABASE_URL points at development wherever the
 	// app itself runs, and these tests must never land there.
@@ -57,7 +64,12 @@ func Pool(t *testing.T) *pgxpool.Pool {
 	}
 
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dbURL)
+	cfg, err := pgxpool.ParseConfig(dbURL)
+	if err != nil {
+		t.Skipf("skipping: cannot configure pool for %s: %v", dbURL, err)
+	}
+	configure(cfg)
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		t.Skipf("skipping: cannot configure pool for %s: %v", dbURL, err)
 	}

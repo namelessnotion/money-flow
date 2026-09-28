@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -142,6 +143,9 @@ func trigger(aggregateType, id string) saga.Message {
 	}
 }
 
+// quiet discards what run logs; these tests assert on what it does.
+var quiet = slog.New(slog.DiscardHandler)
+
 // start runs run in the background, returning the func that stops it and the
 // func that reports what it returned.
 func start(t *testing.T, tr transport, handler saga.Handler) (stop context.CancelFunc, returned func() error) {
@@ -150,7 +154,7 @@ func start(t *testing.T, tr transport, handler saga.Handler) (stop context.Cance
 	t.Cleanup(cancel)
 
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, tr, handler) }()
+	go func() { done <- run(ctx, tr, handler, quiet) }()
 
 	return cancel, func() error {
 		t.Helper()
@@ -311,5 +315,20 @@ func TestPoolConfigRejectsAnUnparsableURL(t *testing.T) {
 
 	if _, err := poolConfig("not-a-postgres-url", 10); err == nil {
 		t.Error("poolConfig() error = nil, want a parse error for a malformed DATABASE_URL")
+	}
+}
+
+// The group names are what an operator's lag alert and the runbook's
+// kafka-consumer-groups.sh commands name (docs/saga-orchestrator.md), so they
+// are pinned rather than left to whatever the derivation happens to produce.
+func TestConsumerGroup_IsTheDocumentedGroupPerTopic(t *testing.T) {
+	t.Parallel()
+	for aggregateType, want := range map[string]string{
+		transfer.AggregateType:    "money-flow-saga-transfer",
+		transaction.AggregateType: "money-flow-saga-transaction",
+	} {
+		if got := consumerGroup(aggregateType); got != want {
+			t.Errorf("consumerGroup(%q) = %q, want %q", aggregateType, got, want)
+		}
 	}
 }
