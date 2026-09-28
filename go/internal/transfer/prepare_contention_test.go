@@ -7,8 +7,8 @@ import (
 	"sync"
 	"testing"
 
-	pb "github.com/namelessnotion/money_flow/go/gen/proto/transfer/v1"
 	sharedpb "github.com/namelessnotion/money_flow/go/gen/proto/shared/v1"
+	pb "github.com/namelessnotion/money_flow/go/gen/proto/transfer/v1"
 	"github.com/namelessnotion/money_flow/go/internal/eventstore"
 	"github.com/namelessnotion/money_flow/go/internal/ledger"
 	"github.com/namelessnotion/money_flow/go/internal/testutil"
