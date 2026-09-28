@@ -39,17 +39,13 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
-	"syscall"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/namelessnotion/money_flow/go/internal/eventstore"
 	"github.com/namelessnotion/money_flow/go/internal/ledger"
-	"github.com/namelessnotion/money_flow/go/internal/saga"
 	"github.com/namelessnotion/money_flow/go/internal/telemetry"
 )
 
@@ -57,9 +53,6 @@ const (
 	defaultDatabaseURL          = "postgres://money_flow:money_flow@localhost:5432/money_flow_dev?sslmode=disable"
 	defaultTigerBeetleAddress   = "127.0.0.1:3000"
 	defaultTigerBeetleClusterID = "0"
-
-	// telemetryFlushTimeout bounds exporting what is still buffered on exit.
-	telemetryFlushTimeout = 10 * time.Second
 )
 
 func env(key, fallback string) string {
@@ -79,28 +72,13 @@ func main() {
 
 	// Telemetry is exported only when an OTLP endpoint is configured, the same
 	// as the long-running binaries, so a hand-driven saga leaves the same
-	// traces a delivered trigger would. What this tool prints stays plain
-	// text: it is read by the operator at the terminal that ran it.
-	cfg, err := telemetry.ConfigFromEnv("money-flow-resume", os.Getenv)
-	if err != nil {
-		log.Fatalf("resume: %v", err)
-	}
-	tel, err := telemetry.Setup(context.Background(), cfg)
-	if err != nil {
-		log.Fatalf("resume: %v", err)
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	err = resume(ctx, tel, *open, flag.Args())
-	stop()
-
-	flushCtx, cancel := context.WithTimeout(context.Background(), telemetryFlushTimeout)
-	defer cancel()
-	if err := tel.Shutdown(flushCtx); err != nil {
-		log.Printf("resume: flushing telemetry: %v", err)
-	}
-	if err != nil {
-		log.Fatalf("resume: %v", err)
+	// traces a delivered trigger would. What this tool prints about each
+	// aggregate stays plain text: it is read by the operator at the terminal
+	// that ran it.
+	if err := telemetry.Run("money-flow-resume", func(ctx context.Context, tel *telemetry.Telemetry) error {
+		return resume(ctx, tel, *open, flag.Args())
+	}); err != nil {
+		os.Exit(1)
 	}
 }
 
@@ -131,8 +109,8 @@ func resume(ctx context.Context, tel *telemetry.Telemetry, open bool, ids []stri
 	}
 	defer tb.Close()
 
-	store := telemetry.NewStore(eventstore.NewPostgresStore(pool), tel.Providers)
-	orchestrator := saga.Wire(store, telemetry.NewLedger(tb, tel.Providers)).Orchestrator()
+	store := eventstore.NewPostgresStore(pool)
+	orchestrator := telemetry.Orchestrator(tel.Providers, store, tb)
 	driver := driver{orchestrator: telemetry.SagaHandler(tel.Providers, orchestrator), store: store}
 	catalogue := catalogue{pool: pool}
 

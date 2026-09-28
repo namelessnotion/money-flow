@@ -28,12 +28,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -69,10 +66,12 @@ const (
 	// fault isolation from the other's — run cancels both on the first error,
 	// per go/docs/adr/0003.
 	groupPrefix = "money-flow-saga-"
-
-	// telemetryFlushTimeout bounds exporting what is still buffered on exit.
-	telemetryFlushTimeout = 10 * time.Second
 )
+
+// consumerGroup names the group that consumes aggregateType's topic. It is the
+// one derivation of it: the lag gauge has to watch the same group consume
+// joins, or an alert on lag would silently watch a group nobody consumes as.
+func consumerGroup(aggregateType string) string { return groupPrefix + aggregateType }
 
 // poolConfig parses databaseURL into a pgxpool.Config with MaxConns
 // overridden to maxConns — see cmd/server's own poolConfig for why this is
@@ -94,36 +93,11 @@ func poolConfig(databaseURL string, maxConns int32) (*pgxpool.Config, error) {
 var consumedAggregateTypes = []string{transfer.AggregateType, transaction.AggregateType}
 
 func main() {
-	cfg, err := telemetry.ConfigFromEnv("money-flow-orchestrator", os.Getenv)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "orchestrator: %v\n", err)
-		os.Exit(1)
-	}
-	tel, err := telemetry.Setup(context.Background(), cfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "orchestrator: %v\n", err)
-		os.Exit(1)
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	err = orchestrate(ctx, tel)
-	stop()
-	if err != nil {
-		// A halt lands here, after the consumer has already logged the exact
-		// message it stopped on (go/docs/adr/0003).
-		tel.Logger.Error("orchestrator: stopped", slog.Any("err", err))
-	} else {
-		tel.Logger.Info("orchestrator: stopped")
-	}
-
-	// Last, so the spans of the attempts that led to a halt are exported
-	// before the process exits non-zero.
-	flushCtx, cancel := context.WithTimeout(context.Background(), telemetryFlushTimeout)
-	defer cancel()
-	if err := tel.Shutdown(flushCtx); err != nil {
-		fmt.Fprintf(os.Stderr, "orchestrator: flushing telemetry: %v\n", err)
-	}
-	if err != nil {
+	// A halt ends up here as an error, after the consumer has already logged
+	// the exact message it stopped on (go/docs/adr/0003). telemetry.Run
+	// exports that line, and the spans of the attempts that led to it, before
+	// the process exits non-zero.
+	if err := telemetry.Run("money-flow-orchestrator", orchestrate); err != nil {
 		os.Exit(1)
 	}
 }
@@ -166,14 +140,13 @@ func orchestrate(ctx context.Context, tel *telemetry.Telemetry) error {
 	defer tb.Close()
 
 	brokers := strings.Split(env("KAFKA_BROKERS", defaultKafkaBrokers), ",")
-	store := telemetry.NewStore(eventstore.NewPostgresStore(pool), tel.Providers)
-	orchestrator := saga.Wire(store, telemetry.NewLedger(tb, tel.Providers)).Orchestrator()
+	orchestrator := telemetry.Orchestrator(tel.Providers, eventstore.NewPostgresStore(pool), tb)
 
 	// Lag is watched per group from the start, including while a topic is
 	// still being waited for: it is the one signal that tells a stopped
 	// consumer from an idle log (go/docs/adr/0003).
 	for _, aggregateType := range consumedAggregateTypes {
-		topic, group := saga.Topic(aggregateType), groupPrefix+aggregateType
+		topic, group := saga.Topic(aggregateType), consumerGroup(aggregateType)
 		unregister := telemetry.RegisterConsumerLag(tel.Providers, tel.Logger, group, topic,
 			func(ctx context.Context) (map[int]int64, error) {
 				return kafkareader.GroupLag(ctx, brokers, group, topic)
@@ -181,7 +154,8 @@ func orchestrate(ctx context.Context, tel *telemetry.Telemetry) error {
 		defer func() { _ = unregister() }()
 	}
 
-	return run(ctx, kafkaTransport(brokers, tel.Logger), telemetry.SagaHandler(tel.Providers, orchestrator), tel.Logger)
+	return run(ctx, kafkaTransport(brokers, tel.Logger), orchestrator, tel.Logger,
+		saga.WithAttemptObserver(telemetry.SagaAttempts(tel.Providers)))
 }
 
 // topicReader is the transport a consumer holds: a saga.Reader whose group
@@ -217,7 +191,7 @@ func kafkaTransport(brokers []string, logger *slog.Logger) transport {
 // practice — a Transaction stuck because transfer triggers stopped arriving is
 // not usefully "still working" — and stopping together makes the failure
 // visible as one incident rather than as a partial system that looks healthy.
-func run(ctx context.Context, tr transport, handler saga.Handler, logger *slog.Logger) error {
+func run(ctx context.Context, tr transport, handler saga.Handler, logger *slog.Logger, opts ...saga.ConsumerOption) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -230,7 +204,7 @@ func run(ctx context.Context, tr transport, handler saga.Handler, logger *slog.L
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := consume(ctx, tr, aggregateType, handler, logger); err != nil {
+			if err := consume(ctx, tr, aggregateType, handler, logger, opts...); err != nil {
 				mu.Lock()
 				if first == nil {
 					first = err
@@ -256,8 +230,8 @@ func run(ctx context.Context, tr transport, handler saga.Handler, logger *slog.L
 // is a bootstrap deadlock, because the only thing that can dispatch the first
 // Transfer is a transaction trigger this orchestrator would be blocked from
 // consuming.
-func consume(ctx context.Context, tr transport, aggregateType string, handler saga.Handler, logger *slog.Logger) error {
-	topic, group := saga.Topic(aggregateType), groupPrefix+aggregateType
+func consume(ctx context.Context, tr transport, aggregateType string, handler saga.Handler, logger *slog.Logger, opts ...saga.ConsumerOption) error {
+	topic, group := saga.Topic(aggregateType), consumerGroup(aggregateType)
 
 	// Before the reader, not after: a consumer group that forms while its
 	// topic does not exist is assigned nothing and never recovers. See
@@ -277,7 +251,7 @@ func consume(ctx context.Context, tr transport, aggregateType string, handler sa
 	}()
 
 	logger.InfoContext(ctx, "orchestrator: consuming", slog.String("topic", topic), slog.String("group", group))
-	return saga.NewConsumer(reader, handler, saga.WithLogger(logger)).Run(ctx)
+	return saga.NewConsumer(reader, handler, append([]saga.ConsumerOption{saga.WithLogger(logger)}, opts...)...).Run(ctx)
 }
 
 func env(key, fallback string) string {

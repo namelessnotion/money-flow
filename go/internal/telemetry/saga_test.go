@@ -3,14 +3,18 @@ package telemetry_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/namelessnotion/money_flow/go/internal/saga"
@@ -135,5 +139,102 @@ func TestConsumerLag_AnUnmeasurableLagIsMissingNotZero(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "no broker reachable") {
 		t.Errorf("log = %q, want the measurement failure", logs.String())
+	}
+}
+
+// oneMessage delivers a single trigger and then waits, like an idle topic.
+type oneMessage struct {
+	msg       saga.Message
+	delivered bool
+}
+
+func (r *oneMessage) Fetch(ctx context.Context) (saga.Message, error) {
+	if r.delivered {
+		<-ctx.Done()
+		return saga.Message{}, ctx.Err()
+	}
+	r.delivered = true
+	return r.msg, nil
+}
+
+func (r *oneMessage) Commit(context.Context, ...saga.Message) error { return nil }
+
+// The halt line an operator starts from carries the trace of the attempt that
+// failed for good, which is the whole point of stamping trace ids on logs
+// (docs/saga-orchestrator.md, recovering from a halt, step 1).
+func TestSagaAttempts_TheHaltLineCarriesTheFailedAttemptsTrace(t *testing.T) {
+	t.Parallel()
+	rec := newRecording(t)
+	var out bytes.Buffer
+	tel, err := telemetry.Setup(context.Background(), telemetry.Config{
+		ServiceName: "money-flow-test", LogLevel: slog.LevelInfo, LogOutput: &out,
+	})
+	if err != nil {
+		t.Fatalf("Setup() error = %v", err)
+	}
+	id := testutil.ID("halting")
+	reader := &oneMessage{msg: saga.Message{
+		Topic: "transfer-events", Key: []byte(id),
+		Value: []byte(`{"aggregate_type":"transfer","event_type":"transfer.v1.TransferRequestAccepted","sequence":1,"global_seq":1}`),
+	}}
+	c := saga.NewConsumer(reader, handlerFunc(func(context.Context, saga.Trigger) error { return errors.New("invariant broken") }),
+		saga.WithAttempts(2), saga.WithBackoff(0), saga.WithLogger(tel.Logger),
+		saga.WithAttemptObserver(telemetry.SagaAttempts(rec.Providers)))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var halt *saga.HaltError
+	if err := c.Run(ctx); !errors.As(err, &halt) {
+		t.Fatalf("Run() error = %v, want a *saga.HaltError", err)
+	}
+
+	var attempts []sdktrace.ReadOnlySpan
+	for _, s := range rec.spans.Ended() {
+		if s.Name() == "saga.handle transfer" {
+			attempts = append(attempts, s)
+		}
+	}
+	if len(attempts) != 2 {
+		t.Fatalf("got %d attempt spans, want 2", len(attempts))
+	}
+	wantAttr(t, attempts[1], "money_flow.saga.attempt", "2")
+	var haltLine map[string]any
+	for line := range strings.SplitSeq(strings.TrimSpace(out.String()), "\n") {
+		var l map[string]any
+		if err := json.Unmarshal([]byte(line), &l); err != nil {
+			t.Fatalf("log line %q is not JSON: %v", line, err)
+		}
+		if strings.Contains(l["msg"].(string), "HALTED") {
+			haltLine = l
+		}
+	}
+	if haltLine == nil {
+		t.Fatalf("no HALTED line in %q", out.String())
+	}
+	if got, want := haltLine["trace_id"], attempts[1].SpanContext().TraceID().String(); got != want {
+		t.Errorf("halt trace_id = %v, want the last attempt's %s", got, want)
+	}
+}
+
+// A shutdown that lands mid-step cancels the step. That is the process being
+// stopped, not the step failing, and it must not add error points to the
+// series an alert watches on every deploy.
+func TestHandler_ACancelledStepIsCanceledNotAnError(t *testing.T) {
+	t.Parallel()
+	rec := newRecording(t)
+	h := telemetry.SagaHandler(rec.Providers, handlerFunc(func(ctx context.Context, _ saga.Trigger) error {
+		return fmt.Errorf("load: %w", context.Canceled)
+	}))
+
+	_ = h.Handle(context.Background(), transferTrigger(testutil.ID("stopped")))
+
+	span := rec.span(t, "saga.handle transfer")
+	wantAttr(t, span, "money_flow.outcome", "canceled")
+	if span.Status().Code != codes.Unset {
+		t.Errorf("status = %v, want Unset", span.Status().Code)
+	}
+	if n := rec.histogramCount(t, "money_flow.saga.handle.duration",
+		attribute.String("money_flow.outcome", "error")); n != 0 {
+		t.Errorf("error observations = %d, want 0", n)
 	}
 }

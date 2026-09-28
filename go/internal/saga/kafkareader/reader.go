@@ -237,9 +237,7 @@ func New(brokers []string, groupID, topic string, logger *slog.Logger) *Reader {
 		// a broker, or cannot join its group, simply returns nothing, which is
 		// indistinguishable from an idle topic — and an idle topic is the
 		// normal state here, so there is nothing else to notice it by.
-		ErrorLogger: kafka.LoggerFunc(func(format string, args ...any) {
-			logger.Error("kafkareader: "+fmt.Sprintf(format, args...), slog.String("topic", topic))
-		}),
+		ErrorLogger: readerErrorLogger(logger, topic),
 	})}
 }
 
@@ -277,4 +275,14 @@ func (r *Reader) Close() error {
 		return fmt.Errorf("kafkareader: close: %w", err)
 	}
 	return nil
+}
+
+// readerErrorLogger reports kafka-go's errors for topic under one constant
+// message, with the detail as an attribute, so every reader error groups and
+// alerts as one however kafka-go words it. kafka-go hands its logger no
+// context to log with.
+func readerErrorLogger(logger *slog.Logger, topic string) kafka.LoggerFunc {
+	return func(format string, args ...any) {
+		logger.Error("kafkareader: reader error", slog.String("topic", topic), slog.String("err", fmt.Sprintf(format, args...)))
+	}
 }

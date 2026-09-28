@@ -52,7 +52,7 @@ func requestTransfer(t *testing.T, url string, id string) error {
 	return err
 }
 
-// One RPC is one server span named for the command it carried, tagged with the
+// One RPC is one span named for the command it carried, tagged with the
 // aggregate it addressed. That id is what links the RPC to the saga work its
 // events later trigger in the orchestrator.
 func TestInterceptor_NamesTheSpanForTheCommandAndTheAggregate(t *testing.T) {
@@ -65,9 +65,20 @@ func TestInterceptor_NamesTheSpanForTheCommandAndTheAggregate(t *testing.T) {
 		t.Fatalf("RequestTransfer() error = %v", err)
 	}
 
+	// One request is one server span, otelhttp's. This one sits inside it,
+	// so a backend that counts server spans as requests counts each once.
 	span := rec.span(t, requestTransferSpan)
-	if span.SpanKind() != trace.SpanKindServer {
-		t.Errorf("span kind = %v, want server", span.SpanKind())
+	if span.SpanKind() != trace.SpanKindInternal {
+		t.Errorf("span kind = %v, want internal", span.SpanKind())
+	}
+	var servers int
+	for _, s := range rec.spans.Ended() {
+		if s.SpanKind() == trace.SpanKindServer {
+			servers++
+		}
+	}
+	if servers != 1 {
+		t.Errorf("got %d server spans for one request, want 1", servers)
 	}
 	wantAttr(t, span, "rpc.system", "twirp")
 	wantAttr(t, span, "rpc.service", "transfer.v1.TransferService")

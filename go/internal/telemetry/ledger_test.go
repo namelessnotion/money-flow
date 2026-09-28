@@ -92,3 +92,66 @@ func TestLedger_BalancesAreTraced(t *testing.T) {
 
 	wantAttr(t, rec.span(t, "ledger.balances"), "money_flow.ledger.batch_size", "2")
 }
+
+// Resubmitting a transfer that already landed is answered "exists", which the
+// saga treats as success: it is how an at-least-once retry finds its work
+// done. It must not read as a rejection, or every redelivery after a restart
+// would look like a surge of refusals.
+func TestLedger_AnIdempotentRetryIsNotARejection(t *testing.T) {
+	t.Parallel()
+	rec := newRecording(t)
+	fake := ledger.NewFakeClient()
+	lc := telemetry.NewLedger(fake, rec.Providers)
+	ctx := context.Background()
+	payer, payee := testutil.ID("retry-payer"), testutil.ID("retry-payee")
+	accounts := []ledger.Account{{ID: payer, Currency: "USD"}, {ID: payee, Currency: "USD"}}
+	transfer := []ledger.Transfer{{
+		ID: testutil.ID("retried"), DebitAccountID: payer, CreditAccountID: payee,
+		MinorUnits: 100, Currency: "USD", Kind: ledger.TransferKindRegular,
+	}}
+	if _, err := fake.CreateAccounts(ctx, accounts); err != nil {
+		t.Fatalf("seed CreateAccounts() error = %v", err)
+	}
+	if _, err := fake.CreateTransfers(ctx, transfer); err != nil {
+		t.Fatalf("seed CreateTransfers() error = %v", err)
+	}
+
+	accountResults, err := lc.CreateAccounts(ctx, accounts)
+	if err != nil {
+		t.Fatalf("CreateAccounts() error = %v", err)
+	}
+	transferResults, err := lc.CreateTransfers(ctx, transfer)
+	if err != nil {
+		t.Fatalf("CreateTransfers() error = %v", err)
+	}
+	if accountResults[0].Result != ledger.AccountResultExists || transferResults[0].Result != ledger.TransferResultExists {
+		t.Fatalf("results = %+v, %+v, want exists for both retries", accountResults, transferResults)
+	}
+
+	if n := rec.sum(t, "money_flow.ledger.rejections"); n != 0 {
+		t.Errorf("rejections = %d, want 0 for idempotent retries", n)
+	}
+	span := rec.span(t, "ledger.create_transfers")
+	wantAttr(t, span, "money_flow.ledger.rejected", "0")
+	wantAttr(t, span, "money_flow.ledger.already_applied", "1")
+}
+
+type cancelledLedger struct{ ledger.Client }
+
+func (cancelledLedger) Balances(context.Context, []string) (map[string]ledger.Balance, error) {
+	return nil, context.Canceled
+}
+
+func TestLedger_ACancelledCallIsCanceledNotAnError(t *testing.T) {
+	t.Parallel()
+	rec := newRecording(t)
+	lc := telemetry.NewLedger(cancelledLedger{}, rec.Providers)
+
+	_, _ = lc.Balances(context.Background(), []string{testutil.ID("a")})
+
+	span := rec.span(t, "ledger.balances")
+	wantAttr(t, span, "money_flow.outcome", "canceled")
+	if span.Status().Code != codes.Unset {
+		t.Errorf("status = %v, want Unset", span.Status().Code)
+	}
+}

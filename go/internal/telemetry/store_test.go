@@ -3,6 +3,7 @@ package telemetry_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -128,5 +129,26 @@ func TestStore_AggregateIDNeverBecomesAMetricDimension(t *testing.T) {
 	}
 	if _, found := h.DataPoints[0].Attributes.Value("money_flow.aggregate_id"); found {
 		t.Error("duration carries money_flow.aggregate_id")
+	}
+}
+
+type cancelledStore struct{ eventstore.Store }
+
+func (cancelledStore) Load(context.Context, string, string) ([]eventstore.Event, error) {
+	return nil, fmt.Errorf("eventstore: load: %w", context.Canceled)
+}
+
+// A query cut short by shutdown is not a store fault.
+func TestStore_ACancelledCallIsCanceledNotAnError(t *testing.T) {
+	t.Parallel()
+	rec := newRecording(t)
+	store := telemetry.NewStore(cancelledStore{}, rec.Providers)
+
+	_, _ = store.Load(context.Background(), holderType, testutil.ID("stopped"))
+
+	span := rec.span(t, "eventstore.load")
+	wantAttr(t, span, "money_flow.outcome", "canceled")
+	if span.Status().Code != codes.Unset {
+		t.Errorf("status = %v, want Unset", span.Status().Code)
 	}
 }

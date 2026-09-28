@@ -317,3 +317,18 @@ func TestPoolConfigRejectsAnUnparsableURL(t *testing.T) {
 		t.Error("poolConfig() error = nil, want a parse error for a malformed DATABASE_URL")
 	}
 }
+
+// The group names are what an operator's lag alert and the runbook's
+// kafka-consumer-groups.sh commands name (docs/saga-orchestrator.md), so they
+// are pinned rather than left to whatever the derivation happens to produce.
+func TestConsumerGroup_IsTheDocumentedGroupPerTopic(t *testing.T) {
+	t.Parallel()
+	for aggregateType, want := range map[string]string{
+		transfer.AggregateType:    "money-flow-saga-transfer",
+		transaction.AggregateType: "money-flow-saga-transaction",
+	} {
+		if got := consumerGroup(aggregateType); got != want {
+			t.Errorf("consumerGroup(%q) = %q, want %q", aggregateType, got, want)
+		}
+	}
+}

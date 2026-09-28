@@ -12,10 +12,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -72,32 +70,7 @@ func poolConfig(databaseURL string, maxConns int32) (*pgxpool.Config, error) {
 }
 
 func main() {
-	cfg, err := telemetry.ConfigFromEnv("money-flow-server", os.Getenv)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "server: %v\n", err)
-		os.Exit(1)
-	}
-	tel, err := telemetry.Setup(context.Background(), cfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "server: %v\n", err)
-		os.Exit(1)
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	err = serve(ctx, tel)
-	stop()
-	if err != nil {
-		tel.Logger.Error("server: stopped", slog.Any("err", err))
-	}
-
-	// Last, after the server and pool are closed, so nothing they record on
-	// the way down is lost.
-	flushCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
-	defer cancel()
-	if err := tel.Shutdown(flushCtx); err != nil {
-		fmt.Fprintf(os.Stderr, "server: flushing telemetry: %v\n", err)
-	}
-	if err != nil {
+	if err := telemetry.Run("money-flow-server", serve); err != nil {
 		os.Exit(1)
 	}
 }

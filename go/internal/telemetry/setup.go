@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/propagation"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -28,29 +29,47 @@ type Config struct {
 	// OTEL_SERVICE_NAME overrides it on what is exported.
 	ServiceName string
 
-	// Export sends traces, metrics and logs over OTLP/HTTP. Where to, and
-	// with what headers, the exporters read from the standard
+	// Traces, Metrics and Logs each send that signal over OTLP/HTTP. Where
+	// to, and with what headers, the exporters read from the standard
 	// OTEL_EXPORTER_OTLP_* variables themselves.
-	Export bool
+	Traces, Metrics, Logs bool
 
 	LogLevel  slog.Level
 	LogOutput io.Writer
 }
 
+func (c Config) exporting() bool { return c.Traces || c.Metrics || c.Logs }
+
 // ConfigFromEnv reads the standard OpenTelemetry switches plus LOG_LEVEL.
 //
-// Export is on exactly when an OTLP endpoint is configured and the SDK has not
-// been disabled. With no collector to send to, a binary that tried would only
-// log a stream of export failures, so no endpoint means no export, and tests
-// and CI need no configuration to stay quiet.
+// A signal is exported exactly when an OTLP endpoint is configured for it,
+// shared or its own, and the SDK has not been disabled. With no collector to
+// send to, an exporter would fall back to localhost:4318 and log a failure on
+// every interval, so a signal with no endpoint is not exported at all, and
+// tests and CI need no configuration to stay quiet.
+//
+// Only OTLP over HTTP (http/protobuf) is built. A protocol variable asking for
+// anything else is refused rather than ignored.
 func ConfigFromEnv(serviceName string, getenv func(string) string) (Config, error) {
 	cfg := Config{ServiceName: serviceName, LogOutput: os.Stdout}
 
-	endpoint := getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" ||
-		getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") != "" ||
-		getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") != "" ||
-		getenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT") != ""
-	cfg.Export = endpoint && !strings.EqualFold(getenv("OTEL_SDK_DISABLED"), "true")
+	for _, key := range []string{
+		"OTEL_EXPORTER_OTLP_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
+	} {
+		if protocol := getenv(key); protocol != "" && protocol != "http/protobuf" {
+			return Config{}, fmt.Errorf("telemetry: %s=%q: only http/protobuf is supported", key, protocol)
+		}
+	}
+
+	disabled := strings.EqualFold(getenv("OTEL_SDK_DISABLED"), "true")
+	shared := getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != ""
+	exported := func(signal string) bool {
+		return !disabled && (shared || getenv("OTEL_EXPORTER_OTLP_"+signal+"_ENDPOINT") != "")
+	}
+	cfg.Traces, cfg.Metrics, cfg.Logs = exported("TRACES"), exported("METRICS"), exported("LOGS")
 
 	if level := getenv("LOG_LEVEL"); level != "" {
 		if err := cfg.LogLevel.UnmarshalText([]byte(level)); err != nil {
@@ -70,50 +89,60 @@ type Telemetry struct {
 
 // Setup builds the providers and logger cfg asks for.
 //
-// With Export off, the providers are no-ops and only the JSON log is written.
-// With it on, each signal is batched and sent over OTLP/HTTP, and Shutdown
-// flushes whatever is still buffered.
+// A signal that is not exported gets a no-op provider, and the JSON log is
+// written either way. An exported signal is batched and sent over OTLP/HTTP,
+// and Shutdown flushes whatever is still buffered.
 func Setup(ctx context.Context, cfg Config) (*Telemetry, error) {
-	if !cfg.Export {
-		return &Telemetry{Providers: Noop(), Logger: newLogger(cfg, nil)}, nil
+	t := &Telemetry{Providers: Noop()}
+	if !cfg.exporting() {
+		t.Logger = newLogger(cfg, nil)
+		return t, nil
 	}
 
 	res, err := newResource(ctx, cfg.ServiceName)
 	if err != nil {
 		return nil, err
 	}
-	traceExporter, err := otlptracehttp.New(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("telemetry: trace exporter: %w", err)
-	}
-	metricExporter, err := otlpmetrichttp.New(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("telemetry: metric exporter: %w", err)
-	}
-	logExporter, err := otlploghttp.New(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("telemetry: log exporter: %w", err)
-	}
+	// fail flushes whatever was already built, so a half-built Telemetry
+	// never leaks a running exporter.
+	fail := func(err error) (*Telemetry, error) { return nil, errors.Join(err, t.Shutdown(ctx)) }
 
-	tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(traceExporter), sdktrace.WithResource(res))
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter)), sdkmetric.WithResource(res))
-	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewBatchProcessor(logExporter)), sdklog.WithResource(res))
-
-	t := &Telemetry{
-		Providers: Providers{
-			Tracer:     tp,
-			Meter:      mp,
-			Propagator: propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}),
-		},
-		Logger: newLogger(cfg, lp),
-		// Traces and logs before metrics, so the metric provider's final
-		// collection includes anything the others recorded while flushing.
-		shutdown: []func(context.Context) error{tp.Shutdown, lp.Shutdown, mp.Shutdown},
+	// Built, and so flushed, in this order: traces and logs before metrics,
+	// so the metric provider's final collection includes anything the others
+	// recorded while flushing.
+	if cfg.Traces {
+		exporter, err := otlptracehttp.New(ctx)
+		if err != nil {
+			return fail(fmt.Errorf("telemetry: trace exporter: %w", err))
+		}
+		tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exporter), sdktrace.WithResource(res))
+		t.Tracer = tp
+		t.Propagator = propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
+		t.shutdown = append(t.shutdown, tp.Shutdown)
 	}
-
-	if err := runtime.Start(runtime.WithMeterProvider(mp)); err != nil {
-		return nil, errors.Join(fmt.Errorf("telemetry: runtime metrics: %w", err), t.Shutdown(ctx))
+	var lp log.LoggerProvider
+	if cfg.Logs {
+		exporter, err := otlploghttp.New(ctx)
+		if err != nil {
+			return fail(fmt.Errorf("telemetry: log exporter: %w", err))
+		}
+		provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewBatchProcessor(exporter)), sdklog.WithResource(res))
+		lp = provider
+		t.shutdown = append(t.shutdown, provider.Shutdown)
 	}
+	if cfg.Metrics {
+		exporter, err := otlpmetrichttp.New(ctx)
+		if err != nil {
+			return fail(fmt.Errorf("telemetry: metric exporter: %w", err))
+		}
+		mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exporter)), sdkmetric.WithResource(res))
+		t.Meter = mp
+		t.shutdown = append(t.shutdown, mp.Shutdown)
+		if err := runtime.Start(runtime.WithMeterProvider(mp)); err != nil {
+			return fail(fmt.Errorf("telemetry: runtime metrics: %w", err))
+		}
+	}
+	t.Logger = newLogger(cfg, lp)
 	return t, nil
 }
 

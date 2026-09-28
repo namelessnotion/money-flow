@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
@@ -18,9 +17,10 @@ import (
 const outcomeInvalidRequest = "invalid_request"
 
 const (
-	keyBatchSize    = attribute.Key("money_flow.ledger.batch_size")
-	keyRejected     = attribute.Key("money_flow.ledger.rejected")
-	keyLedgerResult = attribute.Key("money_flow.ledger.result")
+	keyBatchSize      = attribute.Key("money_flow.ledger.batch_size")
+	keyRejected       = attribute.Key("money_flow.ledger.rejected")
+	keyAlreadyApplied = attribute.Key("money_flow.ledger.already_applied")
+	keyLedgerResult   = attribute.Key("money_flow.ledger.result")
 )
 
 // Ledger is a ledger.Client that traces and times every call to TigerBeetle.
@@ -30,8 +30,9 @@ const (
 //
 // A TigerBeetle result other than ok is not a failed call. The batch was
 // accepted and each entry answered, and the saga decides what an answer means.
-// Those answers are counted by code, so a surge of exceeds_credits is visible
-// without looking like a ledger outage.
+// Refusals are counted by code, so a surge of exceeds_credits is visible
+// without looking like a ledger outage; "exists", the answer to a retried
+// entry, is not a refusal and is not counted as one.
 type Ledger struct {
 	inner      ledger.Client
 	tracer     trace.Tracer
@@ -59,13 +60,17 @@ func (l *Ledger) CreateAccounts(ctx context.Context, accounts []ledger.Account) 
 	const op = "create_accounts"
 	ctx, done := l.start(ctx, op, len(accounts))
 	results, err := l.inner.CreateAccounts(ctx, accounts)
-	rejected := make([]string, 0, len(results))
+	var answers batchAnswers
 	for _, r := range results {
-		if r.Result != ledger.AccountResultOK {
-			rejected = append(rejected, r.Result.String())
+		switch r.Result {
+		case ledger.AccountResultOK:
+		case ledger.AccountResultExists:
+			answers.alreadyApplied++
+		default:
+			answers.rejected = append(answers.rejected, r.Result.String())
 		}
 	}
-	l.reject(ctx, op, rejected)
+	l.record(ctx, op, answers)
 	done(err)
 	return results, err
 }
@@ -74,13 +79,17 @@ func (l *Ledger) CreateTransfers(ctx context.Context, transfers []ledger.Transfe
 	const op = "create_transfers"
 	ctx, done := l.start(ctx, op, len(transfers))
 	results, err := l.inner.CreateTransfers(ctx, transfers)
-	rejected := make([]string, 0, len(results))
+	var answers batchAnswers
 	for _, r := range results {
-		if r.Result != ledger.TransferResultOK {
-			rejected = append(rejected, r.Result.String())
+		switch r.Result {
+		case ledger.TransferResultOK:
+		case ledger.TransferResultExists:
+			answers.alreadyApplied++
+		default:
+			answers.rejected = append(answers.rejected, r.Result.String())
 		}
 	}
-	l.reject(ctx, op, rejected)
+	l.record(ctx, op, answers)
 	done(err)
 	return results, err
 }
@@ -92,11 +101,23 @@ func (l *Ledger) Balances(ctx context.Context, accountIDs []string) (map[string]
 	return balances, err
 }
 
-// reject counts each non-ok entry under its code and puts the total on the
-// span, where the codes of one particular batch are one click away.
-func (l *Ledger) reject(ctx context.Context, op string, rejected []string) {
-	trace.SpanFromContext(ctx).SetAttributes(keyRejected.Int(len(rejected)))
-	for _, code := range rejected {
+// batchAnswers is how TigerBeetle answered the entries of one batch, other
+// than plainly applying them.
+type batchAnswers struct {
+	// rejected holds the result code of each entry refused on its merits.
+	rejected []string
+	// alreadyApplied counts entries answered "exists": an identical entry had
+	// already landed. The saga treats that as success, because it is how an
+	// at-least-once retry finds its work done, so it is not a rejection; a
+	// redelivery after a restart would otherwise read as a surge of refusals.
+	alreadyApplied int
+}
+
+// record counts each rejected entry under its code, and puts both totals on
+// the span, where one particular batch's answers are one click away.
+func (l *Ledger) record(ctx context.Context, op string, a batchAnswers) {
+	trace.SpanFromContext(ctx).SetAttributes(keyRejected.Int(len(a.rejected)), keyAlreadyApplied.Int(a.alreadyApplied))
+	for _, code := range a.rejected {
 		l.rejections.Add(ctx, 1, metric.WithAttributes(keyOperation.String(op), keyLedgerResult.String(code)))
 	}
 }
@@ -109,11 +130,7 @@ func (l *Ledger) start(ctx context.Context, op string, batchSize int) (context.C
 	)
 	return ctx, func(err error) {
 		outcome := ledgerOutcome(err)
-		span.SetAttributes(keyOutcome.String(outcome))
-		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-		}
+		finish(span, outcome, err)
 		span.End()
 		l.duration.Record(ctx, time.Since(began).Seconds(),
 			metric.WithAttributes(keyOperation.String(op), keyOutcome.String(outcome)))
@@ -121,12 +138,8 @@ func (l *Ledger) start(ctx context.Context, op string, batchSize int) (context.C
 }
 
 func ledgerOutcome(err error) string {
-	switch {
-	case err == nil:
-		return outcomeOK
-	case errors.Is(err, ledger.ErrInvalidRequest):
+	if errors.Is(err, ledger.ErrInvalidRequest) {
 		return outcomeInvalidRequest
-	default:
-		return outcomeError
 	}
+	return baseOutcome(err)
 }

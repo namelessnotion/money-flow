@@ -14,7 +14,11 @@
 package telemetry
 
 import (
+	"context"
+	"errors"
+
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/propagation"
@@ -59,11 +63,40 @@ const (
 )
 
 // Outcomes shared by the decorators. An outcome is what the caller was told;
-// only outcomeError is a failure of the system rather than an answer from it.
+// only outcomeError (and the ledger's outcomeInvalidRequest) is a failure of
+// the system rather than an answer from it.
 const (
 	outcomeOK    = "ok"
 	outcomeError = "error"
+	// outcomeCanceled is a call cut short because its caller stopped waiting,
+	// in practice a shutdown landing mid-step. It is the process being
+	// stopped, not the call failing, and every deploy would otherwise add
+	// error points to the series an alert watches. A missed deadline is not
+	// this: that is a real timeout, and stays an error.
+	outcomeCanceled = "canceled"
 )
+
+// baseOutcome classifies err with none of a decorator's own answers.
+func baseOutcome(err error) string {
+	switch {
+	case err == nil:
+		return outcomeOK
+	case errors.Is(err, context.Canceled):
+		return outcomeCanceled
+	default:
+		return outcomeError
+	}
+}
+
+// finish records outcome on span and, for a fault, the error and an Error
+// status. Everything else, however it went, leaves the status Unset.
+func finish(span trace.Span, outcome string, err error) {
+	span.SetAttributes(keyOutcome.String(outcome))
+	if outcome == outcomeError || outcome == outcomeInvalidRequest {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+}
 
 // durationBuckets suit calls that are usually a few milliseconds and
 // occasionally a second or more: a store round trip, a ledger batch, one

@@ -102,7 +102,8 @@ until something drops it.
   aggregate was going to get.
 - **Where to look.** `docker compose up` starts `lgtm`. Grafana on <http://localhost:3001> shows the
   `money-flow-server` and `money-flow-orchestrator` traces (Tempo), metrics (Prometheus) and logs (Loki). Each
-  delivered trigger is a `saga.handle <aggregate type>` trace, with its store, SQL and ledger calls inside it.
+  attempt at a delivered trigger is a `saga.handle <aggregate type>` trace, with its store, SQL and ledger calls
+  inside it.
   A trace starts afresh at the CDC hop. To get from an RPC to the saga work it caused, search by
   `money_flow.aggregate_id`.
 

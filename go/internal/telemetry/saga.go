@@ -7,69 +7,74 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/namelessnotion/money_flow/go/internal/saga"
 )
 
-type sagaHandler struct {
-	inner    saga.Handler
-	tracer   trace.Tracer
-	duration metric.Float64Histogram
-}
-
-// SagaHandler wraps a saga.Handler so each delivered trigger is one consumer
-// span, with every store and ledger call the saga step makes nested inside it.
+// SagaAttempts observes each attempt saga.Consumer makes to handle a delivered
+// trigger (saga.WithAttemptObserver): every attempt is one consumer span, with
+// every store and ledger call the saga step makes nested inside it.
+//
+// The span is opened by the consumer, around the attempt, rather than by a
+// wrapper around its handler. That way the consumer's own lines about the
+// attempt ("retrying", "handled", and a halt) are logged inside it, and a
+// halt line carries the trace_id of the attempt that failed for good.
 //
 // Each span starts a new trace. The trigger was published by CDC from a
 // committed row, and the trace context of the RPC that wrote the row is not
 // carried through Postgres and Debezium (go/docs/adr/0017). The trigger's
 // aggregate id and global_seq are on the span to link the two by hand.
-//
-// The span covers one attempt. saga.Consumer retries a failed attempt before
-// halting, so a halt is preceded by the failed spans of every attempt.
-func SagaHandler(p Providers, inner saga.Handler) saga.Handler {
+func SagaAttempts(p Providers) saga.AttemptObserver {
 	b := instruments{meter: p.meter()}
-	h := &sagaHandler{
-		inner:  inner,
-		tracer: p.tracer(),
-		duration: b.duration("money_flow.saga.handle.duration",
-			"Time to handle one delivered trigger, by aggregate type, event type and outcome."),
-	}
+	duration := b.duration("money_flow.saga.handle.duration",
+		"Time for one attempt to handle a delivered trigger, by aggregate type, event type and outcome.")
 	b.mustBuild()
-	return h
+	tracer := p.tracer()
+
+	return func(ctx context.Context, t saga.Trigger, attempt int) (context.Context, func(error)) {
+		began := time.Now()
+		ctx, span := tracer.Start(ctx, "saga.handle "+t.AggregateType,
+			trace.WithSpanKind(trace.SpanKindConsumer),
+			trace.WithAttributes(
+				keyAggregateType.String(t.AggregateType),
+				keyAggregateID.String(t.AggregateID),
+				keyEventType.String(t.EventType),
+				attribute.Int64("money_flow.sequence", t.Sequence),
+				attribute.Int64("money_flow.global_seq", t.GlobalSeq),
+				attribute.Int("money_flow.saga.attempt", attempt),
+			),
+		)
+		return ctx, func(err error) {
+			outcome := baseOutcome(err)
+			finish(span, outcome, err)
+			span.End()
+			duration.Record(ctx, time.Since(began).Seconds(), metric.WithAttributes(
+				keyAggregateType.String(t.AggregateType),
+				keyEventType.String(t.EventType),
+				keyOutcome.String(outcome),
+			))
+		}
+	}
 }
 
-func (h *sagaHandler) Handle(ctx context.Context, t saga.Trigger) error {
-	began := time.Now()
-	ctx, span := h.tracer.Start(ctx, "saga.handle "+t.AggregateType,
-		trace.WithSpanKind(trace.SpanKindConsumer),
-		trace.WithAttributes(
-			keyAggregateType.String(t.AggregateType),
-			keyAggregateID.String(t.AggregateID),
-			keyEventType.String(t.EventType),
-			attribute.Int64("money_flow.sequence", t.Sequence),
-			attribute.Int64("money_flow.global_seq", t.GlobalSeq),
-		),
-	)
-	defer span.End()
+// SagaHandler wraps a saga.Handler that is driven directly rather than by a
+// saga.Consumer, as cmd/resume drives one, so each call is observed the same
+// way SagaAttempts observes a consumer's attempt.
+func SagaHandler(p Providers, inner saga.Handler) saga.Handler {
+	return observedHandler{inner: inner, observe: SagaAttempts(p)}
+}
 
+type observedHandler struct {
+	inner   saga.Handler
+	observe saga.AttemptObserver
+}
+
+func (h observedHandler) Handle(ctx context.Context, t saga.Trigger) error {
+	ctx, done := h.observe(ctx, t, 1)
 	err := h.inner.Handle(ctx, t)
-
-	outcome := outcomeOK
-	if err != nil {
-		outcome = outcomeError
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-	}
-	span.SetAttributes(keyOutcome.String(outcome))
-	h.duration.Record(ctx, time.Since(began).Seconds(), metric.WithAttributes(
-		keyAggregateType.String(t.AggregateType),
-		keyEventType.String(t.EventType),
-		keyOutcome.String(outcome),
-	))
+	done(err)
 	return err
 }
 

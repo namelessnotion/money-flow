@@ -44,7 +44,8 @@ func Handler(p Providers, h http.Handler) http.Handler {
 
 // Interceptor opens a span for the Twirp method a call carries, beneath the
 // HTTP span Handler opened, tags it with the aggregate the command addressed,
-// and times the call.
+// and times the call. It is an internal span: the HTTP span is the request's
+// one server span, which is what backends count requests by.
 //
 // It records a twirp.Error's code on every answer but marks the span as failed
 // only for a server fault (a 5xx code). Aborted, NotFound, FailedPrecondition
@@ -65,7 +66,7 @@ func Interceptor(p Providers) twirp.Interceptor {
 			fullService := pkg + "." + service
 
 			ctx, span := tracer.Start(ctx, fullService+"/"+method,
-				trace.WithSpanKind(trace.SpanKindServer),
+				trace.WithSpanKind(trace.SpanKindInternal),
 				trace.WithAttributes(
 					attribute.String("rpc.system", "twirp"),
 					attribute.String("rpc.service", fullService),

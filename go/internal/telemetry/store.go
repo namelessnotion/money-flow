@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
@@ -114,11 +113,7 @@ func (s *Store) start(ctx context.Context, op string, attrs ...attribute.KeyValu
 	)
 	return ctx, func(err error, metricAttrs ...attribute.KeyValue) {
 		outcome := storeOutcome(err)
-		span.SetAttributes(keyOutcome.String(outcome))
-		if outcome == outcomeError {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-		}
+		finish(span, outcome, err)
 		span.End()
 
 		metricAttrs = append(metricAttrs, keyOperation.String(op), keyOutcome.String(outcome))
@@ -128,13 +123,11 @@ func (s *Store) start(ctx context.Context, op string, attrs ...attribute.KeyValu
 
 func storeOutcome(err error) string {
 	switch {
-	case err == nil:
-		return outcomeOK
 	case errors.Is(err, eventstore.ErrConcurrencyConflict):
 		return outcomeConflict
 	case errors.Is(err, eventstore.ErrDuplicateStream):
 		return outcomeDuplicateStream
 	default:
-		return outcomeError
+		return baseOutcome(err)
 	}
 }

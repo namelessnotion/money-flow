@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"testing"
 
@@ -19,18 +20,28 @@ func envOf(vars map[string]string) func(string) string {
 
 func TestConfigFromEnv(t *testing.T) {
 	t.Parallel()
+	type signals struct{ traces, metrics, logs bool }
+	all, none := signals{true, true, true}, signals{}
 	for _, tc := range []struct {
-		name       string
-		env        map[string]string
-		wantExport bool
-		wantLevel  slog.Level
+		name      string
+		env       map[string]string
+		want      signals
+		wantLevel slog.Level
 	}{
-		{"nothing configured", nil, false, slog.LevelInfo},
-		{"an endpoint turns export on", map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://lgtm:4318"}, true, slog.LevelInfo},
+		{"nothing configured", nil, none, slog.LevelInfo},
+		{"the shared endpoint turns every signal on", map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://lgtm:4318"}, all, slog.LevelInfo},
+		// A signal with no endpoint of its own would fall back to
+		// localhost:4318 and fail on every interval.
+		{"a signal's own endpoint turns on only that signal", map[string]string{
+			"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://tempo:4318/v1/traces",
+		}, signals{traces: true}, slog.LevelInfo},
 		{"the SDK kill switch wins", map[string]string{
 			"OTEL_EXPORTER_OTLP_ENDPOINT": "http://lgtm:4318", "OTEL_SDK_DISABLED": "true",
-		}, false, slog.LevelInfo},
-		{"a log level", map[string]string{"LOG_LEVEL": "debug"}, false, slog.LevelDebug},
+		}, none, slog.LevelInfo},
+		{"http/protobuf, stated, is accepted", map[string]string{
+			"OTEL_EXPORTER_OTLP_ENDPOINT": "http://lgtm:4318", "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+		}, all, slog.LevelInfo},
+		{"a log level", map[string]string{"LOG_LEVEL": "debug"}, none, slog.LevelDebug},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -38,8 +49,8 @@ func TestConfigFromEnv(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ConfigFromEnv() error = %v", err)
 			}
-			if cfg.Export != tc.wantExport {
-				t.Errorf("Export = %v, want %v", cfg.Export, tc.wantExport)
+			if got := (signals{cfg.Traces, cfg.Metrics, cfg.Logs}); got != tc.want {
+				t.Errorf("signals exported = %+v, want %+v", got, tc.want)
 			}
 			if cfg.LogLevel != tc.wantLevel {
 				t.Errorf("LogLevel = %v, want %v", cfg.LogLevel, tc.wantLevel)
@@ -48,6 +59,18 @@ func TestConfigFromEnv(t *testing.T) {
 				t.Errorf("ServiceName = %q, want money-flow-test", cfg.ServiceName)
 			}
 		})
+	}
+}
+
+// Only OTLP over HTTP is built. A protocol asking for anything else is
+// refused at startup, not silently answered with HTTP to a gRPC port.
+func TestConfigFromEnv_RefusesAProtocolItDoesNotSpeak(t *testing.T) {
+	t.Parallel()
+	for _, key := range []string{"OTEL_EXPORTER_OTLP_PROTOCOL", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"} {
+		env := map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://lgtm:4317", key: "grpc"}
+		if _, err := telemetry.ConfigFromEnv("money-flow-test", envOf(env)); err == nil {
+			t.Errorf("ConfigFromEnv() error = nil, want one for %s=grpc", key)
+		}
 	}
 }
 
@@ -116,7 +139,8 @@ func TestSetup_WithExportDeliversEverySignalByShutdown(t *testing.T) {
 
 	ctx := context.Background()
 	tel, err := telemetry.Setup(ctx, telemetry.Config{
-		ServiceName: "money-flow-test", Export: true, LogLevel: slog.LevelInfo, LogOutput: &bytes.Buffer{},
+		ServiceName: "money-flow-test", Traces: true, Metrics: true, Logs: true,
+		LogLevel: slog.LevelInfo, LogOutput: &bytes.Buffer{},
 	})
 	if err != nil {
 		t.Fatalf("Setup() error = %v", err)
@@ -134,5 +158,38 @@ func TestSetup_WithExportDeliversEverySignalByShutdown(t *testing.T) {
 		if !sink.paths[path] {
 			t.Errorf("nothing was exported to %s; got %v", path, sink.paths)
 		}
+	}
+}
+
+// A process exporting only traces sends nothing anywhere else, rather than
+// failing every interval against a default endpoint for the rest.
+// Not parallel: the OTLP exporters read their endpoint from the environment.
+func TestSetup_ExportsOnlyTheSignalsConfigured(t *testing.T) {
+	sink := &otlpSink{paths: map[string]bool{}}
+	collector := httptest.NewServer(sink)
+	t.Cleanup(collector.Close)
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", collector.URL+"/v1/traces")
+
+	ctx := context.Background()
+	cfg, err := telemetry.ConfigFromEnv("money-flow-test", os.Getenv)
+	if err != nil {
+		t.Fatalf("ConfigFromEnv() error = %v", err)
+	}
+	cfg.LogOutput = &bytes.Buffer{}
+	tel, err := telemetry.Setup(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Setup() error = %v", err)
+	}
+	ctx, span := tel.Tracer.Tracer("t").Start(ctx, "work")
+	tel.Logger.InfoContext(ctx, "working")
+	span.End()
+	if err := tel.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.paths) != 1 || !sink.paths["/v1/traces"] {
+		t.Errorf("exported to %v, want /v1/traces only", sink.paths)
 	}
 }
