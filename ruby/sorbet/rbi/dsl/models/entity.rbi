@@ -8,9 +8,132 @@
 class Models::Entity
   extend T::Generic
   include GeneratedAttributeMethods
+  include GeneratedAssociationMethods
   extend GeneratedClassMethods
 
   Elem = type_template { { fixed: ::Models::Entity } }
+
+  module GeneratedAssociationMethods
+    sig do
+      params(
+        opts: T::Hash[Symbol, T.untyped],
+        block: T.nilable(T.proc.params(dataset: ::Models::Account::PrivateDataset).returns(::Sequel::Dataset))
+      ).returns(T::Array[::Models::Account])
+    end
+    def accounts(opts = T.unsafe(nil), &block); end
+
+    sig { returns(::Models::Account::PrivateDataset) }
+    def accounts_dataset; end
+
+    sig do
+      params(
+        opts: T::Hash[Symbol, T.untyped],
+        block: T.nilable(T.proc.params(dataset: ::Models::AchTransaction::PrivateDataset).returns(::Sequel::Dataset))
+      ).returns(T::Array[::Models::AchTransaction])
+    end
+    def ach_transactions(opts = T.unsafe(nil), &block); end
+
+    sig { returns(::Models::AchTransaction::PrivateDataset) }
+    def ach_transactions_dataset; end
+
+    sig do
+      params(
+        object: T.any(::Models::Account, T::Hash[Symbol, T.untyped], Integer)
+      ).returns(T.nilable(::Models::Account))
+    end
+    def add_account(object); end
+
+    sig do
+      params(
+        object: T.any(::Models::AchTransaction, T::Hash[Symbol, T.untyped], String)
+      ).returns(T.nilable(::Models::AchTransaction))
+    end
+    def add_ach_transaction(object); end
+
+    sig do
+      params(
+        object: T.any(::Models::Security, T::Hash[Symbol, T.untyped], String)
+      ).returns(T.nilable(::Models::Security))
+    end
+    def add_borrowed_security(object); end
+
+    sig do
+      params(
+        object: T.any(::Models::Security, T::Hash[Symbol, T.untyped], String)
+      ).returns(T.nilable(::Models::Security))
+    end
+    def add_issued_security(object); end
+
+    sig do
+      params(
+        object: T.any(::Models::Subscription, T::Hash[Symbol, T.untyped], String)
+      ).returns(T.nilable(::Models::Subscription))
+    end
+    def add_subscription(object); end
+
+    sig do
+      params(
+        opts: T::Hash[Symbol, T.untyped],
+        block: T.nilable(T.proc.params(dataset: ::Models::Security::PrivateDataset).returns(::Sequel::Dataset))
+      ).returns(T::Array[::Models::Security])
+    end
+    def borrowed_securities(opts = T.unsafe(nil), &block); end
+
+    sig { returns(::Models::Security::PrivateDataset) }
+    def borrowed_securities_dataset; end
+
+    sig do
+      params(
+        opts: T::Hash[Symbol, T.untyped],
+        block: T.nilable(T.proc.params(dataset: ::Models::Security::PrivateDataset).returns(::Sequel::Dataset))
+      ).returns(T::Array[::Models::Security])
+    end
+    def issued_securities(opts = T.unsafe(nil), &block); end
+
+    sig { returns(::Models::Security::PrivateDataset) }
+    def issued_securities_dataset; end
+
+    sig { params(object: T.any(::Models::Account, Integer)).returns(T.nilable(::Models::Account)) }
+    def remove_account(object); end
+
+    sig { params(object: T.any(::Models::AchTransaction, String)).returns(T.nilable(::Models::AchTransaction)) }
+    def remove_ach_transaction(object); end
+
+    sig { returns(T.nilable(T::Array[::Models::Account])) }
+    def remove_all_accounts; end
+
+    sig { returns(T.nilable(T::Array[::Models::AchTransaction])) }
+    def remove_all_ach_transactions; end
+
+    sig { returns(T.nilable(T::Array[::Models::Security])) }
+    def remove_all_borrowed_securities; end
+
+    sig { returns(T.nilable(T::Array[::Models::Security])) }
+    def remove_all_issued_securities; end
+
+    sig { returns(T.nilable(T::Array[::Models::Subscription])) }
+    def remove_all_subscriptions; end
+
+    sig { params(object: T.any(::Models::Security, String)).returns(T.nilable(::Models::Security)) }
+    def remove_borrowed_security(object); end
+
+    sig { params(object: T.any(::Models::Security, String)).returns(T.nilable(::Models::Security)) }
+    def remove_issued_security(object); end
+
+    sig { params(object: T.any(::Models::Subscription, String)).returns(T.nilable(::Models::Subscription)) }
+    def remove_subscription(object); end
+
+    sig do
+      params(
+        opts: T::Hash[Symbol, T.untyped],
+        block: T.nilable(T.proc.params(dataset: ::Models::Subscription::PrivateDataset).returns(::Sequel::Dataset))
+      ).returns(T::Array[::Models::Subscription])
+    end
+    def subscriptions(opts = T.unsafe(nil), &block); end
+
+    sig { returns(::Models::Subscription::PrivateDataset) }
+    def subscriptions_dataset; end
+  end
 
   module GeneratedAttributeMethods
     sig { returns(Time) }

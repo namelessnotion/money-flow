@@ -7,9 +7,9 @@ require_relative 'boot'
 # query when a model class is defined, so this needs a live, migrated database — it
 # isn't a pure load step.
 #
-# Used by spec/spec_helper.rb and by sorbet/tapioca/compilers/sequel_model.rb, which
-# has no other way to make models visible to `gather_constants` (`tapioca dsl` only
-# knows how to boot Rails apps).
+# Used by spec/spec_helper.rb and by sorbet/tapioca/extensions/load_app.rb, which is
+# how the tapioca-sequel compiler gets to see the models (`tapioca dsl` only knows
+# how to boot Rails apps).
 module Environment
   ROOT = File.expand_path('..', __dir__)
 

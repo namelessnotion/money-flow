@@ -1,3 +1,11 @@
+GIT
+  remote: https://github.com/namelessnotion/tapioca-sequel
+  revision: d858074c1cff47b68c654cb22e0755f9c2b934af
+  specs:
+    tapioca-sequel (0.1.0)
+      sequel (~> 5.0)
+      tapioca (~> 0.19)
+
 GEM
   remote: http://rubygems.org/
   specs:
@@ -464,6 +472,7 @@ DEPENDENCIES
   sorbet
   sorbet-runtime
   tapioca
+  tapioca-sequel!
   twirp
   tzinfo
   webrick
