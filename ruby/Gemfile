@@ -31,4 +31,6 @@ group :development, :test do
   gem 'factory_bot'
   gem 'rspec'
   gem 'tapioca', require: false
+  # Types Sequel models for Sorbet; switch to a version once it is on rubygems.
+  gem 'tapioca-sequel', git: 'https://github.com/namelessnotion/tapioca-sequel', require: false
 end

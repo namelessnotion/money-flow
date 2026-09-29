@@ -24,7 +24,7 @@ jobs:
       # No database needed: the DSL RBIs under sorbet/rbi/dsl/ are committed, so
       # this only reads them. Regenerating them (bundle exec tapioca dsl) does
       # need a live migrated Postgres, since defining a Sequel::Model subclass
-      # queries the schema — see sorbet/tapioca/compilers/sequel_model.rb.
+      # queries the schema — see ruby/sorbet/tapioca/extensions/load_app.rb.
       - name: Typecheck
         working-directory: ruby
         run: bundle exec srb tc

@@ -8,9 +8,26 @@
 class Models::ReceivableRecovery
   extend T::Generic
   include GeneratedAttributeMethods
+  include GeneratedAssociationMethods
   extend GeneratedClassMethods
 
   Elem = type_template { { fixed: ::Models::ReceivableRecovery } }
+
+  module GeneratedAssociationMethods
+    sig do
+      params(
+        opts: T::Hash[Symbol, T.untyped],
+        block: T.nilable(T.proc.params(dataset: ::Models::Entity::PrivateDataset).returns(::Sequel::Dataset))
+      ).returns(T.nilable(::Models::Entity))
+    end
+    def entity(opts = T.unsafe(nil), &block); end
+
+    sig { params(value: T.nilable(::Models::Entity)).returns(T.nilable(::Models::Entity)) }
+    def entity=(value); end
+
+    sig { returns(::Models::Entity::PrivateDataset) }
+    def entity_dataset; end
+  end
 
   module GeneratedAttributeMethods
     sig { returns(Integer) }

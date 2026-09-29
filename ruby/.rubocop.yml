@@ -13,21 +13,6 @@ Metrics/BlockLength:
   Exclude:
     - "spec/**/*.rb"
 
-# Tapioca DSL compilers are declarative: they emit one `create_method` call per
-# generated signature. Splitting those lists to satisfy length/ABC metrics makes
-# them harder to read, not easier.
-Metrics/AbcSize:
-  Exclude:
-    - "sorbet/tapioca/compilers/**/*.rb"
-
-Metrics/MethodLength:
-  Exclude:
-    - "sorbet/tapioca/compilers/**/*.rb"
-
-Metrics/ClassLength:
-  Exclude:
-    - "sorbet/tapioca/compilers/**/*.rb"
-
 RSpec/ExampleLength:
   Max: 20
 

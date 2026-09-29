@@ -8,9 +8,50 @@
 class Models::Repayment
   extend T::Generic
   include GeneratedAttributeMethods
+  include GeneratedAssociationMethods
   extend GeneratedClassMethods
 
   Elem = type_template { { fixed: ::Models::Repayment } }
+
+  module GeneratedAssociationMethods
+    sig do
+      params(
+        object: T.any(::Models::Disbursement, T::Hash[Symbol, T.untyped], String)
+      ).returns(T.nilable(::Models::Disbursement))
+    end
+    def add_disbursement(object); end
+
+    sig do
+      params(
+        opts: T::Hash[Symbol, T.untyped],
+        block: T.nilable(T.proc.params(dataset: ::Models::Disbursement::PrivateDataset).returns(::Sequel::Dataset))
+      ).returns(T::Array[::Models::Disbursement])
+    end
+    def disbursements(opts = T.unsafe(nil), &block); end
+
+    sig { returns(::Models::Disbursement::PrivateDataset) }
+    def disbursements_dataset; end
+
+    sig { returns(T.nilable(T::Array[::Models::Disbursement])) }
+    def remove_all_disbursements; end
+
+    sig { params(object: T.any(::Models::Disbursement, String)).returns(T.nilable(::Models::Disbursement)) }
+    def remove_disbursement(object); end
+
+    sig do
+      params(
+        opts: T::Hash[Symbol, T.untyped],
+        block: T.nilable(T.proc.params(dataset: ::Models::Security::PrivateDataset).returns(::Sequel::Dataset))
+      ).returns(T.nilable(::Models::Security))
+    end
+    def security(opts = T.unsafe(nil), &block); end
+
+    sig { params(value: T.nilable(::Models::Security)).returns(T.nilable(::Models::Security)) }
+    def security=(value); end
+
+    sig { returns(::Models::Security::PrivateDataset) }
+    def security_dataset; end
+  end
 
   module GeneratedAttributeMethods
     sig { returns(Date) }

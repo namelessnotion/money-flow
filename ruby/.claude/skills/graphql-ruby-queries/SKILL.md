@@ -202,13 +202,14 @@ typing a parameter or return value as plain `Sequel::Dataset` and then
 calling `.eager` on it fails `srb tc` with real errors like `Method 'eager'
 does not exist on 'Sequel::Dataset'`.
 
-This is solved, not worked around: `sorbet/tapioca/compilers/sequel_model.rb`
-is a custom Tapioca DSL compiler that generates a per-model fictional dataset
-class, `Models::<Model>::PrivateDataset`, with every chainable query method
-(`where`, `select`, `eager`, `order`, ...) typed to take/return that same
-class — so a `.select(...).eager(...)` chain stays fully typed end to end.
-Regenerate it after touching the compiler or adding a chainable method to
-`CHAINABLE`:
+This is solved, not worked around: the `tapioca-sequel` gem
+(github.com/namelessnotion/tapioca-sequel) is a Tapioca DSL compiler that
+generates a per-model fictional dataset class, `Models::<Model>::PrivateDataset`,
+with every chainable query method (`where`, `select`, `eager`, `order`, ...)
+typed to take/return that same class — so a `.select(...).eager(...)` chain
+stays fully typed end to end. It also types association methods
+(`entity.accounts`, `entity.accounts_dataset`, `add_account`, ...). Regenerate
+the RBIs after adding a model, a column, or an association:
 
 ```bash
 bin/tapioca dsl Models::Entity Models::Account

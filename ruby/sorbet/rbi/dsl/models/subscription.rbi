@@ -8,9 +8,40 @@
 class Models::Subscription
   extend T::Generic
   include GeneratedAttributeMethods
+  include GeneratedAssociationMethods
   extend GeneratedClassMethods
 
   Elem = type_template { { fixed: ::Models::Subscription } }
+
+  module GeneratedAssociationMethods
+    sig do
+      params(
+        opts: T::Hash[Symbol, T.untyped],
+        block: T.nilable(T.proc.params(dataset: ::Models::Entity::PrivateDataset).returns(::Sequel::Dataset))
+      ).returns(T.nilable(::Models::Entity))
+    end
+    def investor(opts = T.unsafe(nil), &block); end
+
+    sig { params(value: T.nilable(::Models::Entity)).returns(T.nilable(::Models::Entity)) }
+    def investor=(value); end
+
+    sig { returns(::Models::Entity::PrivateDataset) }
+    def investor_dataset; end
+
+    sig do
+      params(
+        opts: T::Hash[Symbol, T.untyped],
+        block: T.nilable(T.proc.params(dataset: ::Models::Security::PrivateDataset).returns(::Sequel::Dataset))
+      ).returns(T.nilable(::Models::Security))
+    end
+    def security(opts = T.unsafe(nil), &block); end
+
+    sig { params(value: T.nilable(::Models::Security)).returns(T.nilable(::Models::Security)) }
+    def security=(value); end
+
+    sig { returns(::Models::Security::PrivateDataset) }
+    def security_dataset; end
+  end
 
   module GeneratedAttributeMethods
     sig { returns(Integer) }

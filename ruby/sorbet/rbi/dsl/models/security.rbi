@@ -8,9 +8,112 @@
 class Models::Security
   extend T::Generic
   include GeneratedAttributeMethods
+  include GeneratedAssociationMethods
   extend GeneratedClassMethods
 
   Elem = type_template { { fixed: ::Models::Security } }
+
+  module GeneratedAssociationMethods
+    sig do
+      params(
+        opts: T::Hash[Symbol, T.untyped],
+        block: T.nilable(T.proc.params(dataset: ::Models::Account::PrivateDataset).returns(::Sequel::Dataset))
+      ).returns(T::Array[::Models::Account])
+    end
+    def accounts(opts = T.unsafe(nil), &block); end
+
+    sig { returns(::Models::Account::PrivateDataset) }
+    def accounts_dataset; end
+
+    sig do
+      params(
+        object: T.any(::Models::Account, T::Hash[Symbol, T.untyped], Integer)
+      ).returns(T.nilable(::Models::Account))
+    end
+    def add_account(object); end
+
+    sig do
+      params(
+        object: T.any(::Models::Repayment, T::Hash[Symbol, T.untyped], String)
+      ).returns(T.nilable(::Models::Repayment))
+    end
+    def add_repayment(object); end
+
+    sig do
+      params(
+        object: T.any(::Models::Subscription, T::Hash[Symbol, T.untyped], String)
+      ).returns(T.nilable(::Models::Subscription))
+    end
+    def add_subscription(object); end
+
+    sig do
+      params(
+        opts: T::Hash[Symbol, T.untyped],
+        block: T.nilable(T.proc.params(dataset: ::Models::Entity::PrivateDataset).returns(::Sequel::Dataset))
+      ).returns(T.nilable(::Models::Entity))
+    end
+    def borrower(opts = T.unsafe(nil), &block); end
+
+    sig { params(value: T.nilable(::Models::Entity)).returns(T.nilable(::Models::Entity)) }
+    def borrower=(value); end
+
+    sig { returns(::Models::Entity::PrivateDataset) }
+    def borrower_dataset; end
+
+    sig do
+      params(
+        opts: T::Hash[Symbol, T.untyped],
+        block: T.nilable(T.proc.params(dataset: ::Models::Entity::PrivateDataset).returns(::Sequel::Dataset))
+      ).returns(T.nilable(::Models::Entity))
+    end
+    def issuer(opts = T.unsafe(nil), &block); end
+
+    sig { params(value: T.nilable(::Models::Entity)).returns(T.nilable(::Models::Entity)) }
+    def issuer=(value); end
+
+    sig { returns(::Models::Entity::PrivateDataset) }
+    def issuer_dataset; end
+
+    sig { params(object: T.any(::Models::Account, Integer)).returns(T.nilable(::Models::Account)) }
+    def remove_account(object); end
+
+    sig { returns(T.nilable(T::Array[::Models::Account])) }
+    def remove_all_accounts; end
+
+    sig { returns(T.nilable(T::Array[::Models::Repayment])) }
+    def remove_all_repayments; end
+
+    sig { returns(T.nilable(T::Array[::Models::Subscription])) }
+    def remove_all_subscriptions; end
+
+    sig { params(object: T.any(::Models::Repayment, String)).returns(T.nilable(::Models::Repayment)) }
+    def remove_repayment(object); end
+
+    sig { params(object: T.any(::Models::Subscription, String)).returns(T.nilable(::Models::Subscription)) }
+    def remove_subscription(object); end
+
+    sig do
+      params(
+        opts: T::Hash[Symbol, T.untyped],
+        block: T.nilable(T.proc.params(dataset: ::Models::Repayment::PrivateDataset).returns(::Sequel::Dataset))
+      ).returns(T::Array[::Models::Repayment])
+    end
+    def repayments(opts = T.unsafe(nil), &block); end
+
+    sig { returns(::Models::Repayment::PrivateDataset) }
+    def repayments_dataset; end
+
+    sig do
+      params(
+        opts: T::Hash[Symbol, T.untyped],
+        block: T.nilable(T.proc.params(dataset: ::Models::Subscription::PrivateDataset).returns(::Sequel::Dataset))
+      ).returns(T::Array[::Models::Subscription])
+    end
+    def subscriptions(opts = T.unsafe(nil), &block); end
+
+    sig { returns(::Models::Subscription::PrivateDataset) }
+    def subscriptions_dataset; end
+  end
 
   module GeneratedAttributeMethods
     sig { returns(Integer) }

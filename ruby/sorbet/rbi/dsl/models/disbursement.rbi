@@ -8,9 +8,40 @@
 class Models::Disbursement
   extend T::Generic
   include GeneratedAttributeMethods
+  include GeneratedAssociationMethods
   extend GeneratedClassMethods
 
   Elem = type_template { { fixed: ::Models::Disbursement } }
+
+  module GeneratedAssociationMethods
+    sig do
+      params(
+        opts: T::Hash[Symbol, T.untyped],
+        block: T.nilable(T.proc.params(dataset: ::Models::Entity::PrivateDataset).returns(::Sequel::Dataset))
+      ).returns(T.nilable(::Models::Entity))
+    end
+    def investor(opts = T.unsafe(nil), &block); end
+
+    sig { params(value: T.nilable(::Models::Entity)).returns(T.nilable(::Models::Entity)) }
+    def investor=(value); end
+
+    sig { returns(::Models::Entity::PrivateDataset) }
+    def investor_dataset; end
+
+    sig do
+      params(
+        opts: T::Hash[Symbol, T.untyped],
+        block: T.nilable(T.proc.params(dataset: ::Models::Repayment::PrivateDataset).returns(::Sequel::Dataset))
+      ).returns(T.nilable(::Models::Repayment))
+    end
+    def repayment(opts = T.unsafe(nil), &block); end
+
+    sig { params(value: T.nilable(::Models::Repayment)).returns(T.nilable(::Models::Repayment)) }
+    def repayment=(value); end
+
+    sig { returns(::Models::Repayment::PrivateDataset) }
+    def repayment_dataset; end
+  end
 
   module GeneratedAttributeMethods
     sig { returns(Time) }
