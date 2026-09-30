@@ -18,7 +18,7 @@ pinned.
 
 # Alloy
 
-`make alloy-check` runs `spec/alloy/ledger.als` with Alloy 6's command-line `exec`. The jar isn't vendored. Unlike
+`make alloy-check` runs `spec/alloy/dag.als` and `spec/alloy/ledger.als` with Alloy 6's command-line `exec`. The jar isn't vendored. Unlike
 TLC's pre-release, v6.2.0 is a fixed release, so the Makefile fetches it from a pinned URL on first use and checks
 the download's digest.
 

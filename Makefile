@@ -221,7 +221,13 @@ ALLOY_COMMANDS := FundedWithdrawalCanBePaid DrawRollbackNeverFails UnclearedMone
 	FundedWithdrawalCanBePaidBesideRecovery UnclearedMoneyStaysBackedBesideClawback \
 	WithdrawalReturnRecorded DepositClawedBack DebtRecovered
 
+#
+# spec/alloy/dag.als asks whether every Transaction go/ accepts can complete.
+# Every one of its commands carries an `expect`, so they all run. Together
+# they take under two minutes, so they go first.
 alloy-check: $(ALLOY)
+	cd spec/alloy && timeout $(ALLOY_TIMEOUT) java --enable-native-access=ALL-UNNAMED -jar $(ALLOY) \
+		exec -n -f -q -s glucose -t none -o "$$(mktemp -d)" -c '*' dag.als
 	cd spec/alloy && for command in $(ALLOY_COMMANDS); do \
 		timeout $(ALLOY_TIMEOUT) java --enable-native-access=ALL-UNNAMED -jar $(ALLOY) \
 			exec -n -f -q -s glucose -t none -o "$$(mktemp -d)" -c "$$command" ledger.als || exit 1; \
