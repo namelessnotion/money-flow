@@ -7,7 +7,10 @@ services:
     # real development data and must survive this. max_wal_senders and
     # max_replication_slots default to 10 in postgres 17, which is ample for
     # the single slot the connector opens.
-    command: postgres -c wal_level=logical
+    # max_connections is raised from the default 100. The pools sharing this
+    # instance (cmd/server 20, cmd/orchestrator 32, and cmd/simulate's one per
+    # in-flight transaction) already reached 95 at simulate -concurrency 48.
+    command: postgres -c wal_level=logical -c max_connections=200
     environment:
       POSTGRES_USER: money_flow
       POSTGRES_PASSWORD: money_flow
@@ -202,10 +205,13 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
       # More than one partition on purpose: ADR 0001 decision 4 partitions by
       # aggregate_id, and a single-partition topic would make that claim
-      # unfalsifiable. Bumped 3->6 2026-09-19 as a throughput experiment
-      # (more partitions + more cmd/orchestrator replicas); revert to 3 if
-      # it doesn't earn its keep.
-      KAFKA_NUM_PARTITIONS: "6"
+      # unfalsifiable. It is also cmd/orchestrator's parallelism: one saga
+      # worker per partition. At 6, the transfer topic's workers were ~93%
+      # busy and were the ceiling. 24 took simulate (3000 txns, c=48) from
+      # 195 to 291 txn/s on 2026-09-29, leaving the workers ~45% busy.
+      # Kafka can't shrink a topic, and this broker has no volume, so the
+      # count is re-read only when the broker is recreated.
+      KAFKA_NUM_PARTITIONS: "24"
     healthcheck:
       test:
         [

@@ -340,13 +340,14 @@ balance, read back from the event log, matches what its transfers should have
 left, and the total across entities equals what was seeded. Any mismatch is
 printed as one.
 
-Keep `-concurrency` below about 60. The tool gives itself one Postgres
-connection per in-flight transfer, and past Postgres' `max_connections` of
-100, "too many clients" errors are the harness failing, not the system. On a
-Docker Desktop laptop, throughput peaks at around concurrency 48, at roughly
-280 transfers/s in `transfer` mode and 215/s in `transaction` mode. The limit
-there is Postgres syncing its WAL to Docker's disk, not TigerBeetle or the
-orchestrator.
+Keep `-concurrency` below about 130. The tool gives itself one Postgres
+connection per in-flight transfer, alongside the server's 20 and the
+orchestrator's 32. Past the `max_connections` of 200 set in
+`docker-compose.yml`, "too many clients" errors mean the harness failed, not
+the system. On a Docker Desktop laptop with 24 partitions per saga topic,
+`transaction` mode ran at about 270/s at concurrency 48 and about 310/s at 64,
+with p50 around 180ms, and it was still climbing. The orchestrator's transfer
+workers were ~60% busy at 64, so they are not the limit.
 
 ### Market simulation: a lending market
 

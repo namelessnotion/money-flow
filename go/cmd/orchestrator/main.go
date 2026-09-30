@@ -18,7 +18,7 @@
 // accepted. cmd/resume is the out-of-band way to move one aggregate by hand
 // when no trigger will ever arrive for it.
 //
-//	DATABASE_URL=postgres://... DATABASE_MAX_CONNS=16 KAFKA_BROKERS=kafka:9092 \
+//	DATABASE_URL=postgres://... DATABASE_MAX_CONNS=32 KAFKA_BROKERS=kafka:9092 \
 //	TIGERBEETLE_ADDRESS=127.0.0.1:3000 TIGERBEETLE_CLUSTER_ID=0 \
 //	go run ./cmd/orchestrator
 package main
@@ -49,13 +49,14 @@ const (
 	// own default (max(4, runtime.NumCPU())) — see cmd/server's own constant
 	// of the same name for why that matters. This orchestrator handles one
 	// trigger at a time per partition, every partition at once (saga.Consumer),
-	// across both aggregate-type topics — 2 × 6 partitions on the dev topics —
-	// so the pool is sized to let each of those hold a connection with a
-	// little headroom, rather than queueing them behind one another. It stays
-	// below cmd/server's to leave the rest of Postgres's max_connections=100
-	// for it and everything else sharing the instance; raise it with the
-	// partition count.
-	defaultDatabaseMaxConns     = "16"
+	// across both aggregate-type topics — 2 × 24 partitions on the dev topics.
+	// A worker holds a connection only for its event-store calls, not across
+	// its TigerBeetle ones, so 48 workers need far fewer than 48: at 28 they
+	// waited ~0.1s in total over a saturated 3000-transaction run (2026-09-29).
+	// 32 keeps that margin without crowding the rest of Postgres's
+	// max_connections=200 in docker-compose.yml; raise it with the partition
+	// count.
+	defaultDatabaseMaxConns     = "32"
 	defaultKafkaBrokers         = "localhost:9092"
 	defaultTigerBeetleAddress   = "127.0.0.1:3000"
 	defaultTigerBeetleClusterID = "0"

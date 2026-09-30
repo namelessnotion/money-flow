@@ -42,8 +42,8 @@ const (
 	// anything chosen for this workload — see go/cmd/simulate's -mode=transfer
 	// vs -mode=transaction throughput comparison, which found it capping
 	// RPC-driven saga throughput well below what Postgres could otherwise
-	// sustain. 20 leaves headroom under Postgres's own default
-	// max_connections=100 for the orchestrator, ruby, ruby-consumer and the
+	// sustain. 20 leaves headroom under docker-compose.yml's
+	// max_connections=200 for the orchestrator, ruby, ruby-consumer and the
 	// resque workers to share the same instance; raise it per environment via
 	// DATABASE_MAX_CONNS rather than editing this default.
 	defaultDatabaseMaxConns     = "20"
