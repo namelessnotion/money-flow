@@ -1,4 +1,9 @@
-# Business backend
+# Example business backend
+
+This context is **an example of building on MoneyFlow**, not part of it. MoneyFlow is `go/` and its published
+language in `proto/`. This backend is a marketplace that integrates the way any business would: through
+MoneyFlow's Twirp services and its published events, and nothing else. The terms below (ACH Transaction,
+Security, Subscription, …) belong to this example's marketplace, not to MoneyFlow.
 
 Ruby holds the business side of money flow: who the entities are, what they asked for, and a read model of
 what the ledger did about it. It asks Go to *accept* work and learns what became of it from the published

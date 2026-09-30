@@ -1,7 +1,8 @@
 # Money Flow client
 
-Vue 3 and TypeScript client for the Ruby GraphQL API. Apollo Client sends
-requests to `/graphql`.
+Vue 3 and TypeScript client for the Ruby GraphQL API. Like `ruby/`, it is part
+of the example application built on MoneyFlow, not part of MoneyFlow itself.
+Apollo Client sends requests to `/graphql`.
 
 Start the Ruby server first:
 

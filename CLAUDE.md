@@ -4,13 +4,15 @@
 
 ## Project Structure
 
-- `go/` - "financial transaction system" - Contains the backend system written in Go. An event sourced architecture is used to handle the intent of money flow, backed by Tigger Beatle database to handing the low level accounting at a Token level. Event log is append-only and immutable, stored in PostgreSQL single table. Protobuf is used to define the domain command and event messages as well as the exposed twirp services.
+MoneyFlow is `go/` plus its published contract in `proto/`. `ruby/` and `client/` are **not part of MoneyFlow**. They are an example application showing how a business builds on it, and they stay in the repo as the reference integration. Don't put MoneyFlow behavior in the example. If the example needs something MoneyFlow can't do, change `go/`/`proto/` so any integrator gets it.
 
-- `ruby/` - "business backend" - Contains the business backend system written in Ruby. Exposed via GraphQL, services to handle the business logic of money flow with the `go/` backend. The Ruby backend is responsible for handling the business logic and orchestrating the flow of money between different entities. Sequel is used as the ORM to interact with the PostgreSQL database.
+- `go/` - "MoneyFlow" - The tokenized transaction system, written in Go. An event sourced architecture is used to handle the intent of money flow, backed by TigerBeetle for the low-level accounting at the Token level. The event log is append-only and immutable, stored in a single PostgreSQL table. Its only interfaces are the Twirp services and the events it publishes (via CDC to Kafka).
 
-- `client/` - "business front end" - Contains the frontend system written in VueJS. The frontend is responsible for providing a user interface for users to interact with the money flow system. It communicates with the Ruby backend via GraphQL to perform various operations related to money flow. VueJS 3 is used along with Apollo Client 4. TailwindCSS is used for styling the frontend components. Apollo Client Composables are used to handle GraphQL queries and mutations in a reactive way and manage the state of the application.
+- `proto/` - MoneyFlow's published language: the Protobuf domain command and event messages and the Twirp services. It is the contract an integrator builds against. It generates Go code, and Ruby code for the example.
 
-- `proto/` - Contains the Protobuf definitions for the domain command and event messages as well as the exposed twirp services. The Protobuf files are used to generate code for both the Go and Ruby backends.
+- `ruby/` - "example business backend" - An example of building on MoneyFlow, written in Ruby: a marketplace with ACH and a securities lending market, exposed via GraphQL. It starts work only through MoneyFlow's Twirp services and learns outcomes only from its published events, the way any integrator would. Sequel is used as the ORM against PostgreSQL.
+
+- `client/` - "example front end" - The Vue front end for the Ruby example, talking to it via GraphQL. VueJS 3 with Apollo Client 4 and its composables for reactive queries, mutations and state; TailwindCSS for styling.
 
 ## Coding
 
@@ -48,4 +50,4 @@ Default label vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `read
 
 ### Domain docs
 
-Multi-context layout: `CONTEXT-MAP.md` at the root, with a `CONTEXT.md` + `docs/adr/` per context (`go/`, `ruby/`, `client/`); `proto/` is the shared published language between `go/` and `ruby/`, not its own context. See `docs/agents/domain.md`.
+Multi-context layout: `CONTEXT-MAP.md` at the root, with a `CONTEXT.md` + `docs/adr/` per context (`go/`, `ruby/`, `client/`). `go/` is MoneyFlow. `ruby/` and `client/` are the example application built on it. `proto/` is MoneyFlow's published language, which the example consumes; it is not its own context. See `docs/agents/domain.md`.

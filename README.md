@@ -5,69 +5,147 @@
 
 Event sourced tokenized transaction system
 
-MoneyFlow moves money between the parties of a marketplace and can prove
-where every cent went. It is split into two backends with one job each:
+MoneyFlow moves money between Wallets and can prove where every cent went.
+It is the Go backend in [`go/`](go/) and its published contract in
+[`proto/`](proto/):
 
-- **Go records what money is meant to do and does it.** Every command becomes
-  an immutable event in an append-only PostgreSQL log, and sagas turn those
-  events into double-entry token movements in
+- **It records what money is meant to do, then does it.** Every command
+  becomes an immutable event in an append-only PostgreSQL log, and sagas turn
+  those events into double-entry Token movements in
   [TigerBeetle](https://tigerbeetle.com). Nothing is updated in place, and
   every balance can be rebuilt from the log.
-- **Ruby decides what the business wants.** Onboarding, ACH deposits and
-  withdrawals, and a real-estate lending market (Securities that Investors buy
-  in fractions, draw to Borrowers, and repay with interest) are orchestrated
-  here and exposed over GraphQL.
+- **Money is held as Tokens, not as one balance per Wallet.** See
+  [Why tokenize money](#why-tokenize-money) for what that buys and what it
+  costs.
 
-A Vue client renders the result, including a graph that replays every
-Movement of money in the order it completed.
+The rest of the repository is **an example of building on MoneyFlow**, not
+part of it. [`ruby/`](ruby/) is a business backend for a marketplace: it
+onboards entities, moves money over ACH, and runs a real-estate lending market
+(Securities that Investors buy in fractions, draw to Borrowers, and repay with
+interest), exposed over GraphQL. [`client/`](client/) is a Vue front end for
+that example, including a graph that replays every Movement of money in the
+order it completed. Neither is needed to run MoneyFlow. Together they show how
+a business drives it only through its Twirp services and published events.
 
 [![Watch the money flow graph replay a simulated lending market](https://img.youtube.com/vi/LfLltacbiTA/maxresdefault.jpg)](https://www.youtube.com/watch?v=LfLltacbiTA)
 
-_The money flow graph replaying a [lending market simulation](#market-simulation-a-lending-market)
+_The example app's money flow graph replaying a [lending market simulation](#market-simulation-a-lending-market)
 ([watch on YouTube](https://www.youtube.com/watch?v=LfLltacbiTA)): Investors →
 Securities → Borrowers, and back with interest._
 
+## Why tokenize money
+
+A Wallet in MoneyFlow owns many **Tokens**, and each Token is its own
+TigerBeetle account. Every incoming Transfer mints at least one new Token in
+the destination Wallet. A Transfer pays out by spending existing Tokens in the
+source Wallet, oldest first. Each movement from a source Token to a
+destination Token is one **Leg**, which is exactly one TigerBeetle transfer.
+A Wallet's balance is the sum of its Tokens' balances.
+
+These Tokens are units of a private double-entry ledger, not tokens in the
+DeFi sense. No chain is involved, a Token has no bearer or key, and only
+MoneyFlow can move one.
+
+What this buys:
+
+- **A Transaction can undo its own work without racing anyone.** A Token is
+  tagged with the Transaction that minted it. While that Transaction is still
+  open, other callers can't select the Token as a source
+  ([`wallet.TokensOfVisibleTo`](go/internal/wallet/tokens.go)). If the saga
+  has to roll back, the money it moved is still exactly where it left it. With
+  a single pooled balance per Wallet, an unrelated debit could spend that money
+  before the compensation ran. This is what makes asynchronous rollback and
+  reversal workable
+  ([go ADR 0002](go/docs/adr/0002-asynchronous-rollback-and-reversal-reconciliation.md)).
+- **Every Transfer records which money moved where.** The event log holds
+  "this Token → that Token, this amount" for each Leg, not just
+  "Wallet A −100, Wallet B +100". Reversals are exact because they void or
+  reverse specific Legs rather than recomputing a figure.
+- **The ledger enforces rules on each unit of money.** A Wallet's `Allows`
+  setting becomes TigerBeetle account flags on every Token it owns
+  ([`token.AllowsToAccountFlags`](go/internal/token/allows.go)). For example,
+  a Token that must not overdraw can't be debited past what was minted into it.
+  TigerBeetle refuses the write, not application code
+  ([ruby ADR 0006](ruby/docs/adr/0006-security-supply-is-ledger-enforced.md)
+  uses this to cap a Security's supply).
+- **Lineage is available if you need it.** Spending oldest-first, with every
+  Leg linking a source Token to a destination Token, lets you trace money back
+  to where it came from. You could, for example, attribute an ACH return to
+  the spends it funded, or report the source of funds. Nothing uses this yet.
+  It is an option the model keeps open.
+
+What it costs:
+
+- **Fragmentation.** Each incoming Transfer adds a Token, and each outgoing
+  one needs a Leg for every Token it spends. A Wallet that collects many small
+  payments, such as an escrow, pays out in very wide Transfers
+  ([go ADR 0008](go/docs/adr/0008-transfer-legs-span-ledger-batches.md) exists
+  because one reached 276 Legs).
+- **Selection cost grows with history.** Choosing source Tokens reads every
+  Token the Wallet has ever held
+  ([`selectSourceTokens`](go/internal/transfer/manifest.go)), and nothing
+  retires spent ones yet.
+- **Balances are sums.** A Wallet's balance is derived from its Tokens' balances,
+  published per Token as `TokenBalanceRecorded`, rather than stored once.
+
+Consolidation would bound both costs. That means periodically merging a
+Wallet's settled Tokens, when no open Transaction holds them, into one Token.
+It stays lineage-safe if it merges only money that has reached finality, or
+if the merged Token records its lots in order so later spends can still be
+attributed. This isn't built yet.
+
 ## Status
 
-Early, but money moves end to end through the real stack:
+Early, but money moves end to end through the real stack.
 
-- Onboarding an `Entity` in Ruby provisions a `Holder` and its `Wallet`s in Go
-  over Twirp, recorded as immutable events. Each entity has a Role: `investor`,
-  `borrower` or `issuer`.
-- An **ACH deposit or withdrawal** started from GraphQL runs in Go as a two-leg
+MoneyFlow (`go/`):
+
+- **Holders, Wallets, Tokens, Transfers and Transactions** are exposed over
+  Twirp and recorded as immutable events. A Transaction runs a DAG of
+  Transfers. A Transfer can be staged as pending, then posted or voided, and a
+  failed Transaction rolls back what it did.
+- Events are published to Kafka by Debezium (CDC), and the orchestrator
+  drives every saga forward from them.
+- A **benchmark** loads the backend over Twirp and checks the ledger balances
+  afterwards.
+
+The example (`ruby/` and `client/`):
+
+- Onboarding an `Entity` provisions a `Holder` and its `Wallet`s in MoneyFlow.
+  Each entity has a Role: `investor`, `borrower` or `issuer`.
+- An **ACH deposit or withdrawal** started from GraphQL runs as a two-leg
   Transaction: a staged real leg that waits on the ACH network, and a shadow
   leg that follows it. Settlement and returns are reported through GraphQL,
   standing in for an ACH provider. Deposits clear on a scheduled sweep.
 - **Securities** go through their whole life: an Issuer offers one, Investors
   subscribe in fractions (the ledger itself refuses oversubscription), it is
   drawn to its Borrower, repaid with simple interest, and disbursed pro rata
-  to its holders. Each step is its own Go Transaction.
-- Go's events are published to Kafka by Debezium (CDC). The Go orchestrator
-  drives sagas forward from them, and a Ruby consumer folds them into a read
-  model that GraphQL serves.
-- Two simulations exercise all of this: a **benchmark** that loads the Go
-  backend and checks the ledger balances afterwards, and a **lending market**
-  that plays out months of Investor and Borrower activity through GraphQL's
-  own services and replays it as a graph.
+  to its holders. Each step is its own MoneyFlow Transaction.
+- A consumer folds MoneyFlow's published events into a read model that
+  GraphQL serves.
+- A **lending market simulation** plays out months of Investor and Borrower
+  activity through the example's own services, and the client replays it as a
+  graph.
 
 See [docs/ach-transactions.md](docs/ach-transactions.md) for the ACH flow and
-[ruby/CONTEXT.md](ruby/CONTEXT.md) for the securities vocabulary.
+[ruby/CONTEXT.md](ruby/CONTEXT.md) for the example's securities vocabulary.
 
 ## Structure
 
 ```
-proto/    Protobuf domain messages and Twirp service definitions, shared by go/ and ruby/
-go/       Event-sourced token based transaction backend (Go + Twirp), backed by TigerBeetle for accounting
-ruby/     Business backend (Ruby + GraphQL), orchestrates money flow via the go/ backend
-client/   Frontend (Vue 3 + Apollo Client 4 + TailwindCSS), talks to ruby/ over GraphQL
+proto/    MoneyFlow's published language: Protobuf domain messages and Twirp service definitions
+go/       MoneyFlow: event-sourced, token-based transaction backend (Go + Twirp), backed by TigerBeetle
+ruby/     Example: a business backend (Ruby + GraphQL) that drives MoneyFlow
+client/   Example: a front end (Vue 3 + Apollo Client 4 + TailwindCSS) for ruby/, over GraphQL
 docker/   Dockerfiles and entrypoints for each service, wired together by docker-compose.yml
 ```
 
 ### `proto/`
 
-Domain command/event messages and Twirp service definitions
-(`holder`, `wallet`, `token`, `transaction`, `transfer`, `operation`,
-`shared`), compiled to both Go and Ruby with `bin/generate_protos.sh`.
+Domain command/event messages and Twirp service definitions (`holder`,
+`wallet`, `token`, `transaction`, `transfer`, `shared`): the contract a
+business integrates against. Compiled to Go, and to Ruby for the example, with
+`bin/generate_protos.sh`.
 
 ### `go/`
 
@@ -82,11 +160,14 @@ directly on `:8080` or via the proxy at `https://rpc.local.namelessnotion.com`.
 [benchmark](#benchmark-simulation-go-under-load). Decisions:
 [go/docs/adr](go/docs/adr).
 
-### `ruby/`
+### `ruby/` (example)
 
-Business backend. Exposes GraphQL (`app/graphql`) backed by Sequel models
-(`app/models`) over PostgreSQL, and orchestrates money-flow operations
-(`app/services`) by calling the `go/` backend over Twirp. Runs on Falcon,
+An example business backend built on MoneyFlow. It is the reference for
+integrating: it starts work only through MoneyFlow's Twirp services and learns
+the outcome only from its published events. Its business logic lives in
+`app/services`, which calls MoneyFlow over Twirp. It exposes GraphQL
+(`app/graphql`) over Sequel models (`app/models`) in PostgreSQL, and runs on
+Falcon,
 reachable directly on `:9292` or via the proxy at
 `https://graphql.local.namelessnotion.com`. `bin/consumer` reads the published
 events into a lagging read model (`app/consumer`,
@@ -94,9 +175,9 @@ events into a lagging read model (`app/consumer`,
 [market simulation](#market-simulation-a-lending-market). Vocabulary:
 [ruby/CONTEXT.md](ruby/CONTEXT.md).
 
-### `client/`
+### `client/` (example)
 
-Vue 3 + TypeScript SPA. Apollo Client (via `@vue/apollo-composable`) queries
+Vue 3 + TypeScript SPA for the example. Apollo Client (via `@vue/apollo-composable`) queries
 the Ruby GraphQL API; TailwindCSS for styling. Pages for entities and their
 ACH Transactions, and `/money-flow`, the replayable graph of where money went
 (Cytoscape). Served by Vite, reachable directly on `:5173` or via the proxy at
@@ -197,7 +278,8 @@ make cdc-down
 
 ## Running an ACH Transaction end to end
 
-With the stack and the event pipeline up (`make up`, then
+This walkthrough goes through the example's GraphQL API, which drives
+MoneyFlow underneath. With the stack and the event pipeline up (`make up`, then
 `make cdc-up orchestrator-up consumer-up jobs-up` — **all four**, see above),
 drive a deposit through GraphQL at
 `http://localhost:9292/graphql`. The snippets need `curl` and
