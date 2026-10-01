@@ -20,7 +20,9 @@ services:
     volumes:
       - money_flow_postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U money_flow"]
+      # -d matters: without it pg_isready defaults the database name to the
+      # user, and every 5s probe logs a FATAL for the nonexistent "money_flow".
+      test: ["CMD-SHELL", "pg_isready -U money_flow -d money_flow_dev"]
       interval: 5s
       timeout: 5s
       retries: 10
