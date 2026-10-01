@@ -2,7 +2,7 @@ name: Claude Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
+    types: [labeled]
     # Optional: Only run on specific file changes
     # paths:
     #   - "src/**/*.ts"
@@ -12,6 +12,12 @@ on:
 
 jobs:
   claude-review:
+    # Review on demand: only when namelessnotion adds the ready-for-review
+    # label. Remove and re-add the label to review new commits.
+    if: |
+      github.event.label.name == 'ready-for-review' &&
+      github.actor == 'namelessnotion'
+
     # Optional: Filter by PR author
     # if: |
     #   github.event.pull_request.user.login == 'external-contributor' ||
