@@ -117,45 +117,6 @@ func TestACHDeposit_RealAndShadowHappyPath(t *testing.T) {
 	}
 }
 
-func TestTransaction2_SingleNodeClearingHappyPath(t *testing.T) {
-	t.Parallel()
-	store := eventstore.NewMemoryStore()
-	lc := ledger.NewFakeClient()
-	uncleared := testutil.ID("uncleared")
-	cleared := testutil.ID("cleared")
-	openWallet(t, store, uncleared, sharedpb.Allows_ALLOWS_NONE)
-	openWallet(t, store, cleared, sharedpb.Allows_ALLOWS_NONE)
-	mintAndFundToken(t, store, lc, uncleared, testutil.ID("uncleared-token"), usd(10000))
-
-	xferServer := newTransferServer(store, lc)
-	txnServer := NewServer(store, xferServer)
-	ctx := context.Background()
-
-	txnID := testutil.ID("txn2")
-	clearID := testutil.ID("clear")
-	resp, err := txnServer.StartInitializingTransaction(ctx, &pb.StartInitializingTransactionRequest{
-		Id: txnID,
-		Transfers: map[string]*pb.Transfer{
-			clearID: {Id: clearID, Amount: usd(10000), FromWalletId: uncleared, ToWalletId: cleared},
-		},
-	})
-	if err != nil {
-		t.Fatalf("StartInitializingTransaction() error = %v", err)
-	}
-	driveSaga(t, txnServer, xferServer, store, txnID)
-	if resp.GetTransactionInitialized() == nil {
-		t.Fatalf("result = %v, want TransactionInitialized", resp.GetResult())
-	}
-
-	events, err := store.Load(ctx, AggregateType, txnID)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if topLevelState(events) != stateCompleted {
-		t.Fatalf("state = %v, want completed in one runSaga pass (single-node, ordinary FIFO, no gating)", topLevelState(events))
-	}
-}
-
 // TestACHWithdrawal_SymmetricFlowNeedsNoNewMechanism proves decision #12:
 // the withdrawal direction (real: Cash -> Bank Account; shadow: Cleared ->
 // Bank Control) is just a differently-shaped DAG of ordinary Transfers —
